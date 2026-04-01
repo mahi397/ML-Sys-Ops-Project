@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. No one-off scripts.
+are selected via config.
 
 Usage:
   # Run with a config file
@@ -291,9 +291,9 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     val_ds = WindowDataset(val_texts, val_labels, tokenizer, cfg["max_seq_len"])
     test_ds = WindowDataset(test_texts, test_labels, tokenizer, cfg["max_seq_len"])
 
-    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"] * 2, num_workers=4)
-    test_loader = DataLoader(test_ds, batch_size=cfg["batch_size"] * 2, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"] * 2, num_workers=2)
+    test_loader = DataLoader(test_ds, batch_size=cfg["batch_size"] * 2, num_workers=2)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -415,6 +415,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                      f"loss={epoch_metrics['train_loss']:.4f} | "
                      f"val_f1={val_f1:.4f} | "
                      f"time={epoch_time:.1f}s")
+            print(f"Epoch {epoch}/{cfg['epochs']} | loss={epoch_metrics['train_loss']:.4f} | val_f1={val_f1:.4f}", flush=True)
 
             # Early stopping + checkpoint
             if val_f1 > best_val_f1 or epoch == 1:
