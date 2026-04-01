@@ -64,6 +64,13 @@ def load_config(config_path: str, overrides: Dict) -> Dict:
         with open(config_path) as f:
             cfg.update(yaml.safe_load(f))
     cfg.update({k: v for k, v in overrides.items() if v is not None})
+    # Ensure numeric types are correct — YAML sometimes reads scientific notation as str
+    for key in ("lr", "weight_decay", "warmup_ratio", "dropout", "feedback_weight"):
+        if key in cfg and cfg[key] is not None:
+            cfg[key] = float(cfg[key])
+    for key in ("batch_size", "epochs", "max_seq_len", "early_stopping_patience"):
+        if key in cfg and cfg[key] is not None:
+            cfg[key] = int(cfg[key])
     return cfg
 
 
