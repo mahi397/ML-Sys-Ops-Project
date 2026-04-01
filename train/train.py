@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. No one-off scripts.
+are selected via config. 
 
 Usage:
   # Run with a config file
@@ -118,7 +118,8 @@ def run_baseline(cfg: Dict, run_id_holder: list):
 
     pipe = Pipeline([
         ("tfidf", TfidfVectorizer(max_features=50000, ngram_range=(1, 2))),
-        ("clf", LogisticRegression(max_iter=1000, C=cfg.get("C", 1.0))),
+        ("clf", LogisticRegression(max_iter=1000, C=cfg.get("C", 1.0),
+                                   class_weight="balanced")),
     ])
 
     t0 = time.time()
@@ -129,12 +130,12 @@ def run_baseline(cfg: Dict, run_id_holder: list):
     test_preds = pipe.predict(test_texts)
 
     metrics = {
-        "val_f1": f1_score(val_labels, val_preds),
-        "val_precision": precision_score(val_labels, val_preds),
-        "val_recall": recall_score(val_labels, val_preds),
-        "test_f1": f1_score(test_labels, test_preds),
-        "test_precision": precision_score(test_labels, test_preds),
-        "test_recall": recall_score(test_labels, test_preds),
+        "val_f1": f1_score(val_labels, val_preds, zero_division=0),
+        "val_precision": precision_score(val_labels, val_preds, zero_division=0),
+        "val_recall": recall_score(val_labels, val_preds, zero_division=0),
+        "test_f1": f1_score(test_labels, test_preds, zero_division=0),
+        "test_precision": precision_score(test_labels, test_preds, zero_division=0),
+        "test_recall": recall_score(test_labels, test_preds, zero_division=0),
         "total_training_time_sec": train_time,
         "gpu_used": 0,
     }
@@ -148,7 +149,7 @@ def run_baseline(cfg: Dict, run_id_holder: list):
                             "max_features": 50000})
         log_environment()
         mlflow.log_metrics(metrics)
-        mlflow.sklearn.log_model(pipe, name="model")
+        mlflow.sklearn.log_model(pipe, artifact_path="model")
         log.info(f"Baseline val F1: {metrics['val_f1']:.4f}")
 
     return metrics
@@ -365,9 +366,9 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                     val_preds.extend(preds)
                     val_true.extend(batch["labels"].numpy())
 
-            val_f1 = f1_score(val_true, val_preds)
-            val_prec = precision_score(val_true, val_preds)
-            val_rec = recall_score(val_true, val_preds)
+            val_f1 = f1_score(val_true, val_preds, zero_division=0)
+            val_prec = precision_score(val_true, val_preds, zero_division=0)
+            val_rec = recall_score(val_true, val_preds, zero_division=0)
             seg_metrics = compute_segmentation_metrics(val_true, val_preds)
 
             epoch_metrics = {
@@ -415,9 +416,9 @@ def run_roberta(cfg: Dict, run_id_holder: list):
         test_seg_metrics = compute_segmentation_metrics(test_true, test_preds)
 
         final_metrics = {
-            "test_f1": round(f1_score(test_true, test_preds), 4),
-            "test_precision": round(precision_score(test_true, test_preds), 4),
-            "test_recall": round(recall_score(test_true, test_preds), 4),
+            "test_f1": round(f1_score(test_true, test_preds, zero_division=0), 4),
+            "test_precision": round(precision_score(test_true, test_preds, zero_division=0), 4),
+            "test_recall": round(recall_score(test_true, test_preds, zero_division=0), 4),
             "best_val_f1": round(best_val_f1, 4),
             "total_training_time_sec": round(total_train_time, 1),
             **{f"test_{k}": v for k, v in test_seg_metrics.items()},
@@ -431,7 +432,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                  f"WindowDiff: {final_metrics.get('test_window_diff', '?')}")
 
         # Log model + tokenizer as MLflow artifact
-        mlflow.pytorch.log_model(model, name="model",
+        mlflow.pytorch.log_model(model, artifact_path="model",
                                   pip_requirements=["transformers==4.40.0", "torch==2.2.0"])
         tokenizer.save_pretrained(os.path.join(cfg["output_dir"], "tokenizer"))
         mlflow.log_artifacts(os.path.join(cfg["output_dir"], "tokenizer"),
