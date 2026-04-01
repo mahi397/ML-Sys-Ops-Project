@@ -96,11 +96,12 @@ def load_jsonl(path: str):
 
 
 def load_split(data_dir: str, split: str):
-    """Load a JSONL split and return (texts, labels)."""
+    """Load a JSONL split and return (texts, labels, meeting_ids)."""
     examples = load_jsonl(os.path.join(data_dir, f"{split}.jsonl"))
     texts = [format_window(e["window"]) for e in examples]
     labels = [e["label"] for e in examples]
-    return texts, labels
+    meeting_ids = [e["meeting_id"] for e in examples]
+    return texts, labels, meeting_ids
 
 
 # ── Baseline: TF-IDF + Logistic Regression ────────────────────────────────────
@@ -112,9 +113,9 @@ def run_baseline(cfg: Dict, run_id_holder: list):
     from sklearn.metrics import f1_score, precision_score, recall_score
 
     log.info("Running TF-IDF + Logistic Regression baseline")
-    train_texts, train_labels = load_split(cfg["data_dir"], "train")
-    val_texts, val_labels = load_split(cfg["data_dir"], "val")
-    test_texts, test_labels = load_split(cfg["data_dir"], "test")
+    train_texts, train_labels, _ = load_split(cfg["data_dir"], "train")
+    val_texts, val_labels, val_meeting_ids = load_split(cfg["data_dir"], "val")
+    test_texts, test_labels, test_meeting_ids = load_split(cfg["data_dir"], "test")
 
     pipe = Pipeline([
         ("tfidf", TfidfVectorizer(max_features=50000, ngram_range=(1, 2))),
@@ -139,7 +140,7 @@ def run_baseline(cfg: Dict, run_id_holder: list):
         "total_training_time_sec": train_time,
         "gpu_used": 0,
     }
-    metrics.update(compute_segmentation_metrics(val_labels, val_preds))
+    metrics.update(compute_segmentation_metrics(val_labels, val_preds, val_meeting_ids))
 
     with mlflow.start_run(run_name="baseline-tfidf-lr") as run:
         run_id_holder.append(run.info.run_id)
@@ -160,34 +161,55 @@ def run_baseline(cfg: Dict, run_id_holder: list):
 # WindowDiff penalizes off-by-one boundary placement, Pk measures probability
 # of misclassifying a pair of utterances as in the same/different segment.
 
-def compute_segmentation_metrics(true_labels, pred_labels, k=None):
+def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
     """
-    Compute WindowDiff and Pk for predicted boundary sequences.
-    Both operate on the full sequence of 0/1 labels for a meeting.
-    Here we compute corpus-level averages across all windows.
+    Compute WindowDiff and Pk averaged across meetings.
+    Both metrics must be computed per meeting then averaged — computing them
+    on the concatenated corpus sequence is incorrect because meeting boundaries
+    are not real topic boundaries and corrupt the window-based calculations.
     Lower is better for both.
     """
     try:
         import nltk
         nltk.download("punkt", quiet=True)
-        from nltk.metrics.segmentation import windowdiff, pk
+        from nltk.metrics.segmentation import windowdiff, pk as pk_metric
     except ImportError:
-        log.warning("nltk not installed — skipping WindowDiff/Pk. pip install nltk")
+        log.warning("nltk not installed — skipping WindowDiff/Pk.")
         return {"window_diff": -1.0, "pk": -1.0}
 
-    # Convert list of labels to boundary strings for nltk ("0"/"1")
-    ref = "".join(str(l) for l in true_labels)
-    hyp = "".join(str(l) for l in pred_labels)
-    if k is None:
+    if meeting_ids is None:
+        # No meeting grouping available — skip rather than compute incorrectly
+        log.warning("No meeting_ids provided — skipping WindowDiff/Pk.")
+        return {"window_diff": -1.0, "pk": -1.0}
+
+    # Group labels by meeting
+    from collections import defaultdict
+    meeting_true = defaultdict(list)
+    meeting_pred = defaultdict(list)
+    for mid, t, p in zip(meeting_ids, true_labels, pred_labels):
+        meeting_true[mid].append(t)
+        meeting_pred[mid].append(p)
+
+    wd_scores, pk_scores = [], []
+    for mid in meeting_true:
+        ref = "".join(str(l) for l in meeting_true[mid])
+        hyp = "".join(str(l) for l in meeting_pred[mid])
+        if len(ref) < 4:
+            continue  # too short for meaningful segmentation metrics
         k = max(2, len(ref) // 10)
+        try:
+            wd_scores.append(windowdiff(ref, hyp, k=k, boundary="1"))
+            pk_scores.append(pk_metric(ref, hyp, k=k, boundary="1"))
+        except Exception as e:
+            log.warning(f"Segmentation metric error for {mid}: {e}")
 
-    try:
-        wd = windowdiff(ref, hyp, k=k, boundary="1")
-        p = pk(ref, hyp, k=k, boundary="1")
-        return {"window_diff": round(wd, 4), "pk": round(p, 4)}
-    except Exception as e:
-        log.warning(f"Segmentation metric error: {e}")
+    if not wd_scores:
         return {"window_diff": -1.0, "pk": -1.0}
+
+    return {
+        "window_diff": round(float(np.mean(wd_scores)), 4),
+        "pk": round(float(np.mean(pk_scores)), 4),
+    }
 
 
 # ── Environment logging ────────────────────────────────────────────────────────
@@ -254,9 +276,9 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
     log.info("Loading and tokenizing data...")
-    train_texts, train_labels = load_split(cfg["data_dir"], "train")
-    val_texts, val_labels = load_split(cfg["data_dir"], "val")
-    test_texts, test_labels = load_split(cfg["data_dir"], "test")
+    train_texts, train_labels, _ = load_split(cfg["data_dir"], "train")
+    val_texts, val_labels, val_meeting_ids = load_split(cfg["data_dir"], "val")
+    test_texts, test_labels, test_meeting_ids = load_split(cfg["data_dir"], "test")
 
     train_ds = WindowDataset(train_texts, train_labels, tokenizer, cfg["max_seq_len"])
     val_ds = WindowDataset(val_texts, val_labels, tokenizer, cfg["max_seq_len"])
@@ -371,7 +393,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
             val_f1 = f1_score(val_true, val_preds, zero_division=0)
             val_prec = precision_score(val_true, val_preds, zero_division=0)
             val_rec = recall_score(val_true, val_preds, zero_division=0)
-            seg_metrics = compute_segmentation_metrics(val_true, val_preds)
+            seg_metrics = compute_segmentation_metrics(val_true, val_preds, val_meeting_ids)
 
             epoch_metrics = {
                 "train_loss": round(train_loss / len(train_loader), 4),
@@ -415,7 +437,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                 test_probs.extend(probs)
 
         total_train_time = time.time() - total_train_start
-        test_seg_metrics = compute_segmentation_metrics(test_true, test_preds)
+        test_seg_metrics = compute_segmentation_metrics(test_true, test_preds, test_meeting_ids)
 
         final_metrics = {
             "test_f1": round(f1_score(test_true, test_preds, zero_division=0), 4),
