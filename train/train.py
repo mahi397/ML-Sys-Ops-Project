@@ -292,7 +292,31 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     val_ds = WindowDataset(val_texts, val_labels, tokenizer, cfg["max_seq_len"])
     test_ds = WindowDataset(test_texts, test_labels, tokenizer, cfg["max_seq_len"])
 
-    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, num_workers=2)
+    # ── Oversample minority class via WeightedRandomSampler ───────────────────
+    # CrossEntropyLoss with class weights fails for severe imbalance (40:1)
+    # because the transformer's softmax output collapses to the majority class
+    # before loss weighting can compensate. Oversampling ensures each batch
+    # has a balanced mix of boundaries and non-boundaries, which is far more
+    # effective for transformers than loss reweighting alone.
+    # Target ratio: ~1:4 boundary:non-boundary per batch (not 1:1, which
+    # overcorrects and makes the model too aggressive about predicting boundaries)
+    n_pos = sum(train_labels)
+    n_neg = len(train_labels) - n_pos
+    oversample_ratio = cfg.get("oversample_ratio", 4.0)  # non-boundary per boundary
+    sample_weights = [oversample_ratio if l == 0 else 1.0 * (n_neg / n_pos / oversample_ratio)
+                      for l in train_labels]
+    # Simpler: weight each sample inversely to its class frequency, then scale
+    sample_weights = [1.0 / n_neg if l == 0 else 1.0 / n_pos for l in train_labels]
+    from torch.utils.data import WeightedRandomSampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+    log.info(f"Class imbalance: {n_pos} pos / {n_neg} neg → using WeightedRandomSampler")
+
+    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"],
+                              sampler=sampler, num_workers=2)
     val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"] * 2, num_workers=2)
     test_loader = DataLoader(test_ds, batch_size=cfg["batch_size"] * 2, num_workers=2)
 
@@ -320,17 +344,8 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"Trainable parameters: {n_trainable:,}")
 
-    # ── Class weights for imbalanced data ─────────────────────────────────────
-    # AMI corpus is ~2.4% boundary / 97.6% non-boundary.
-    # Without weighting, the model learns to predict "no boundary" always
-    # and gets high accuracy but near-zero F1 on the boundary class.
-    # We raise the cap to 40 (actual ratio) to give the loss enough signal.
-    n_pos = sum(train_labels)
-    n_neg = len(train_labels) - n_pos
-    pos_weight = min(n_neg / max(n_pos, 1), 40.0)
-    class_weights = torch.tensor([1.0, pos_weight], dtype=torch.float).to(device)
-    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
-    log.info(f"Class imbalance: {n_pos} pos / {n_neg} neg → pos_weight={pos_weight:.1f}")
+    # Standard loss — class balance handled by WeightedRandomSampler above
+    loss_fn = torch.nn.CrossEntropyLoss()
 
     # ── Optimizer / scheduler ─────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
@@ -362,7 +377,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
 
         # Log all config params
         mlflow.log_params(cfg)
-        mlflow.log_params({"n_trainable_params": n_trainable, "pos_weight": round(pos_weight, 2)})
+        mlflow.log_params({"n_trainable_params": n_trainable})
         log_environment()
         mlflow.log_param("git_sha", os.environ.get("GIT_SHA", "unknown"))
 
