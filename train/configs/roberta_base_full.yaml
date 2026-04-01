@@ -4,14 +4,14 @@
 # "Quality" candidate in the manager table.
 model_name: roberta-base
 freeze_backbone: false
-lr: 2e-5          # standard fine-tuning LR for RoBERTa
+lr: 5e-5
 batch_size: 16
-epochs: 5
+epochs: 8
 warmup_ratio: 0.1
 weight_decay: 0.01
 max_seq_len: 256
 dropout: 0.1
-early_stopping_patience: 2
+early_stopping_patience: 3
 data_dir: /data/ami_processed
 output_dir: /artifacts/models
 experiment_name: jitsi-topic-segmentation
