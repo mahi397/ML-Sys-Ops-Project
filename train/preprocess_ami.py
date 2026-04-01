@@ -2,7 +2,7 @@
 preprocess_ami.py  —  AMI corpus → sliding-window training examples
 
 Decisions:
-  - Download via ami-corpus Python package or manual wget from corpus mirror
+  - Download via manual wget from corpus annotations
   - Window size = 7, transition_index always = 3 (centered design)
   - Split strictly by meeting_id (not by example) → 70/15/15
     This prevents any utterance from the same meeting leaking across splits,
@@ -299,7 +299,9 @@ def build_windows(utterances: List[Dict], segments: List[Dict], meeting_id: str)
                 for w in window
             ],
             "transition_index": TRANSITION_IDX,
-            "meeting_offset_seconds": window[0]["t_start"],
+            "meeting_offset_seconds": next(
+                w["t_start"] for w in window if w["text"].strip()
+            ),
             # Label is training-only — not in the serving input schema
             "label": label,
         }
