@@ -287,6 +287,18 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"Trainable parameters: {n_trainable:,}")
 
+    # ── Class weights for imbalanced data ─────────────────────────────────────
+    # AMI corpus is ~2.4% boundary / 97.6% non-boundary.
+    # Without weighting, the model learns to predict "no boundary" always
+    # and gets high accuracy but near-zero F1 on the boundary class.
+    # Weight = n_negative / n_positive ≈ 40x, capped at 20 to avoid instability.
+    n_pos = sum(train_labels)
+    n_neg = len(train_labels) - n_pos
+    pos_weight = min(n_neg / max(n_pos, 1), 20.0)
+    class_weights = torch.tensor([1.0, pos_weight], dtype=torch.float).to(device)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+    log.info(f"Class imbalance: {n_pos} pos / {n_neg} neg → pos_weight={pos_weight:.1f}")
+
     # ── Optimizer / scheduler ─────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -317,7 +329,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
 
         # Log all config params
         mlflow.log_params(cfg)
-        mlflow.log_params({"n_trainable_params": n_trainable})
+        mlflow.log_params({"n_trainable_params": n_trainable, "pos_weight": round(pos_weight, 2)})
         log_environment()
 
         for epoch in range(1, cfg["epochs"] + 1):
@@ -331,8 +343,8 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["labels"].to(device)
 
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                loss = loss_fn(outputs.logits, labels)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
