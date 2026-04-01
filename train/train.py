@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config.
+are selected via config. No one-off scripts.
 
 Usage:
   # Run with a config file
@@ -156,6 +156,7 @@ def run_baseline(cfg: Dict, run_id_holder: list):
         mlflow.log_params({"C": cfg.get("C", 1.0), "ngram_range": "1,2",
                             "max_features": 50000})
         log_environment()
+        mlflow.log_param("git_sha", os.environ.get("GIT_SHA", "unknown"))
         mlflow.log_metrics(metrics)
         mlflow.sklearn.log_model(pipe, artifact_path="model")
         log.info(f"Baseline val F1: {metrics['val_f1']:.4f}")
@@ -323,10 +324,10 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     # AMI corpus is ~2.4% boundary / 97.6% non-boundary.
     # Without weighting, the model learns to predict "no boundary" always
     # and gets high accuracy but near-zero F1 on the boundary class.
-    # Weight = n_negative / n_positive ≈ 40x, capped at 20 to avoid instability.
+    # We raise the cap to 40 (actual ratio) to give the loss enough signal.
     n_pos = sum(train_labels)
     n_neg = len(train_labels) - n_pos
-    pos_weight = min(n_neg / max(n_pos, 1), 20.0)
+    pos_weight = min(n_neg / max(n_pos, 1), 40.0)
     class_weights = torch.tensor([1.0, pos_weight], dtype=torch.float).to(device)
     loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
     log.info(f"Class imbalance: {n_pos} pos / {n_neg} neg → pos_weight={pos_weight:.1f}")
@@ -363,6 +364,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
         mlflow.log_params(cfg)
         mlflow.log_params({"n_trainable_params": n_trainable, "pos_weight": round(pos_weight, 2)})
         log_environment()
+        mlflow.log_param("git_sha", os.environ.get("GIT_SHA", "unknown"))
 
         for epoch in range(1, cfg["epochs"] + 1):
             model.train()
@@ -418,16 +420,20 @@ def run_roberta(cfg: Dict, run_id_holder: list):
             print(f"Epoch {epoch}/{cfg['epochs']} | loss={epoch_metrics['train_loss']:.4f} | val_f1={val_f1:.4f}", flush=True)
 
             # Early stopping + checkpoint
+            # Don't count patience epochs where val_f1=0 — the model hasn't
+            # started predicting positives yet, so it's not meaningful to stop.
             if val_f1 > best_val_f1 or epoch == 1:
                 if val_f1 > best_val_f1:
                     best_val_f1 = val_f1
                     patience_counter = 0
-                else:
+                elif val_f1 > 0.0:
                     patience_counter += 1
                 torch.save(model.state_dict(), best_model_path)
                 log.info(f"  → Checkpoint saved (val_f1={val_f1:.4f})")
             else:
-                patience_counter += 1
+                if val_f1 > 0.0:
+                    patience_counter += 1
+                torch.save(model.state_dict(), best_model_path)  # always keep latest
                 if patience_counter >= cfg["early_stopping_patience"]:
                     log.info(f"Early stopping at epoch {epoch}")
                     break
