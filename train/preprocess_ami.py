@@ -29,6 +29,7 @@ import json
 import os
 import re
 import random
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple
@@ -48,62 +49,187 @@ def clean_text(text: str) -> str:
     return text
 
 
-# ── AMI parsing ───────────────────────────────────────────────────────────────
-# The AMI corpus distributes word-level XML annotation files.
-# We use the pre-built ami-corpus pip package which gives us a clean Python API.
-# If you have the raw XML, swap this section for your own parser.
+# ── AMI XML parsing ───────────────────────────────────────────────────────────
+# Parses raw AMI corpus XML files directly — no pip package needed.
+#
+# AMI XML structure:
+#   words/ES2002a.A.words.xml  — word-level tokens per speaker, with starttime/endtime
+#   topics/ES2002a.topic.xml   — topic segments, each referencing word ID ranges
+#
+# Utterance grouping strategy:
+#   The words XML has no utterance boundaries — it's word-level only.
+#   We group consecutive words from the same speaker into utterances using a
+#   silence gap threshold of 1.0s. If the gap between two consecutive words
+#   from the same speaker exceeds 1.0s, we start a new utterance.
+#   This matches how Jigasi produces utterances in the live system.
+#
+# Topic boundary strategy:
+#   Each <topic> in the topics XML references word ID ranges via <nite:child>.
+#   We extract the first word ID of each topic (= first word of that segment)
+#   and look up its timestamp. That timestamp is the segment boundary.
+#   is_boundary() checks whether utt_b starts within 2s of any segment boundary.
+
+import xml.etree.ElementTree as ET
+
+NITE_NS = "http://nite.sourceforge.net/"
+SILENCE_GAP = 1.0  # seconds gap between words → new utterance
+
+
+def _parse_words_xml(path: str) -> List[Dict]:
+    """
+    Parse one speaker's words XML file.
+    Returns list of word dicts: {word_id, text, t_start, t_end, punc}
+    Skips punctuation-only tokens and vocalsound elements.
+    """
+    tree = ET.parse(path)
+    root = tree.getroot()
+    words = []
+    for elem in root:
+        tag = elem.tag.split("}")[-1]  # strip namespace
+        if tag != "w":
+            continue  # skip vocalsound, gap, etc.
+        if elem.get("punc") == "true":
+            continue  # skip punctuation tokens
+        t_start = elem.get("starttime")
+        t_end = elem.get("endtime")
+        if t_start is None or t_end is None:
+            continue
+        words.append({
+            "word_id": elem.get(f"{{{NITE_NS}}}id"),
+            "text": (elem.text or "").strip(),
+            "t_start": float(t_start),
+            "t_end": float(t_end),
+        })
+    return words
+
+
+def _group_into_utterances(words: List[Dict], speaker: str, meeting_id: str) -> List[Dict]:
+    """
+    Group word-level tokens into utterances by silence gap.
+    Gap > SILENCE_GAP seconds between consecutive words → new utterance.
+    """
+    if not words:
+        return []
+    utterances = []
+    current_words = [words[0]]
+    for w in words[1:]:
+        if w["t_start"] - current_words[-1]["t_end"] > SILENCE_GAP:
+            utterances.append(current_words)
+            current_words = [w]
+        else:
+            current_words.append(w)
+    utterances.append(current_words)
+
+    result = []
+    for grp in utterances:
+        text = " ".join(w["text"] for w in grp if w["text"])
+        text = clean_text(text)
+        if len(text) < MIN_CHARS:
+            continue
+        result.append({
+            "meeting_id": meeting_id,
+            "speaker": speaker,
+            "t_start": round(grp[0]["t_start"], 3),
+            "t_end": round(grp[-1]["t_end"], 3),
+            "text": text,
+        })
+    return result
+
+
+def _parse_topic_boundaries(topic_xml_path: str, ami_dir: str) -> List[Dict]:
+    """
+    Parse the topics XML to extract topic segment start times.
+    Each <topic> has <nite:child> elements referencing word ID ranges.
+    We find the first word of each topic and look up its timestamp.
+
+    Returns list of {t_start, t_end} dicts (one per topic boundary).
+    t_start = timestamp of first word of this topic.
+    t_end   = timestamp of last word of this topic (approximate).
+    """
+    tree = ET.parse(topic_xml_path)
+    root = tree.getroot()
+    meeting_id = Path(topic_xml_path).name.replace(".topic.xml", "")
+
+    # Build a word_id → timestamp lookup from all speaker word files
+    word_times = {}  # word_id → t_start
+    words_dir = Path(ami_dir) / "words"
+    for wfile in words_dir.glob(f"{meeting_id}.*.words.xml"):
+        wtree = ET.parse(wfile)
+        wroot = wtree.getroot()
+        for elem in wroot:
+            tag = elem.tag.split("}")[-1]
+            if tag != "w":
+                continue
+            wid = elem.get(f"{{{NITE_NS}}}id")
+            t = elem.get("starttime")
+            if wid and t:
+                word_times[wid] = float(t)
+
+    segments = []
+    child_tag = f"{{{NITE_NS}}}child"
+
+    for topic in root.findall("topic"):
+        # Collect all word IDs referenced by this topic's <nite:child> elements
+        topic_word_ids = []
+        for child in topic.findall(child_tag):
+            href = child.get("href", "")
+            # href format: "ES2002a.B.words.xml#id(ES2002a.B.words74)..id(ES2002a.B.words192)"
+            # or single:   "ES2002a.B.words.xml#id(ES2002a.B.words275)"
+            ids = re.findall(r"id\(([^)]+)\)", href)
+            topic_word_ids.extend(ids)
+
+        # Get timestamps for all referenced word IDs
+        times = [word_times[wid] for wid in topic_word_ids if wid in word_times]
+        if not times:
+            continue
+        segments.append({
+            "t_start": round(min(times), 3),
+            "t_end": round(max(times), 3),
+        })
+
+    # Sort by t_start
+    segments.sort(key=lambda s: s["t_start"])
+    return segments
+
 
 def load_ami_meeting(meeting_id: str, ami_dir: str) -> Tuple[List[Dict], List[Dict]]:
     """
-    Load utterances and topic segments for one AMI meeting.
+    Load utterances and topic segments for one AMI meeting by parsing
+    the raw AMI XML files directly.
 
     Returns:
-        utterances: list of dicts with keys meeting_id, speaker, t_start, t_end, text
-        segments:   list of dicts with keys t_start, t_end (topic segment boundaries)
-
-    NOTE: If you are using the raw AMI XML files directly, replace the body of
-    this function with your XML parser. The return schema must stay the same.
-    The ami-corpus package (pip install ami-corpus) abstracts this away.
+        utterances: list of dicts {meeting_id, speaker, t_start, t_end, text}
+                    sorted by t_start, filtered by MIN_CHARS
+        segments:   list of dicts {t_start, t_end} — one per topic segment
     """
-    try:
-        from ami_corpus import Meeting  # pip install ami-corpus
-        m = Meeting(meeting_id, corpus_dir=ami_dir)
-        utterances = []
-        for utt in m.utterances:
-            text = clean_text(utt.text)
-            if len(text) < MIN_CHARS:
-                continue
-            utterances.append({
-                "meeting_id": meeting_id,
-                "speaker": utt.speaker,
-                "t_start": round(utt.t_start, 3),
-                "t_end": round(utt.t_end, 3),
-                "text": text,
-            })
-        segments = [{"t_start": s.t_start, "t_end": s.t_end} for s in m.topic_segments]
-        return utterances, segments
+    ami_dir = Path(ami_dir)
+    words_dir = ami_dir / "words"
+    topics_dir = ami_dir / "topics"
 
-    except ImportError:
-        # Fallback: load from pre-parsed JSON files if ami_corpus package unavailable.
-        # Place one JSON file per meeting in ami_dir/parsed/<meeting_id>.json with
-        # keys "utterances" and "segments".
-        parsed_path = Path(ami_dir) / "parsed" / f"{meeting_id}.json"
-        with open(parsed_path) as f:
-            data = json.load(f)
-        utterances = []
-        for utt in data["utterances"]:
-            text = clean_text(utt["text"])
-            if len(text) < MIN_CHARS:
-                continue
-            utterances.append({
-                "meeting_id": meeting_id,
-                "speaker": utt["speaker"],
-                "t_start": round(utt["t_start"], 3),
-                "t_end": round(utt["t_end"], 3),
-                "text": text,
-            })
-        segments = data["segments"]
-        return utterances, segments
+    topic_xml = topics_dir / f"{meeting_id}.topic.xml"
+    if not topic_xml.exists():
+        raise FileNotFoundError(f"No topic file for {meeting_id}: {topic_xml}")
+
+    # Parse all speaker word files for this meeting
+    all_utterances = []
+    for wfile in sorted(words_dir.glob(f"{meeting_id}.*.words.xml")):
+        # Extract speaker letter from filename: ES2002a.A.words.xml → A
+        parts = wfile.name.split(".")
+        speaker = parts[1]  # index 1 is the speaker letter
+        words = _parse_words_xml(str(wfile))
+        utts = _group_into_utterances(words, speaker, meeting_id)
+        all_utterances.extend(utts)
+
+    if not all_utterances:
+        raise ValueError(f"No utterances parsed for {meeting_id}")
+
+    # Sort all utterances by start time (interleave speakers chronologically)
+    all_utterances.sort(key=lambda u: u["t_start"])
+
+    # Parse topic boundaries
+    segments = _parse_topic_boundaries(str(topic_xml), str(ami_dir))
+
+    return all_utterances, segments
 
 
 def is_boundary(utt_a: Dict, utt_b: Dict, segments: List[Dict]) -> int:
