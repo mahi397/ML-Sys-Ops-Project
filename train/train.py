@@ -417,11 +417,14 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                      f"time={epoch_time:.1f}s")
 
             # Early stopping + checkpoint
-            if val_f1 > best_val_f1:
-                best_val_f1 = val_f1
-                patience_counter = 0
+            if val_f1 > best_val_f1 or epoch == 1:
+                if val_f1 > best_val_f1:
+                    best_val_f1 = val_f1
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
                 torch.save(model.state_dict(), best_model_path)
-                log.info(f"  → New best val F1 {best_val_f1:.4f}, checkpoint saved")
+                log.info(f"  → Checkpoint saved (val_f1={val_f1:.4f})")
             else:
                 patience_counter += 1
                 if patience_counter >= cfg["early_stopping_patience"]:
