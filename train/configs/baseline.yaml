@@ -1,0 +1,10 @@
+# configs/baseline.yaml
+# Candidate: TF-IDF + Logistic Regression
+# Purpose: simple baseline — establishes the performance floor.
+# Fast (CPU, <5 min), useful for sanity-checking the data pipeline.
+model_name: baseline
+C: 1.0
+data_dir: /data/ami_processed
+output_dir: /artifacts/models
+experiment_name: jitsi-topic-segmentation
+seed: 42
