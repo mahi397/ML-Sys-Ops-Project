@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. 
+are selected via config. No one-off scripts.
 
 Usage:
   # Run with a config file
@@ -168,6 +168,8 @@ def compute_segmentation_metrics(true_labels, pred_labels, k=None):
     Lower is better for both.
     """
     try:
+        import nltk
+        nltk.download("punkt", quiet=True)
         from nltk.metrics.segmentation import windowdiff, pk
     except ImportError:
         log.warning("nltk not installed — skipping WindowDiff/Pk. pip install nltk")
