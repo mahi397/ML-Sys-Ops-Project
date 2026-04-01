@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir \
     pandas==2.2.2 \
     pyyaml==6.0.1 \
     tqdm==4.66.4 \
-    accelerate==0.30.0
+    accelerate==0.30.0 \
+    nltk==3.8.1
 
 COPY . /app
 
