@@ -1,0 +1,63 @@
+# docker-compose.yml  —  Local testing only.
+# On Chameleon, run containers manually with docker run (bare metal nodes
+# don't support compose by default, but you can install it).
+#
+# Usage:
+#   docker-compose up -d mlflow           # start MLflow first
+#   docker-compose run --rm train         # one training run
+#   docker-compose up -d jupyter          # interactive dev
+
+version: "3.9"
+
+services:
+
+  # MLflow tracking server (mirrors the Chameleon setup for local testing)
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    ports:
+      - "8000:8000"
+    volumes:
+      - mlflow-data:/mlflow
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 8000
+        --backend-store-uri sqlite:////mlflow/mlflow.db
+        --default-artifact-root /mlflow/artifacts
+    environment:
+      MLFLOW_TRACKING_URI: http://localhost:8000
+
+  # Training container
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:8000
+    volumes:
+      - /data/ami_processed:/data/ami_processed:ro
+      - /artifacts:/artifacts
+    depends_on:
+      - mlflow
+    # Override CMD to run a specific config:
+    # docker-compose run --rm train --config configs/roberta_base_full.yaml
+    command: ["--config", "configs/baseline.yaml"]
+
+  # Interactive development
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8888:8888"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:8000
+    volumes:
+      - .:/app
+      - /data:/data
+      - /artifacts:/artifacts
+    depends_on:
+      - mlflow
+
+volumes:
+  mlflow-data:

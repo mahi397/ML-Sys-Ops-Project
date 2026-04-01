@@ -1,356 +1,466 @@
+"""
+train.py  —  Single configurable training script for topic boundary detection.
+
+All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
+are selected via config. No one-off scripts.
+
+Usage:
+  # Run with a config file
+  python train.py --config configs/roberta_base_frozen.yaml
+
+  # Override individual params on CLI
+  python train.py --config configs/roberta_base_frozen.yaml --lr 3e-5 --epochs 3
+
+  # Baseline (no GPU needed)
+  python train.py --config configs/baseline.yaml
+
+MLflow tracking:
+  Set MLFLOW_TRACKING_URI env var to your Chameleon MLflow instance before running.
+  export MLFLOW_TRACKING_URI=http://<floating-ip>:8000
+"""
+
 import argparse
 import json
 import os
 import time
-import torch
+import yaml
+import logging
+import platform
+from pathlib import Path
+from typing import Dict, Any
+
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
-from transformers import RobertaTokenizer, RobertaForSequenceClassification
-from torch.optim import AdamW
-from transformers import get_linear_schedule_with_warmup
-from sklearn.metrics import f1_score, precision_score, recall_score
-from nltk.metrics.segmentation import pk, windowdiff
-from datetime import datetime
+import mlflow
+import mlflow.sklearn
+import mlflow.pytorch
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 
-# ---------- args ----------
+# ── Config loading ─────────────────────────────────────────────────────────────
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--data_dir", default="data")
-    p.add_argument("--model_name", default="roberta-base")
-    p.add_argument("--max_length", type=int, default=256)
-    p.add_argument("--batch_size", type=int, default=16)
-    p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--epochs", type=int, default=15)
-    p.add_argument("--k", type=int, default=7)
-    p.add_argument("--pos_weight", type=float, default=20.0)
-    p.add_argument("--freeze_encoder", action="store_true", default=False)
-    p.add_argument("--patience", type=int, default=3)
-    p.add_argument("--output_dir", default="checkpoints")
-    return p.parse_args()
+DEFAULT_CONFIG = {
+    "model_name": "roberta-base",      # or "distilroberta-base", "roberta-large", "baseline"
+    "freeze_backbone": False,           # True = train head only
+    "lr": 2e-5,
+    "batch_size": 16,
+    "epochs": 5,
+    "warmup_ratio": 0.1,
+    "weight_decay": 0.01,
+    "max_seq_len": 256,
+    "dropout": 0.1,
+    "early_stopping_patience": 2,      # stop if val F1 doesn't improve for N epochs
+    "data_dir": "/data/ami_processed", # path to JSONL splits from preprocess_ami.py
+    "output_dir": "/artifacts/models",
+    "experiment_name": "jitsi-topic-segmentation",
+    "seed": 42,
+}
 
 
-# ---------- dataset ----------
+def load_config(config_path: str, overrides: Dict) -> Dict:
+    cfg = DEFAULT_CONFIG.copy()
+    if config_path:
+        with open(config_path) as f:
+            cfg.update(yaml.safe_load(f))
+    cfg.update({k: v for k, v in overrides.items() if v is not None})
+    return cfg
 
-class WindowDataset(Dataset):
-    def __init__(self, path, tokenizer, max_length, k=7):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.k = k
-        self.samples = []
-        with open(path) as f:
-            for line in f:
-                self.samples.append(json.loads(line))
 
-    def format_window(self, window):
+# ── Tokenization — must be IDENTICAL to serving code ──────────────────────────
+# Decision: speaker tag format [SPEAKER_X] is stored as a separate "speaker"
+# field in the JSON so if we change the format (e.g. to <speaker=A>), we only
+# change this function and the serving mirror — the JSON contract is unchanged.
+
+def format_window(window: list) -> str:
     """
-    For any k, take k utterances centered on transition_index.
-    For k=7: positions 0-6 (3 before, transition, 3 after)
-    For k=5: positions 1-5 (2 before, transition, 2 after)
-    For k=3: positions 2-4 (1 before, transition, 1 after)
+    Convert a 7-utterance window to the string fed to RoBERTa.
+    Format: "[SPEAKER_A]: text [SPEAKER_B]: text ..."
+    Empty utterances (padding) are skipped.
     """
-    sorted_utts = sorted(window, key=lambda x: x["position"])
-    total = len(sorted_utts)  # always 7 in the JSON
-    center = total // 2       # always 3
-
-    half = self.k // 2
-    start = center - half
-    end = center + half + (self.k % 2)  # handles odd k correctly
-    selected = sorted_utts[start:end]
-
     parts = []
-    for utt in selected:
-        if not utt["text"]:
-            continue
-        if utt["speaker"]:
-            speaker_tag = f"[SPEAKER_{utt['speaker']}]:"
-        else:
-            speaker_tag = "[PAD]:"
-        parts.append(f"{speaker_tag} {utt['text']}")
+    for utt in sorted(window, key=lambda u: u["position"]):
+        if utt["text"].strip():
+            parts.append(f"[SPEAKER_{utt['speaker']}]: {utt['text']}")
     return " ".join(parts)
 
-    def __len__(self):
-        return len(self.samples)
 
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-        text = self.format_window(sample["window"])
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
-        )
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "label": torch.tensor(sample["label"], dtype=torch.long),
-            "meeting_id": sample["meeting_id"]
-        }
+# ── Data loading ───────────────────────────────────────────────────────────────
+
+def load_jsonl(path: str):
+    examples = []
+    with open(path) as f:
+        for line in f:
+            examples.append(json.loads(line))
+    return examples
 
 
-# ---------- segmentation metrics ----------
+def load_split(data_dir: str, split: str):
+    """Load a JSONL split and return (texts, labels)."""
+    examples = load_jsonl(os.path.join(data_dir, f"{split}.jsonl"))
+    texts = [format_window(e["window"]) for e in examples]
+    labels = [e["label"] for e in examples]
+    return texts, labels
 
-def compute_seg_metrics(labels, preds, meeting_ids):
-    meetings = {}
-    for mid, label, pred in zip(meeting_ids, labels, preds):
-        if mid not in meetings:
-            meetings[mid] = {"labels": [], "preds": []}
-        meetings[mid]["labels"].append(label)
-        meetings[mid]["preds"].append(pred)
 
-    pk_scores, wd_scores = [], []
-    for mid, data in meetings.items():
-        ref = "".join(str(l) for l in data["labels"])
-        hyp = "".join(str(p) for p in data["preds"])
-        if len(ref) < 2:
-            continue
-        k_val = max(2, len(ref) // 10)
-        try:
-            pk_scores.append(pk(ref, hyp, k=k_val))
-            wd_scores.append(windowdiff(ref, hyp, k=k_val))
-        except Exception:
-            pass
+# ── Baseline: TF-IDF + Logistic Regression ────────────────────────────────────
 
-    return {
-        "pk": float(np.mean(pk_scores)) if pk_scores else 1.0,
-        "windowdiff": float(np.mean(wd_scores)) if wd_scores else 1.0
+def run_baseline(cfg: Dict, run_id_holder: list):
+    from sklearn.pipeline import Pipeline
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import f1_score, precision_score, recall_score
+
+    log.info("Running TF-IDF + Logistic Regression baseline")
+    train_texts, train_labels = load_split(cfg["data_dir"], "train")
+    val_texts, val_labels = load_split(cfg["data_dir"], "val")
+    test_texts, test_labels = load_split(cfg["data_dir"], "test")
+
+    pipe = Pipeline([
+        ("tfidf", TfidfVectorizer(max_features=50000, ngram_range=(1, 2))),
+        ("clf", LogisticRegression(max_iter=1000, C=cfg.get("C", 1.0))),
+    ])
+
+    t0 = time.time()
+    pipe.fit(train_texts, train_labels)
+    train_time = time.time() - t0
+
+    val_preds = pipe.predict(val_texts)
+    test_preds = pipe.predict(test_texts)
+
+    metrics = {
+        "val_f1": f1_score(val_labels, val_preds),
+        "val_precision": precision_score(val_labels, val_preds),
+        "val_recall": recall_score(val_labels, val_preds),
+        "test_f1": f1_score(test_labels, test_preds),
+        "test_precision": precision_score(test_labels, test_preds),
+        "test_recall": recall_score(test_labels, test_preds),
+        "total_training_time_sec": train_time,
+        "gpu_used": 0,
     }
+    metrics.update(compute_segmentation_metrics(val_labels, val_preds))
+
+    with mlflow.start_run(run_name="baseline-tfidf-lr") as run:
+        run_id_holder.append(run.info.run_id)
+        mlflow.log_params({k: v for k, v in cfg.items()
+                           if k in ("model_name", "epochs", "seed")})
+        mlflow.log_params({"C": cfg.get("C", 1.0), "ngram_range": "1,2",
+                            "max_features": 50000})
+        log_environment()
+        mlflow.log_metrics(metrics)
+        mlflow.sklearn.log_model(pipe, name="model")
+        log.info(f"Baseline val F1: {metrics['val_f1']:.4f}")
+
+    return metrics
 
 
-# ---------- train ----------
+# ── Segmentation metrics (WindowDiff and Pk) ──────────────────────────────────
+# These are standard topic segmentation metrics beyond binary F1.
+# WindowDiff penalizes off-by-one boundary placement, Pk measures probability
+# of misclassifying a pair of utterances as in the same/different segment.
 
-def train_epoch(model, loader, optimizer, scheduler, device, pos_weight):
-    model.train()
-    total_loss = 0
-    weight = torch.tensor([1.0, pos_weight], device=device)
-    criterion = torch.nn.CrossEntropyLoss(weight=weight)
+def compute_segmentation_metrics(true_labels, pred_labels, k=None):
+    """
+    Compute WindowDiff and Pk for predicted boundary sequences.
+    Both operate on the full sequence of 0/1 labels for a meeting.
+    Here we compute corpus-level averages across all windows.
+    Lower is better for both.
+    """
+    try:
+        from nltk.metrics.segmentation import windowdiff, pk
+    except ImportError:
+        log.warning("nltk not installed — skipping WindowDiff/Pk. pip install nltk")
+        return {"window_diff": -1.0, "pk": -1.0}
 
-    for batch in loader:
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["label"].to(device)
+    # Convert list of labels to boundary strings for nltk ("0"/"1")
+    ref = "".join(str(l) for l in true_labels)
+    hyp = "".join(str(l) for l in pred_labels)
+    if k is None:
+        k = max(2, len(ref) // 10)
 
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        loss = criterion(outputs.logits, labels)
-
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        scheduler.step()
-        total_loss += loss.item()
-
-    return total_loss / len(loader)
+    try:
+        wd = windowdiff(ref, hyp, k=k, boundary="1")
+        p = pk(ref, hyp, k=k, boundary="1")
+        return {"window_diff": round(wd, 4), "pk": round(p, 4)}
+    except Exception as e:
+        log.warning(f"Segmentation metric error: {e}")
+        return {"window_diff": -1.0, "pk": -1.0}
 
 
-# ---------- evaluate ----------
+# ── Environment logging ────────────────────────────────────────────────────────
 
-def evaluate(model, loader, device):
-    model.eval()
-    all_labels, all_mids, all_probs = [], [], []
-
-    with torch.no_grad():
-        for batch in loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["label"]
-
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            probs = torch.softmax(outputs.logits, dim=-1)[:, 1].cpu().numpy()
-
-            all_probs.extend(probs)
-            all_labels.extend(labels.numpy())
-            all_mids.extend(batch["meeting_id"])
-
-    all_probs = np.array(all_probs)
-    all_labels = np.array(all_labels)
-
-    # sweep thresholds to find best F1
-    best_f1, best_threshold = 0.0, 0.5
-    for threshold in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]:
-        preds = (all_probs >= threshold).astype(int)
-        f1 = f1_score(all_labels, preds, zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_threshold = threshold
-
-    best_preds = (all_probs >= best_threshold).astype(int)
-    seg_metrics = compute_seg_metrics(
-        all_labels.tolist(), best_preds.tolist(), all_mids)
-
-    preds_05 = (all_probs >= 0.5).astype(int)
-    f1_05 = f1_score(all_labels, preds_05, zero_division=0)
-
-    return {
-        "f1": float(f1_score(all_labels, best_preds, zero_division=0)),
-        "precision": float(precision_score(all_labels, best_preds,
-                                           zero_division=0)),
-        "recall": float(recall_score(all_labels, best_preds,
-                                     zero_division=0)),
-        "best_threshold": best_threshold,
-        "f1_at_0.5": float(f1_05),
-        "n_predicted_boundaries": int(best_preds.sum()),
-        "n_true_boundaries": int(all_labels.sum()),
-        "pk": seg_metrics["pk"],
-        "windowdiff": seg_metrics["windowdiff"]
+def log_environment():
+    """Log GPU info, Python version, and hostname to MLflow."""
+    import torch
+    env = {
+        "python_version": platform.python_version(),
+        "pytorch_version": torch.__version__,
+        "cuda_available": str(torch.cuda.is_available()),
     }
-
-
-# ---------- save run ----------
-
-def save_run(args, metrics_per_epoch, best_pk):
-    run = {
-        "run_id": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "params": vars(args),
-        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available()
-               else "cpu",
-        "epochs": metrics_per_epoch,
-        "best_val_pk": best_pk
-    }
-    os.makedirs("runs", exist_ok=True)
-    path = f"runs/run_{run['run_id']}.json"
-    with open(path, "w") as f:
-        json.dump(run, f, indent=2)
-    print(f"Run saved to {path}")
-    return path
-
-
-# ---------- main ----------
-
-def main():
-    args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        env["gpu_name"] = torch.cuda.get_device_name(0)
+        env["gpu_vram_gb"] = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
+        env["gpu_count"] = torch.cuda.device_count()
+    mlflow.log_params(env)
 
-    tokenizer = RobertaTokenizer.from_pretrained(args.model_name)
-    special_tokens = [f"[SPEAKER_{s}]:" for s in ["A", "B", "C", "D", "E"]]
-    special_tokens.append("[PAD]:")
+
+# ── RoBERTa training ───────────────────────────────────────────────────────────
+
+def run_roberta(cfg: Dict, run_id_holder: list):
+    import torch
+    from torch.utils.data import Dataset, DataLoader
+    from transformers import (
+        AutoTokenizer, AutoModelForSequenceClassification,
+        get_linear_schedule_with_warmup,
+    )
+    from sklearn.metrics import f1_score, precision_score, recall_score
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log.info(f"Device: {device}")
+
+    torch.manual_seed(cfg["seed"])
+    np.random.seed(cfg["seed"])
+
+    # ── Dataset ──────────────────────────────────────────────────────────────
+
+    class WindowDataset(Dataset):
+        def __init__(self, texts, labels, tokenizer, max_len):
+            self.encodings = tokenizer(
+                texts,
+                truncation=True,
+                padding="max_length",
+                max_length=max_len,
+                return_tensors="pt",
+            )
+            self.labels = torch.tensor(labels, dtype=torch.long)
+
+        def __len__(self):
+            return len(self.labels)
+
+        def __getitem__(self, idx):
+            return {
+                "input_ids": self.encodings["input_ids"][idx],
+                "attention_mask": self.encodings["attention_mask"][idx],
+                "labels": self.labels[idx],
+            }
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg["model_name"])
+
+    # Add speaker tokens so they are not split by the tokenizer
+    special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
-    train_ds = WindowDataset(
-        f"{args.data_dir}/train.jsonl", tokenizer, args.max_length, args.k)
-    val_ds = WindowDataset(
-        f"{args.data_dir}/val.jsonl", tokenizer, args.max_length, args.k)
+    log.info("Loading and tokenizing data...")
+    train_texts, train_labels = load_split(cfg["data_dir"], "train")
+    val_texts, val_labels = load_split(cfg["data_dir"], "val")
+    test_texts, test_labels = load_split(cfg["data_dir"], "test")
 
-    n_train_pos = sum(s["label"] for s in train_ds.samples)
-    n_val_pos = sum(s["label"] for s in val_ds.samples)
-    imbalance_ratio = (len(train_ds) - n_train_pos) / max(n_train_pos, 1)
+    train_ds = WindowDataset(train_texts, train_labels, tokenizer, cfg["max_seq_len"])
+    val_ds = WindowDataset(val_texts, val_labels, tokenizer, cfg["max_seq_len"])
+    test_ds = WindowDataset(test_texts, test_labels, tokenizer, cfg["max_seq_len"])
 
-    print(f"Train: {len(train_ds)} samples | "
-          f"{n_train_pos} boundaries ({100*n_train_pos/len(train_ds):.1f}%)")
-    print(f"Val:   {len(val_ds)} samples | "
-          f"{n_val_pos} boundaries ({100*n_val_pos/len(val_ds):.1f}%)")
-    print(f"pos_weight: {args.pos_weight} | "
-          f"Imbalance ratio: {imbalance_ratio:.1f}x")
+    train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"] * 2, num_workers=4)
+    test_loader = DataLoader(test_ds, batch_size=cfg["batch_size"] * 2, num_workers=4)
 
-    if args.pos_weight < imbalance_ratio * 0.3:
-        print(f"WARNING: pos_weight may be too low for {imbalance_ratio:.1f}x "
-              f"imbalance. Consider --pos_weight {imbalance_ratio:.0f}")
-
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, num_workers=2)
-
-    # load model with dropout to reduce overfitting
-    model = RobertaForSequenceClassification.from_pretrained(
-        args.model_name,
+    # ── Model ─────────────────────────────────────────────────────────────────
+    model = AutoModelForSequenceClassification.from_pretrained(
+        cfg["model_name"],
         num_labels=2,
-        hidden_dropout_prob=0.2,
-        attention_probs_dropout_prob=0.2,
-        classifier_dropout=0.3
+        hidden_dropout_prob=cfg["dropout"],
+        attention_probs_dropout_prob=cfg["dropout"],
     )
+    # Resize embeddings to accommodate [SPEAKER_X] tokens
     model.resize_token_embeddings(len(tokenizer))
 
-    # optionally freeze encoder — useful when positive examples are scarce
-    if args.freeze_encoder:
+    if cfg["freeze_backbone"]:
+        # Decision: freeze all encoder layers, train classification head only.
+        # This produces a faster-to-train, smaller-footprint model at the cost
+        # of some task-specific representation quality. Good "fast" serving candidate.
+        log.info("Freezing backbone — training classification head only")
         for name, param in model.named_parameters():
             if "classifier" not in name:
                 param.requires_grad = False
-        trainable = sum(p.numel() for p in model.parameters()
-                        if p.requires_grad)
-        total = sum(p.numel() for p in model.parameters())
-        print(f"Encoder frozen. Trainable: {trainable:,} / {total:,} "
-              f"({100*trainable/total:.1f}%)")
-    else:
-        total = sum(p.numel() for p in model.parameters())
-        print(f"Full fine-tune. Total params: {total:,}")
 
     model = model.to(device)
 
-    optimizer = AdamW(
-        model.parameters(), lr=args.lr, weight_decay=0.01)
-    total_steps = len(train_loader) * args.epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=int(0.1 * total_steps),
-        num_training_steps=total_steps
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log.info(f"Trainable parameters: {n_trainable:,}")
+
+    # ── Optimizer / scheduler ─────────────────────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=cfg["lr"],
+        weight_decay=cfg["weight_decay"],
+    )
+    total_steps = len(train_loader) * cfg["epochs"]
+    warmup_steps = int(cfg["warmup_ratio"] * total_steps)
+    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+
+    run_name = (
+        f"{cfg['model_name'].replace('/', '-')}"
+        f"-{'frozen' if cfg['freeze_backbone'] else 'full'}"
+        f"-lr{cfg['lr']}-bs{cfg['batch_size']}"
     )
 
-    metrics_per_epoch = []
-    best_pk = 1.0
-    epochs_without_improvement = 0
+    best_val_f1 = 0.0
+    patience_counter = 0
+    best_model_path = os.path.join(cfg["output_dir"], f"{run_name}_best.pt")
+    os.makedirs(cfg["output_dir"], exist_ok=True)
 
-    for epoch in range(args.epochs):
-        t0 = time.time()
-        train_loss = train_epoch(
-            model, train_loader, optimizer, scheduler,
-            device, args.pos_weight)
-        val_metrics = evaluate(model, val_loader, device)
-        epoch_time = time.time() - t0
+    total_train_start = time.time()
 
-        row = {
-            "epoch": epoch + 1,
-            "train_loss": round(train_loss, 4),
-            "val_f1": round(val_metrics["f1"], 4),
-            "val_precision": round(val_metrics["precision"], 4),
-            "val_recall": round(val_metrics["recall"], 4),
-            "val_f1_at_0.5": round(val_metrics["f1_at_0.5"], 4),
-            "best_threshold": val_metrics["best_threshold"],
-            "n_predicted_boundaries": val_metrics["n_predicted_boundaries"],
-            "n_true_boundaries": val_metrics["n_true_boundaries"],
-            "val_pk": round(val_metrics["pk"], 4),
-            "val_windowdiff": round(val_metrics["windowdiff"], 4),
-            "epoch_time_seconds": round(epoch_time, 1)
+    with mlflow.start_run(run_name=run_name) as run:
+        run_id_holder.append(run.info.run_id)
+
+        # Log all config params
+        mlflow.log_params(cfg)
+        mlflow.log_params({"n_trainable_params": n_trainable})
+        log_environment()
+
+        for epoch in range(1, cfg["epochs"] + 1):
+            model.train()
+            epoch_start = time.time()
+            train_loss = 0.0
+
+            for batch in train_loader:
+                optimizer.zero_grad()
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                labels = batch["labels"].to(device)
+
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                train_loss += loss.item()
+
+            epoch_time = time.time() - epoch_start
+
+            # ── Validation ───────────────────────────────────────────────────
+            model.eval()
+            val_preds, val_true = [], []
+            with torch.no_grad():
+                for batch in val_loader:
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+                    preds = logits.argmax(dim=-1).cpu().numpy()
+                    val_preds.extend(preds)
+                    val_true.extend(batch["labels"].numpy())
+
+            val_f1 = f1_score(val_true, val_preds)
+            val_prec = precision_score(val_true, val_preds)
+            val_rec = recall_score(val_true, val_preds)
+            seg_metrics = compute_segmentation_metrics(val_true, val_preds)
+
+            epoch_metrics = {
+                "train_loss": round(train_loss / len(train_loader), 4),
+                "val_f1": round(val_f1, 4),
+                "val_precision": round(val_prec, 4),
+                "val_recall": round(val_rec, 4),
+                "epoch_time_sec": round(epoch_time, 1),
+                **{f"val_{k}": v for k, v in seg_metrics.items()},
+            }
+            mlflow.log_metrics(epoch_metrics, step=epoch)
+            log.info(f"Epoch {epoch}/{cfg['epochs']} | "
+                     f"loss={epoch_metrics['train_loss']:.4f} | "
+                     f"val_f1={val_f1:.4f} | "
+                     f"time={epoch_time:.1f}s")
+
+            # Early stopping + checkpoint
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                patience_counter = 0
+                torch.save(model.state_dict(), best_model_path)
+                log.info(f"  → New best val F1 {best_val_f1:.4f}, checkpoint saved")
+            else:
+                patience_counter += 1
+                if patience_counter >= cfg["early_stopping_patience"]:
+                    log.info(f"Early stopping at epoch {epoch}")
+                    break
+
+        # ── Final test evaluation ─────────────────────────────────────────────
+        model.load_state_dict(torch.load(best_model_path))
+        model.eval()
+        test_preds, test_true, test_probs = [], [], []
+        with torch.no_grad():
+            for batch in test_loader:
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+                probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+                preds = (probs >= 0.5).astype(int)
+                test_preds.extend(preds)
+                test_true.extend(batch["labels"].numpy())
+                test_probs.extend(probs)
+
+        total_train_time = time.time() - total_train_start
+        test_seg_metrics = compute_segmentation_metrics(test_true, test_preds)
+
+        final_metrics = {
+            "test_f1": round(f1_score(test_true, test_preds), 4),
+            "test_precision": round(precision_score(test_true, test_preds), 4),
+            "test_recall": round(recall_score(test_true, test_preds), 4),
+            "best_val_f1": round(best_val_f1, 4),
+            "total_training_time_sec": round(total_train_time, 1),
+            **{f"test_{k}": v for k, v in test_seg_metrics.items()},
         }
-        metrics_per_epoch.append(row)
+        if torch.cuda.is_available():
+            final_metrics["peak_vram_gb"] = round(
+                torch.cuda.max_memory_allocated() / 1e9, 2)
 
-        print(f"Epoch {epoch+1}/{args.epochs} | "
-              f"loss={train_loss:.4f} | "
-              f"f1={val_metrics['f1']:.3f} "
-              f"(thr={val_metrics['best_threshold']:.2f}) | "
-              f"precision={val_metrics['precision']:.3f} | "
-              f"recall={val_metrics['recall']:.3f} | "
-              f"predicted={val_metrics['n_predicted_boundaries']} "
-              f"true={val_metrics['n_true_boundaries']} | "
-              f"pk={val_metrics['pk']:.3f} | "
-              f"wd={val_metrics['windowdiff']:.3f} | "
-              f"time={epoch_time:.0f}s")
+        mlflow.log_metrics(final_metrics)
+        log.info(f"Test F1: {final_metrics['test_f1']:.4f} | "
+                 f"WindowDiff: {final_metrics.get('test_window_diff', '?')}")
 
-        if val_metrics["pk"] < best_pk:
-            best_pk = val_metrics["pk"]
-            epochs_without_improvement = 0
-            model.save_pretrained(f"{args.output_dir}/best_model")
-            tokenizer.save_pretrained(f"{args.output_dir}/best_model")
-            print(f"  → saved best model (pk={best_pk:.3f})")
-        else:
-            epochs_without_improvement += 1
-            print(f"  → no improvement "
-                  f"({epochs_without_improvement}/{args.patience})")
-            if epochs_without_improvement >= args.patience:
-                print(f"  → early stopping at epoch {epoch+1}")
-                break
+        # Log model + tokenizer as MLflow artifact
+        mlflow.pytorch.log_model(model, name="model",
+                                  pip_requirements=["transformers==4.40.0", "torch==2.2.0"])
+        tokenizer.save_pretrained(os.path.join(cfg["output_dir"], "tokenizer"))
+        mlflow.log_artifacts(os.path.join(cfg["output_dir"], "tokenizer"),
+                              artifact_path="tokenizer")
 
-    save_run(args, metrics_per_epoch, best_pk)
-    print(f"\nDone. Best val Pk: {best_pk:.3f}")
-    print(f"Target to beat (unsupervised BERT baseline on AMI): Pk=0.331")
+    return final_metrics
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=None, help="Path to YAML config file")
+    # Allow any config key to be overridden on CLI
+    parser.add_argument("--model_name", default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--freeze_backbone", action="store_true", default=None)
+    parser.add_argument("--max_seq_len", type=int, default=None)
+    parser.add_argument("--data_dir", default=None)
+    parser.add_argument("--output_dir", default=None)
+    parser.add_argument("--experiment_name", default=None)
+    args = parser.parse_args()
+
+    overrides = {k: v for k, v in vars(args).items() if k not in ("config",)}
+    cfg = load_config(args.config, overrides)
+
+    # MLflow experiment
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:8000"))
+    mlflow.set_experiment(cfg["experiment_name"])
+
+    run_id_holder = []
+
+    if cfg["model_name"] == "baseline":
+        metrics = run_baseline(cfg, run_id_holder)
+    else:
+        metrics = run_roberta(cfg, run_id_holder)
+
+    print(f"\nRun ID: {run_id_holder[0] if run_id_holder else 'N/A'}")
+    print(f"Final metrics: {json.dumps(metrics, indent=2)}")
 
 
 if __name__ == "__main__":

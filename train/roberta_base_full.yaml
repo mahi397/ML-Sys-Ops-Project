@@ -1,0 +1,18 @@
+# configs/roberta_base_full.yaml
+# Candidate v2: roberta-base, full fine-tune
+# All layers trained → best quality/size tradeoff for this model.
+# "Quality" candidate in the manager table.
+model_name: roberta-base
+freeze_backbone: false
+lr: 2e-5          # standard fine-tuning LR for RoBERTa
+batch_size: 16
+epochs: 5
+warmup_ratio: 0.1
+weight_decay: 0.01
+max_seq_len: 256
+dropout: 0.1
+early_stopping_patience: 2
+data_dir: /data/ami_processed
+output_dir: /artifacts/models
+experiment_name: jitsi-topic-segmentation
+seed: 42
