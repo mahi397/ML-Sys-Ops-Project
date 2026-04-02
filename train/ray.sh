@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fault tolerance demo: Ray Train resumes from checkpoint after simulated failure.
+# Fault tolerance: Ray Train resumes from checkpoint after simulated failure.
 # Run 1 is killed after epoch 1. Run 2 resumes from epoch 2.
 
 REPO=/home/cc/ML-Sys-Ops-Project/train
@@ -43,15 +43,10 @@ for i in $(seq 1 120); do
     fi
 done
 
-# Find the experiment directory — it's the TorchTrainer_* dir under jitsi-roberta-fault-tolerant
-EXPERIMENT_DIR=$(find ${STORAGE}/jitsi-roberta-fault-tolerant -maxdepth 1 -type d -name "TorchTrainer_*" | head -1)
-if [ -z "${EXPERIMENT_DIR}" ]; then
-    echo "error: could not find experiment directory under ${STORAGE}/jitsi-roberta-fault-tolerant"
-    exit 1
-fi
-
-# Map host path to container path
-EXPERIMENT_DIR_CONTAINER="/ray_checkpoints/jitsi-roberta-fault-tolerant/$(basename ${EXPERIMENT_DIR})"
+# The restore path for TorchTrainer.restore() is the experiment root,
+# not the trial subdirectory
+EXPERIMENT_DIR="${STORAGE}/jitsi-roberta-fault-tolerant"
+EXPERIMENT_DIR_CONTAINER="/ray_checkpoints/jitsi-roberta-fault-tolerant"
 CHECKPOINT_COUNT=$(find ${STORAGE} -name "state.pt" | wc -l)
 
 echo "[run 1] killed after saving ${CHECKPOINT_COUNT} checkpoint(s)"
