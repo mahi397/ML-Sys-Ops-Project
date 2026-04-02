@@ -1,27 +1,44 @@
-FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+FROM quay.io/jupyter/pytorch-notebook:cuda12-python-3.12
+USER root
 
-WORKDIR /app
+RUN apt update && apt install -y nvtop
 
-RUN apt-get update && apt-get install -y git wget curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y wget gnupg && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    apt-get update && \
+    apt-get install -y cuda-toolkit-12-8 && \
+    rm cuda-keyring_1.1-1_all.deb
+
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+
+USER ${NB_UID}
+
+RUN python -m pip install --no-cache-dir --upgrade pip wheel setuptools
+
+RUN python -m pip install --no-cache-dir bash_kernel && \
+    python -m bash_kernel.install --sys-prefix
+
+RUN python -m pip install --pre --no-cache-dir \
+    lightning transformers datasets accelerate sentencepiece bitsandbytes peft && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
+
+RUN pip install --pre --no-cache-dir deepspeed && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
 
 RUN pip install --no-cache-dir \
-    transformers==4.40.0 \
-    datasets==2.19.0 \
-    tokenizers==0.19.1 \
-    scikit-learn==1.4.2 \
     mlflow==2.13.0 \
     boto3==1.34.0 \
     optuna==3.6.1 \
+    scikit-learn==1.4.2 \
     seqeval==1.2.2 \
-    numpy==1.26.4 \
-    pandas==2.2.2 \
     pyyaml==6.0.1 \
-    tqdm==4.66.4 \
-    accelerate==0.30.0 \
-    jupyterlab==4.2.0 \
-    ipywidgets==8.1.3
+    nltk==3.8.1 && \
+    fix-permissions "${CONDA_DIR}" && \
+    fix-permissions "/home/${NB_USER}"
 
-COPY . /app
-
-# Dev: start Jupyter; for training runs use Dockerfile instead
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+COPY --chown=${NB_UID}:${NB_GID} . /home/${NB_USER}/work/jitsi-training
