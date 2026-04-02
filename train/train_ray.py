@@ -61,12 +61,13 @@ def load_split(data_dir, split):
 
 def train_func(config):
     """
-    This function runs inside a Ray worker.
-    Ray handles:
-      - Checkpointing to persistent storage after each epoch
-      - Resuming from last checkpoint if worker is killed and restarted
-      - Fault tolerance: max_failures=3 means Ray retries up to 3 times
+    Runs inside a Ray worker. Checkpoints to persistent storage after each epoch.
+    On resume, loads the last checkpoint and skips already-completed epochs.
     """
+    import warnings
+    warnings.filterwarnings("ignore")
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     import torch
     from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
     from transformers import (
@@ -277,7 +278,7 @@ def main():
     from ray.train import RunConfig, ScalingConfig, FailureConfig
     from ray.train.torch import TorchTrainer
 
-    ray.init(ignore_reinit_error=True)
+    ray.init(ignore_reinit_error=True, logging_level=logging.WARNING)
     log.info(f"Ray initialized: {ray.cluster_resources()}")
 
     scaling_config = ScalingConfig(
