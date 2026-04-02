@@ -1,11 +1,11 @@
 """
 train_ray.py  —  Ray Train wrapper for fault-tolerant RoBERTa fine-tuning.
 
-hows Ray Train making training more robust than plain train.py
+shows Ray Train making training more robust than plain train.py
 by automatically resuming from checkpoints after worker failure.
 
 Usage:
-  # Install Ray
+  # Install Ray 
   pip install "ray[train]==2.10.0" --break-system-packages
 
   # Start a single-node Ray cluster
@@ -148,7 +148,7 @@ def train_func(config):
     if checkpoint:
         with checkpoint.as_directory() as ckpt_dir:
             ckpt = torch.load(os.path.join(ckpt_dir, "state.pt"), map_location=device)
-            model.module.load_state_dict(ckpt["model"])
+            model.load_state_dict(ckpt["model"])
             optimizer.load_state_dict(ckpt["optimizer"])
             scheduler.load_state_dict(ckpt["scheduler"])
             start_epoch = ckpt["epoch"] + 1
@@ -167,7 +167,7 @@ def train_func(config):
             optimizer.zero_grad()
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)            
+            labels = batch["labels"].to(device)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             loss = loss_fn(outputs.logits, labels)
             loss.backward()
@@ -201,7 +201,7 @@ def train_func(config):
         # the next worker will find this checkpoint and resume from epoch+1.
         ckpt_data = {
             "epoch": epoch,
-            "model": model.module.state_dict(),
+            "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
         }
