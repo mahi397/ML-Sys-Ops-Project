@@ -1,12 +1,12 @@
 """
 train_ray.py  —  Ray Train wrapper for fault-tolerant RoBERTa fine-tuning.
 
-to show Ray Train making training more robust than plain train.py
+hows Ray Train making training more robust than plain train.py
 by automatically resuming from checkpoints after worker failure.
 
 Usage:
-  # Install Ray 
-  pip install "ray[train]==2.10.0" 
+  # Install Ray
+  pip install "ray[train]==2.10.0" --break-system-packages
 
   # Start a single-node Ray cluster
   ray start --head --num-gpus=1
@@ -167,8 +167,7 @@ def train_func(config):
             optimizer.zero_grad()
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            labels = batch["labels"].to(device)            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             loss = loss_fn(outputs.logits, labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -187,7 +186,7 @@ def train_func(config):
                 probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
                 preds = (probs >= 0.3).astype(int)
                 val_preds.extend(preds)
-                val_true.extend(batch["labels"].numpy())
+                val_true.extend(batch["labels"].cpu().numpy())
 
         val_f1 = f1_score(val_true, val_preds, zero_division=0)
         avg_loss = train_loss / len(train_loader)
