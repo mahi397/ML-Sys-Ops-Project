@@ -442,22 +442,22 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                     prev_best = best_val_f1
                     best_val_f1 = val_f1
                     patience_counter = 0
-                    print(f"  → New best val_f1: {val_f1:.4f} (improved from {prev_best:.4f}), checkpoint saved", flush=True)
+                    print(f"   New best val_f1: {val_f1:.4f} (improved from {prev_best:.4f}), checkpoint saved", flush=True)
                 elif val_f1 > 0.0:
                     patience_counter += 1
-                    print(f"  → val_f1 did not improve ({val_f1:.4f} vs best {best_val_f1:.4f}), patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
+                    print(f"   val_f1 did not improve ({val_f1:.4f} vs best {best_val_f1:.4f}), patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
                 else:
-                    print(f"  → val_f1=0.0, not counting patience (model not predicting positives yet), checkpoint saved", flush=True)
+                    print(f"   val_f1=0.0, not counting patience (model not predicting positives yet), checkpoint saved", flush=True)
                 torch.save(model.state_dict(), best_model_path)
             else:
                 if val_f1 > 0.0:
                     patience_counter += 1
-                    print(f"  → val_f1 did not improve ({val_f1:.4f} vs best {best_val_f1:.4f}), patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
+                    print(f"   val_f1 did not improve ({val_f1:.4f} vs best {best_val_f1:.4f}), patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
                 else:
-                    print(f"  → val_f1=0.0, not counting patience", flush=True)
+                    print(f"   val_f1=0.0, not counting patience", flush=True)
                 torch.save(model.state_dict(), best_model_path)  # always keep latest
                 if patience_counter >= cfg["early_stopping_patience"]:
-                    print(f"  → Early stopping triggered at epoch {epoch} — val_f1 did not improve for {patience_counter} epochs (monitoring: val_f1)", flush=True)
+                    print(f"   Early stopping triggered at epoch {epoch} - val_f1 did not improve for {patience_counter} epochs", flush=True)
                     log.info(f"Early stopping at epoch {epoch}")
                     break
 
