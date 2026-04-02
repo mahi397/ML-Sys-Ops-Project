@@ -1,10 +1,10 @@
 #!/bin/bash
-# ray.sh  —  Extra credit fault-tolerance demo
-# Run on the GPU node host — orchestrates two Docker runs to show fault tolerance
-#
-# DEMO FLOW:
-#   Run 1: Start training → kill after epoch 1 checkpoint saves → container exits
-#   Run 2: Restart same command → Ray finds checkpoint → resumes from epoch 2
+# ray.sh — Demonstrates Ray Train resuming from checkpoint after simulated worker failure.
+
+# Key evidence in output:
+#   Run 1: "Checkpoint saved after epoch 1" then killed
+#   Run 2: "RESTORING from previous run" + "Resumed from checkpoint at epoch 1
+#           — continuing from epoch 2"
 
 set -e
 
@@ -13,6 +13,8 @@ DATA_DIR=/home/cc/ami_processed
 STORAGE=/home/cc/artifacts/ray_checkpoints
 MLFLOW_URI=http://129.114.25.90:8000
 IMAGE=jitsi-train:latest
+LOG1=/tmp/ray_run1.log
+LOG2=/tmp/ray_run2.log
 
 DOCKER_BASE="docker run --rm --gpus all \
   --shm-size=10.24gb \
@@ -36,30 +38,28 @@ echo " Ray Train Fault Tolerance Demo"
 echo "================================================"
 echo ""
 
-# Step 1: Clean previous checkpoints for a fresh demo
+# Step 1: Clean previous checkpoints
 echo "STEP 1: Clearing previous Ray checkpoints..."
-rm -rf ${STORAGE}/jitsi-roberta-fault-tolerant
+sudo rm -rf ${STORAGE}/jitsi-roberta-fault-tolerant
 mkdir -p ${STORAGE}
 echo "Done."
 echo ""
 
-# Step 2: RUN 1 — start training in background, kill after epoch 1 checkpoint
+# Step 2: RUN 1 — start training, kill after epoch 1 checkpoint
 echo "STEP 2: Starting RUN 1 (will be killed after epoch 1 checkpoint saves)..."
-echo "        Command: docker run ... python train_ray.py ..."
 echo ""
 
-${DOCKER_BASE} ${RAY_ARGS} &
+${DOCKER_BASE} ${RAY_ARGS} 2>&1 | tee ${LOG1} &
 DOCKER_PID=$!
-echo "Docker container PID: ${DOCKER_PID}"
+echo "Docker PID: ${DOCKER_PID}"
 
 # Poll for checkpoint file
-echo "Waiting for epoch 1 checkpoint to be saved..."
+echo "Waiting for epoch 1 checkpoint..."
 for i in $(seq 1 120); do
     sleep 15
     if find ${STORAGE} -name "state.pt" 2>/dev/null | grep -q .; then
         echo ""
-        echo ">>> Checkpoint found! Killing container (PID ${DOCKER_PID})..."
-        # Kill the docker run process — this simulates a preempted Chameleon lease
+        echo ">>> Checkpoint found after epoch 1! Killing container..."
         kill ${DOCKER_PID} 2>/dev/null || true
         wait ${DOCKER_PID} 2>/dev/null || true
         echo ">>> Container killed."
@@ -68,31 +68,50 @@ for i in $(seq 1 120); do
     echo "  Waiting... (${i} polls, $((i*15))s elapsed)"
 done
 
+# Extract the experiment path from Run 1 logs
+EXPERIMENT_PATH=$(grep "View detailed results here:" ${LOG1} | tail -1 | awk '{print $NF}')
+# Map container path /ray_checkpoints → host path ${STORAGE}
+EXPERIMENT_PATH_HOST="${STORAGE}${EXPERIMENT_PATH#/ray_checkpoints}"
+# Map to container path for Run 2
+EXPERIMENT_PATH_CONTAINER="/ray_checkpoints${EXPERIMENT_PATH#/ray_checkpoints}"
+
 echo ""
 echo "================================================"
 echo " RUN 1 KILLED after epoch 1"
-echo " Checkpoint saved at:"
-find ${STORAGE} -name "state.pt" 2>/dev/null || echo "  (none found — check timing)"
+echo " Experiment path: ${EXPERIMENT_PATH_HOST}"
+echo " Checkpoint:"
+find ${STORAGE} -name "state.pt" 2>/dev/null
 echo "================================================"
 echo ""
 
-# Brief pause to simulate node recovery
+if [ -z "${EXPERIMENT_PATH}" ]; then
+    echo "ERROR: Could not extract experiment path from logs. Check ${LOG1}"
+    exit 1
+fi
+
+# Step 3: Simulate recovery
 echo "STEP 3: Simulating node recovery (10s pause)..."
 sleep 10
 echo ""
 
-# Step 4: RUN 2 — restart, should resume from checkpoint
-echo "STEP 4: Starting RUN 2 (should resume from epoch 2, not epoch 1)..."
-echo "        Look for: 'Resumed from checkpoint at epoch 1 — continuing from epoch 2'"
+# Step 4: RUN 2 — restore from experiment path
+echo "STEP 4: Starting RUN 2 with --restore_path=${EXPERIMENT_PATH_CONTAINER}"
+echo "        Expecting: 'Resumed from checkpoint at epoch 1 — continuing from epoch 2'"
 echo ""
 
-${DOCKER_BASE} ${RAY_ARGS}
+${DOCKER_BASE} ${RAY_ARGS} --restore_path ${EXPERIMENT_PATH_CONTAINER} 2>&1 | tee ${LOG2}
 
 echo ""
 echo "================================================"
 echo " DEMO COMPLETE"
-echo " Fault tolerance demonstrated:"
-echo "   Run 1 was killed after saving epoch 1 checkpoint"
-echo "   Run 2 resumed from epoch 2 (skipped epoch 1)"
-echo "   Without Ray: Run 2 would restart from epoch 1"
+echo ""
+echo " Run 1 evidence (from ${LOG1}):"
+grep -E "(Checkpoint saved after epoch|No checkpoint found|Resumed from)" ${LOG1} || true
+echo ""
+echo " Run 2 evidence (from ${LOG2}):"
+grep -E "(RESTORING|Resumed from|No checkpoint found|Epoch [0-9])" ${LOG2} | head -5 || true
+echo ""
+echo " Key difference vs plain train.py:"
+echo "   plain train.py killed mid-run -> restart from epoch 1 (all GPU time lost)"
+echo "   Ray Train killed mid-run      -> resume from epoch 2 (only 1 epoch lost)"
 echo "================================================"
