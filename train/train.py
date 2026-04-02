@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. No one-off scripts.
+are selected via config. 
 
 Usage:
   # Run with a config file
@@ -134,20 +134,36 @@ def run_baseline(cfg: Dict, run_id_holder: list):
     pipe.fit(train_texts, train_labels)
     train_time = time.time() - t0
 
-    val_preds = pipe.predict(val_texts)
-    test_preds = pipe.predict(test_texts)
+    # Baseline uses predict_proba for threshold sweeping
+    val_probs = pipe.predict_proba(val_texts)[:, 1]
+    test_probs = pipe.predict_proba(test_texts)[:, 1]
+
+    # Sweep thresholds on val set
+    best_threshold, val_metrics, ref_metrics = sweep_thresholds(
+        val_probs, val_labels, val_meeting_ids)
+
+    # Apply best threshold to test set
+    test_preds = (test_probs >= best_threshold).astype(int)
+    test_seg = compute_segmentation_metrics(
+        test_labels, test_preds.tolist(), test_meeting_ids)
 
     metrics = {
-        "val_f1": f1_score(val_labels, val_preds, zero_division=0),
-        "val_precision": precision_score(val_labels, val_preds, zero_division=0),
-        "val_recall": recall_score(val_labels, val_preds, zero_division=0),
-        "test_f1": f1_score(test_labels, test_preds, zero_division=0),
-        "test_precision": precision_score(test_labels, test_preds, zero_division=0),
-        "test_recall": recall_score(test_labels, test_preds, zero_division=0),
+        "val_f1": round(val_metrics["f1"], 4),
+        "val_precision": round(val_metrics["precision"], 4),
+        "val_recall": round(val_metrics["recall"], 4),
+        "val_pk": round(val_metrics["pk"], 4),
+        "val_window_diff": round(val_metrics["window_diff"], 4),
+        "val_best_threshold": best_threshold,
+        "val_f1_at_0.5": round(ref_metrics["f1_at_0.5"], 4),
+        "test_f1": round(f1_score(test_labels, test_preds, zero_division=0), 4),
+        "test_precision": round(precision_score(test_labels, test_preds, zero_division=0), 4),
+        "test_recall": round(recall_score(test_labels, test_preds, zero_division=0), 4),
+        "test_pk": round(test_seg.get("pk", -1.0), 4),
+        "test_window_diff": round(test_seg.get("window_diff", -1.0), 4),
+        "best_threshold": best_threshold,
         "total_training_time_sec": train_time,
         "gpu_used": 0,
     }
-    metrics.update(compute_segmentation_metrics(val_labels, val_preds, val_meeting_ids))
 
     with mlflow.start_run(run_name="baseline-tfidf-lr") as run:
         run_id_holder.append(run.info.run_id)
@@ -157,6 +173,7 @@ def run_baseline(cfg: Dict, run_id_holder: list):
                             "max_features": 50000})
         log_environment()
         mlflow.log_param("git_sha", os.environ.get("GIT_SHA", "unknown"))
+        mlflow.log_param("best_threshold", best_threshold)
         mlflow.log_metrics(metrics)
         mlflow.sklearn.log_model(pipe, artifact_path="model")
         log.info(f"Baseline val F1: {metrics['val_f1']:.4f}")
@@ -220,7 +237,63 @@ def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
     }
 
 
-# ── Environment logging ────────────────────────────────────────────────────────
+
+# ── Threshold sweeping ────────────────────────────────────────────────────────
+# With severe class imbalance (~40:1), the model outputs low probabilities
+# for boundaries (e.g. 0.10-0.25) rather than > 0.5. Using a fixed threshold
+# of 0.5 predicts zero boundaries and gives F1=0.
+# Threshold sweeping finds the best threshold on the val set, which is then
+# logged to MLflow and handed to the serving team as the recommended value.
+# The threshold is a serving hyperparameter, not a training one — it can be
+# tuned without retraining.
+
+THRESHOLDS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+
+def sweep_thresholds(probs, true_labels, meeting_ids):
+    """
+    Sweep probability thresholds and return the one with best val Pk.
+    Also returns metrics at the best threshold and at fixed 0.5 for comparison.
+    Pk is used as the sweep criterion (not F1) because:
+      - Pk is threshold-independent in meaning — it measures segment quality
+      - F1 is unstable under imbalance and can be gamed by a single threshold
+      - Pk directly reflects what matters: are the resulting topic segments good?
+    """
+    probs = np.array(probs)
+    true_labels = np.array(true_labels)
+
+    best_pk = float("inf")
+    best_threshold = 0.5
+    best_metrics = {}
+
+    for thr in THRESHOLDS:
+        preds = (probs >= thr).astype(int)
+        seg = compute_segmentation_metrics(
+            true_labels.tolist(), preds.tolist(), meeting_ids)
+        pk_val = seg.get("pk", 1.0)
+        if pk_val < best_pk:
+            best_pk = pk_val
+            best_threshold = thr
+            best_metrics = {
+                "f1": f1_score(true_labels, preds, zero_division=0),
+                "precision": precision_score(true_labels, preds, zero_division=0),
+                "recall": recall_score(true_labels, preds, zero_division=0),
+                "pk": seg.get("pk", 1.0),
+                "window_diff": seg.get("window_diff", 1.0),
+                "n_predicted": int(preds.sum()),
+                "n_true": int(true_labels.sum()),
+            }
+
+    # Also compute metrics at fixed 0.5 for reference
+    preds_05 = (probs >= 0.5).astype(int)
+    seg_05 = compute_segmentation_metrics(
+        true_labels.tolist(), preds_05.tolist(), meeting_ids)
+
+    return best_threshold, best_metrics, {
+        "f1_at_0.5": f1_score(true_labels, preds_05, zero_division=0),
+        "pk_at_0.5": seg_05.get("pk", 1.0),
+    }
+
+
 
 def log_environment():
     """Log GPU info, Python version, and hostname to MLflow."""
@@ -293,27 +366,23 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     test_ds = WindowDataset(test_texts, test_labels, tokenizer, cfg["max_seq_len"])
 
     # ── Oversample minority class via WeightedRandomSampler ───────────────────
-    # CrossEntropyLoss with class weights fails for severe imbalance (40:1)
-    # because the transformer's softmax output collapses to the majority class
-    # before loss weighting can compensate. Oversampling ensures each batch
-    # has a balanced mix of boundaries and non-boundaries, which is far more
-    # effective for transformers than loss reweighting alone.
-    # Target ratio: ~1:4 boundary:non-boundary per batch (not 1:1, which
-    # overcorrects and makes the model too aggressive about predicting boundaries)
+    # WeightedRandomSampler with full inverse-frequency weighting (40:1) causes
+    # the model to see the same ~480 boundary examples ~40x per epoch, leading
+    # to memorization and val_f1 collapse after epoch 2.
+    # Fix: cap the oversample ratio at 5x — enough signal without memorization.
     n_pos = sum(train_labels)
     n_neg = len(train_labels) - n_pos
-    oversample_ratio = cfg.get("oversample_ratio", 4.0)  # non-boundary per boundary
-    sample_weights = [oversample_ratio if l == 0 else 1.0 * (n_neg / n_pos / oversample_ratio)
-                      for l in train_labels]
-    # Simpler: weight each sample inversely to its class frequency, then scale
-    sample_weights = [1.0 / n_neg if l == 0 else 1.0 / n_pos for l in train_labels]
+    max_oversample = cfg.get("max_oversample", 5.0)
+    actual_ratio = n_neg / max(n_pos, 1)
+    effective_ratio = min(actual_ratio, max_oversample)
+    sample_weights = [1.0 if l == 0 else effective_ratio for l in train_labels]
     from torch.utils.data import WeightedRandomSampler
     sampler = WeightedRandomSampler(
         weights=sample_weights,
         num_samples=len(sample_weights),
         replacement=True,
     )
-    log.info(f"Class imbalance: {n_pos} pos / {n_neg} neg → using WeightedRandomSampler")
+    log.info(f"Class imbalance: {n_pos} pos / {n_neg} neg → oversample ratio capped at {effective_ratio:.1f}x")
 
     train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"],
                               sampler=sampler, num_workers=2)
@@ -365,7 +434,9 @@ def run_roberta(cfg: Dict, run_id_holder: list):
         f"-lr{cfg['lr']}-bs{cfg['batch_size']}"
     )
 
-    best_val_f1 = 0.0
+    best_val_pk = float("inf")   # early stopping monitors Pk (lower = better)
+    best_val_f1 = 0.0            # kept for logging only
+    best_threshold = 0.5         # updated each epoch by threshold sweep
     patience_counter = 0
     best_model_path = os.path.join(cfg["output_dir"], f"{run_name}_best.pt")
     os.makedirs(cfg["output_dir"], exist_ok=True)
@@ -402,98 +473,110 @@ def run_roberta(cfg: Dict, run_id_holder: list):
 
             epoch_time = time.time() - epoch_start
 
-            # ── Validation ───────────────────────────────────────────────────
+            # ── Validation with threshold sweep ──────────────────────────────
             model.eval()
-            val_preds, val_true = [], []
+            val_probs, val_true = [], []
             with torch.no_grad():
                 for batch in val_loader:
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
                     logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-                    preds = logits.argmax(dim=-1).cpu().numpy()
-                    val_preds.extend(preds)
+                    probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+                    val_probs.extend(probs)
                     val_true.extend(batch["labels"].numpy())
 
-            val_f1 = f1_score(val_true, val_preds, zero_division=0)
-            val_prec = precision_score(val_true, val_preds, zero_division=0)
-            val_rec = recall_score(val_true, val_preds, zero_division=0)
-            seg_metrics = compute_segmentation_metrics(val_true, val_preds, val_meeting_ids)
+            # Sweep thresholds — pick best by val Pk
+            epoch_threshold, epoch_metrics, ref_metrics = sweep_thresholds(
+                val_probs, val_true, val_meeting_ids)
 
-            epoch_metrics = {
+            val_f1 = epoch_metrics["f1"]
+            val_pk = epoch_metrics["pk"]
+
+            epoch_log = {
                 "train_loss": round(train_loss / len(train_loader), 4),
                 "val_f1": round(val_f1, 4),
-                "val_precision": round(val_prec, 4),
-                "val_recall": round(val_rec, 4),
+                "val_precision": round(epoch_metrics["precision"], 4),
+                "val_recall": round(epoch_metrics["recall"], 4),
+                "val_pk": round(val_pk, 4),
+                "val_window_diff": round(epoch_metrics["window_diff"], 4),
+                "val_best_threshold": epoch_threshold,
+                "val_n_predicted": epoch_metrics["n_predicted"],
+                "val_f1_at_0.5": round(ref_metrics["f1_at_0.5"], 4),
+                "val_pk_at_0.5": round(ref_metrics["pk_at_0.5"], 4),
                 "epoch_time_sec": round(epoch_time, 1),
-                **{f"val_{k}": v for k, v in seg_metrics.items()},
             }
-            mlflow.log_metrics(epoch_metrics, step=epoch)
-            log.info(f"Epoch {epoch}/{cfg['epochs']} | "
-                     f"loss={epoch_metrics['train_loss']:.4f} | "
-                     f"val_f1={val_f1:.4f} | "
-                     f"time={epoch_time:.1f}s")
-            print(f"Epoch {epoch}/{cfg['epochs']} | loss={epoch_metrics['train_loss']:.4f} | val_f1={val_f1:.4f}", flush=True)
+            mlflow.log_metrics(epoch_log, step=epoch)
+            print(f"Epoch {epoch}/{cfg['epochs']} | "
+                  f"loss={epoch_log['train_loss']:.4f} | "
+                  f"f1={val_f1:.4f} (thr={epoch_threshold:.2f}) | "
+                  f"pk={val_pk:.4f} | "
+                  f"predicted={epoch_metrics['n_predicted']} true={epoch_metrics['n_true']} | "
+                  f"time={epoch_time:.1f}s", flush=True)
 
-            # Early stopping + checkpoint
-            # Don't count patience epochs where val_f1=0 — the model hasn't
-            # started predicting positives yet, so it's not meaningful to stop.
-            if val_f1 > best_val_f1 or epoch == 1:
-                if val_f1 > best_val_f1:
-                    prev_best = best_val_f1
-                    best_val_f1 = val_f1
-                    patience_counter = 0
-                    print(f"   New best val_f1: {val_f1:.4f} (improved from {prev_best:.4f}), checkpoint saved", flush=True)
-                elif val_f1 > 0.0:
-                    patience_counter += 1
-                    print(f"   val_f1 did not improve ({val_f1:.4f} vs best {best_val_f1:.4f}), patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
-                else:
-                    print(f"   val_f1=0.0, not counting patience (model not predicting positives yet), checkpoint saved", flush=True)
+            # ── Early stopping on Pk (lower is better) ────────────────────────
+            if val_pk < best_val_pk:
+                prev_best = best_val_pk
+                best_val_pk = val_pk
+                best_val_f1 = val_f1
+                best_threshold = epoch_threshold
+                patience_counter = 0
                 torch.save(model.state_dict(), best_model_path)
+                print(f"   New best val_pk: {val_pk:.4f} (improved from {prev_best:.4f}), "
+                      f"threshold={best_threshold:.2f}, checkpoint saved", flush=True)
             else:
-                if val_f1 > 0.0:
+                # Don't count patience if model hasn't predicted any boundaries yet
+                if epoch_metrics["n_predicted"] > 0:
                     patience_counter += 1
-                    print(f"   val_f1 did not improve ({val_f1:.4f} vs best {best_val_f1:.4f}), patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
+                    print(f"   val_pk did not improve ({val_pk:.4f} vs best {best_val_pk:.4f}), "
+                          f"patience {patience_counter}/{cfg['early_stopping_patience']}", flush=True)
                 else:
-                    print(f"   val_f1=0.0, not counting patience", flush=True)
-                torch.save(model.state_dict(), best_model_path)  # always keep latest
+                    torch.save(model.state_dict(), best_model_path)
+                    print(f"   No boundaries predicted yet, not counting patience", flush=True)
                 if patience_counter >= cfg["early_stopping_patience"]:
-                    print(f"   Early stopping triggered at epoch {epoch} - val_f1 did not improve for {patience_counter} epochs", flush=True)
-                    log.info(f"Early stopping at epoch {epoch}")
+                    print(f"   Early stopping triggered at epoch {epoch} ; "
+                          f"val_pk did not improve for {patience_counter} epochs ", flush=True)
                     break
 
         # ── Final test evaluation ─────────────────────────────────────────────
         model.load_state_dict(torch.load(best_model_path))
         model.eval()
-        test_preds, test_true, test_probs = [], [], []
+        test_probs, test_true = [], []
         with torch.no_grad():
             for batch in test_loader:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
                 probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
-                preds = (probs >= 0.5).astype(int)
-                test_preds.extend(preds)
-                test_true.extend(batch["labels"].numpy())
                 test_probs.extend(probs)
+                test_true.extend(batch["labels"].numpy())
+
+        # Apply best threshold found on val set
+        test_preds = (np.array(test_probs) >= best_threshold).astype(int)
+        test_seg_metrics = compute_segmentation_metrics(
+            test_true, test_preds.tolist(), test_meeting_ids)
 
         total_train_time = time.time() - total_train_start
-        test_seg_metrics = compute_segmentation_metrics(test_true, test_preds, test_meeting_ids)
 
         final_metrics = {
             "test_f1": round(f1_score(test_true, test_preds, zero_division=0), 4),
             "test_precision": round(precision_score(test_true, test_preds, zero_division=0), 4),
             "test_recall": round(recall_score(test_true, test_preds, zero_division=0), 4),
+            "best_val_pk": round(best_val_pk, 4),
             "best_val_f1": round(best_val_f1, 4),
+            "best_threshold": best_threshold,
             "total_training_time_sec": round(total_train_time, 1),
-            **{f"test_{k}": v for k, v in test_seg_metrics.items()},
+            "test_pk": round(test_seg_metrics.get("pk", -1.0), 4),
+            "test_window_diff": round(test_seg_metrics.get("window_diff", -1.0), 4),
         }
         if torch.cuda.is_available():
             final_metrics["peak_vram_gb"] = round(
                 torch.cuda.max_memory_allocated() / 1e9, 2)
 
         mlflow.log_metrics(final_metrics)
+        mlflow.log_param("best_threshold", best_threshold)
         log.info(f"Test F1: {final_metrics['test_f1']:.4f} | "
-                 f"WindowDiff: {final_metrics.get('test_window_diff', '?')}")
+                 f"Test Pk: {final_metrics['test_pk']:.4f} | "
+                 f"Best threshold: {best_threshold:.2f}")
 
         # Log model + tokenizer as MLflow artifact
         mlflow.pytorch.log_model(model, artifact_path="model",
