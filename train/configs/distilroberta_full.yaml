@@ -9,9 +9,10 @@ lr: 3e-5
 batch_size: 32
 epochs: 8
 warmup_ratio: 0.1
-weight_decay: 0.01
+weight_decay: 0.05
 max_seq_len: 256
-dropout: 0.1
+dropout: 0.2
+max_oversample: 5.0
 early_stopping_patience: 3
 data_dir: /data/ami_processed
 output_dir: /artifacts/models
