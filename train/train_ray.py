@@ -1,26 +1,29 @@
 """
 train_ray.py  —  Ray Train wrapper for fault-tolerant RoBERTa fine-tuning.
 
-This goes BEYOND just calling `ray submit on an unmodified script`:
-  - Uses RayDDPStrategy for distributed training
-  - Saves checkpoints to MinIO/S3 after each epoch via RunConfig
-  - If a worker dies mid-training, Ray resumes from the last checkpoint
-    automatically — without restarting from epoch 0
+shows Ray Train making training more robust than plain train.py
+by automatically resuming from checkpoints after worker failure.
 
-Concrete robustness demo (for EC PDF):
-  1. Start this script
-  2. After epoch 1 completes (checkpoint saved to s3://ray/...)
-  3. Kill the worker: `ray stop --force` on the worker node, or
-     `docker kill <container>` for the Ray worker container
-  4. Resubmit the same job — Ray detects the existing checkpoint and resumes
-  5. Training continues from epoch 2, not epoch 1
+Usage:
+  # Install Ray (on host, not in container)
+  pip install "ray[train]==2.10.0" --break-system-packages
 
-Usage (from Jupyter on Chameleon, with Ray cluster already running):
+  # Start a single-node Ray cluster
+  ray start --head --num-gpus=1
+
+  export MLFLOW_TRACKING_URI=http://129.114.25.90:8000
+
+  # Run (and kill after epoch 1 to demo fault tolerance)
   python train_ray.py \
-    --config configs/roberta_base_full.yaml \
-    --num_workers 1 \
-    --data_dir /data/ami_processed \
-    --storage_path s3://ray
+    --config /home/cc/ML-Sys-Ops-Project/train/configs/roberta_base_full.yaml \
+    --data_dir /home/cc/ami_processed \
+    --storage_path /home/cc/artifacts/ray_checkpoints
+
+  # Rerun same command — resumes from checkpoint
+  python train_ray.py \
+    --config /home/cc/ML-Sys-Ops-Project/train/configs/roberta_base_full.yaml \
+    --data_dir /home/cc/ami_processed \
+    --storage_path /home/cc/artifacts/ray_checkpoints
 """
 
 import argparse
@@ -30,32 +33,13 @@ import sys
 import time
 import yaml
 import logging
-
 import numpy as np
-import mlflow
-import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import (
-    AutoTokenizer, AutoModelForSequenceClassification,
-    get_linear_schedule_with_warmup,
-)
-from sklearn.metrics import f1_score, precision_score, recall_score
 
-import ray
-import ray.train
-from ray.train import RunConfig, ScalingConfig, Checkpoint
-from ray.train.torch import TorchTrainer
-from ray.train.lightning import (
-    RayDDPStrategy, RayLightningEnvironment, prepare_trainer,
-)
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 
-# ── Tokenization — identical to train.py ──────────────────────────────────────
-
-def format_window(window: list) -> str:
+def format_window(window):
     parts = []
     for utt in sorted(window, key=lambda u: u["position"]):
         if utt["text"].strip():
@@ -68,33 +52,30 @@ def load_jsonl(path):
         return [json.loads(l) for l in f]
 
 
-class WindowDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_len):
-        self.encodings = tokenizer(
-            texts, truncation=True, padding="max_length",
-            max_length=max_len, return_tensors="pt")
-        self.labels = torch.tensor(labels, dtype=torch.long)
-
-    def __len__(self): return len(self.labels)
-
-    def __getitem__(self, idx):
-        return {
-            "input_ids": self.encodings["input_ids"][idx],
-            "attention_mask": self.encodings["attention_mask"][idx],
-            "labels": self.labels[idx],
-        }
+def load_split(data_dir, split):
+    examples = load_jsonl(os.path.join(data_dir, f"{split}.jsonl"))
+    texts = [format_window(e["window"]) for e in examples]
+    labels = [e["label"] for e in examples]
+    return texts, labels
 
 
-# ── Train function (runs on each Ray worker) ──────────────────────────────────
-
-def train_func(config: dict):
+def train_func(config):
     """
-    This entire function runs inside a Ray worker process.
+    This function runs inside a Ray worker.
     Ray handles:
-      - Distributing this function across workers
-      - Saving/loading checkpoints from S3
-      - Resuming from last checkpoint if a worker fails
+      - Checkpointing to persistent storage after each epoch
+      - Resuming from last checkpoint if worker is killed and restarted
+      - Fault tolerance: max_failures=3 means Ray retries up to 3 times
     """
+    import torch
+    from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+    from transformers import (
+        AutoTokenizer, AutoModelForSequenceClassification,
+        get_linear_schedule_with_warmup,
+    )
+    from sklearn.metrics import f1_score
+    import ray.train
+
     device = ray.train.torch.get_device()
     data_dir = config["data_dir"]
 
@@ -102,20 +83,37 @@ def train_func(config: dict):
     special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
-    def load_split(split):
-        examples = load_jsonl(os.path.join(data_dir, f"{split}.jsonl"))
-        texts = [format_window(e["window"]) for e in examples]
-        labels = [e["label"] for e in examples]
-        return texts, labels
+    class WindowDataset(Dataset):
+        def __init__(self, texts, labels, tokenizer, max_len):
+            self.encodings = tokenizer(
+                texts, truncation=True, padding="max_length",
+                max_length=max_len, return_tensors="pt")
+            self.labels = torch.tensor(labels, dtype=torch.long)
+        def __len__(self): return len(self.labels)
+        def __getitem__(self, idx):
+            return {
+                "input_ids": self.encodings["input_ids"][idx],
+                "attention_mask": self.encodings["attention_mask"][idx],
+                "labels": self.labels[idx],
+            }
 
-    train_texts, train_labels = load_split("train")
-    val_texts, val_labels = load_split("val")
+    train_texts, train_labels = load_split(data_dir, "train")
+    val_texts, val_labels = load_split(data_dir, "val")
+
+    # WeightedRandomSampler for class imbalance
+    n_pos = sum(train_labels)
+    n_neg = len(train_labels) - n_pos
+    max_oversample = config.get("max_oversample", 5.0)
+    effective_ratio = min(n_neg / max(n_pos, 1), max_oversample)
+    sample_weights = [1.0 if l == 0 else effective_ratio for l in train_labels]
+    sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
 
     train_ds = WindowDataset(train_texts, train_labels, tokenizer, config["max_seq_len"])
     val_ds = WindowDataset(val_texts, val_labels, tokenizer, config["max_seq_len"])
 
-    train_loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=config["batch_size"],
+                              sampler=sampler, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=2)
 
     # Prepare loaders for distributed training
     train_loader = ray.train.torch.prepare_data_loader(train_loader)
@@ -123,50 +121,60 @@ def train_func(config: dict):
 
     model = AutoModelForSequenceClassification.from_pretrained(
         config["model_name"], num_labels=2,
-        hidden_dropout_prob=config["dropout"],
-        attention_probs_dropout_prob=config["dropout"],
+        hidden_dropout_prob=config.get("dropout", 0.2),
+        attention_probs_dropout_prob=config.get("dropout", 0.2),
     )
     model.resize_token_embeddings(len(tokenizer))
 
-    # Prepare model for distributed training (wraps in DDP)
+    # Prepare model for distributed training
     model = ray.train.torch.prepare_model(model)
 
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
+        model.parameters(),
+        lr=config["lr"],
+        weight_decay=config.get("weight_decay", 0.05),
+    )
     total_steps = len(train_loader) * config["epochs"]
-    warmup_steps = int(config["warmup_ratio"] * total_steps)
+    warmup_steps = int(config.get("warmup_ratio", 0.1) * total_steps)
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    loss_fn = torch.nn.CrossEntropyLoss()
 
-    # ── Checkpoint resume ─────────────────────────────────────────────────────
-    # This is the key fault-tolerance feature:
-    # If a checkpoint exists (from a previous interrupted run), Ray automatically
-    # loads it here and we skip already-completed epochs.
+    # ── Resume from checkpoint if one exists ─────────────────────────────────
+    # This is the key fault-tolerance feature.
+    # If this worker was killed after epoch N, Ray finds the checkpoint
+    # saved at epoch N and resumes here — skipping epochs 1..N entirely.
     start_epoch = 1
     checkpoint = ray.train.get_checkpoint()
     if checkpoint:
         with checkpoint.as_directory() as ckpt_dir:
-            ckpt = torch.load(os.path.join(ckpt_dir, "checkpoint.pt"))
-            model.module.load_state_dict(ckpt["model_state"])
-            optimizer.load_state_dict(ckpt["optimizer_state"])
-            scheduler.load_state_dict(ckpt["scheduler_state"])
+            ckpt = torch.load(os.path.join(ckpt_dir, "state.pt"), map_location=device)
+            model.module.load_state_dict(ckpt["model"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            scheduler.load_state_dict(ckpt["scheduler"])
             start_epoch = ckpt["epoch"] + 1
-            log.info(f"Resumed from checkpoint at epoch {ckpt['epoch']}")
+            print(f"Resumed from checkpoint at epoch {ckpt['epoch']} "
+                  f"— continuing from epoch {start_epoch}", flush=True)
+    else:
+        print("No checkpoint found — starting from epoch 1", flush=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, config["epochs"] + 1):
         model.train()
         train_loss = 0.0
+        t0 = time.time()
+
         for batch in train_loader:
             optimizer.zero_grad()
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            outputs.loss.backward()
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            loss = loss_fn(outputs.logits, labels)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-            train_loss += outputs.loss.item()
+            train_loss += loss.item()
 
         # Validation
         model.eval()
@@ -176,50 +184,70 @@ def train_func(config: dict):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-                val_preds.extend(logits.argmax(dim=-1).cpu().numpy())
+                probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+                preds = (probs >= 0.3).astype(int)
+                val_preds.extend(preds)
                 val_true.extend(batch["labels"].numpy())
 
-        val_f1 = f1_score(val_true, val_preds)
+        val_f1 = f1_score(val_true, val_preds, zero_division=0)
+        avg_loss = train_loss / len(train_loader)
+        epoch_time = time.time() - t0
 
-        # ── Save checkpoint to S3 after each epoch ────────────────────────────
-        # Ray stores this in storage_path (s3://ray/...) specified in RunConfig.
-        # If this worker dies before the next epoch, the new worker will find
-        # this checkpoint and resume from here — not from epoch 1.
+        print(f"Epoch {epoch}/{config['epochs']} | loss={avg_loss:.4f} | "
+              f"val_f1={val_f1:.4f} | time={epoch_time:.1f}s", flush=True)
+
+        # ── Save checkpoint to persistent storage after every epoch ───────────
+        # Even if the worker is killed immediately after this line,
+        # the next worker will find this checkpoint and resume from epoch+1.
         ckpt_data = {
             "epoch": epoch,
-            "model_state": model.module.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
+            "model": model.module.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
         }
-        with ray.train.Checkpoint.from_dict(ckpt_data) as checkpoint:
+
+        # Write checkpoint to a temp dir then pass to Ray
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            torch.save(ckpt_data, os.path.join(tmp, "state.pt"))
+            checkpoint = ray.train.Checkpoint.from_directory(tmp)
             ray.train.report(
                 metrics={
                     "epoch": epoch,
-                    "train_loss": round(train_loss / len(train_loader), 4),
+                    "train_loss": round(avg_loss, 4),
                     "val_f1": round(val_f1, 4),
                 },
                 checkpoint=checkpoint,
             )
+        print(f"  Checkpoint saved after epoch {epoch} "
+              f"(kill the job now to demo fault tolerance)", flush=True)
 
-        log.info(f"Epoch {epoch} | loss={train_loss/len(train_loader):.4f} | val_f1={val_f1:.4f}")
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/roberta_base_full.yaml")
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--data_dir", default="/home/cc/ami_processed")
+    parser.add_argument("--storage_path", default="/home/cc/artifacts/ray_checkpoints")
     parser.add_argument("--num_workers", type=int, default=1)
-    parser.add_argument("--data_dir", default="/data/ami_processed")
-    parser.add_argument("--storage_path", default="s3://ray",
-                        help="MinIO/S3 path for checkpoints — Ray worker resumes from here on failure")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     cfg["data_dir"] = args.data_dir
 
-    ray.init(address="auto")  # connect to existing Ray cluster on Chameleon
+    # Ensure numeric types
+    cfg["lr"] = float(cfg["lr"])
+    cfg["batch_size"] = int(cfg["batch_size"])
+    cfg["epochs"] = int(cfg.get("epochs", 8))
+    cfg["max_seq_len"] = int(cfg.get("max_seq_len", 256))
+
+    import ray
+    import ray.train
+    from ray.train import RunConfig, ScalingConfig, FailureConfig
+    from ray.train.torch import TorchTrainer
+
+    ray.init(address="auto", ignore_reinit_error=True)
+    log.info(f"Ray cluster: {ray.cluster_resources()}")
 
     trainer = TorchTrainer(
         train_func,
@@ -227,19 +255,21 @@ def main():
         scaling_config=ScalingConfig(
             num_workers=args.num_workers,
             use_gpu=True,
-            resources_per_worker={"GPU": 1, "CPU": 4},
+            resources_per_worker={"GPU": 1, "CPU": 2},
         ),
         run_config=RunConfig(
             name="jitsi-roberta-fault-tolerant",
             storage_path=args.storage_path,
-            # failure_config: automatically retry failed workers up to 3 times
-            failure_config=ray.train.FailureConfig(max_failures=3),
+            # Key: automatically retry up to 3 times on worker failure
+            # Each retry loads the last saved checkpoint
+            failure_config=FailureConfig(max_failures=3),
         ),
     )
 
+    log.info("Starting Ray Train job — kill after epoch 1 checkpoint to demo fault tolerance")
     result = trainer.fit()
-    print(f"\nBest checkpoint metrics: {result.metrics}")
-    print(f"Checkpoint path: {result.checkpoint}")
+    print(f"\nFinal metrics: {result.metrics}", flush=True)
+    print(f"Checkpoint path: {result.checkpoint}", flush=True)
 
 
 if __name__ == "__main__":
