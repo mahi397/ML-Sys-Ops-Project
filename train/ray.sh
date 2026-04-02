@@ -15,6 +15,7 @@ MLFLOW_URI=http://129.114.25.90:8000
 IMAGE=jitsi-train:latest
 
 DOCKER_BASE="docker run --rm --gpus all \
+  --shm-size=10.24gb \
   -v ${REPO}:/app \
   -v ${DATA_DIR}:/data/ami_processed \
   -v ${STORAGE}:/ray_checkpoints \
