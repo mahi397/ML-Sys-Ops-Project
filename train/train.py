@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. No one-off scripts.
+are selected via config. 
 
 Usage:
   # Run with a config file
@@ -435,6 +435,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     best_val_pk = float("inf")   # early stopping monitors Pk (lower = better)
     best_val_f1 = 0.0            # kept for logging only
     best_threshold = 0.5         # updated each epoch by threshold sweep
+    prev_epoch_threshold = 0.5   # for smoothing
     patience_counter = 0
     best_model_path = os.path.join(cfg["output_dir"], f"{run_name}_best.pt")
     os.makedirs(cfg["output_dir"], exist_ok=True)
@@ -487,6 +488,32 @@ def run_roberta(cfg: Dict, run_id_holder: list):
             epoch_threshold, epoch_metrics, ref_metrics = sweep_thresholds(
                 val_probs, val_true, val_meeting_ids)
 
+            # Smooth threshold — don't allow jumps > 0.15 from the previous epoch.
+            # Wild threshold jumps indicate the model's probability distribution
+            # is unstable (overfitting symptom). Smoothing prevents the sweep
+            # from chasing noise while still allowing gradual adaptation.
+            if epoch > 1:
+                max_jump = 0.15
+                epoch_threshold = float(np.clip(
+                    epoch_threshold,
+                    prev_epoch_threshold - max_jump,
+                    prev_epoch_threshold + max_jump,
+                ))
+                # Recompute metrics with the smoothed threshold
+                smoothed_preds = (np.array(val_probs) >= epoch_threshold).astype(int)
+                smoothed_seg = compute_segmentation_metrics(
+                    val_true, smoothed_preds.tolist(), val_meeting_ids)
+                epoch_metrics = {
+                    "f1": f1_score(val_true, smoothed_preds, zero_division=0),
+                    "precision": precision_score(val_true, smoothed_preds, zero_division=0),
+                    "recall": recall_score(val_true, smoothed_preds, zero_division=0),
+                    "pk": smoothed_seg.get("pk", 1.0),
+                    "window_diff": smoothed_seg.get("window_diff", 1.0),
+                    "n_predicted": int(smoothed_preds.sum()),
+                    "n_true": int(np.array(val_true).sum()),
+                }
+            prev_epoch_threshold = epoch_threshold
+
             val_f1 = epoch_metrics["f1"]
             val_pk = epoch_metrics["pk"]
 
@@ -532,7 +559,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                     print(f"   No boundaries predicted yet, not counting patience", flush=True)
                 if patience_counter >= cfg["early_stopping_patience"]:
                     print(f"   Early stopping triggered at epoch {epoch} ; "
-                          f"val_pk did not improve for {patience_counter} epochs ", flush=True)
+                          f"val_pk did not improve for {patience_counter} epochs", flush=True)
                     break
 
         # ── Final test evaluation ─────────────────────────────────────────────
