@@ -2,7 +2,7 @@
 train.py  —  Single configurable training script for topic boundary detection.
 
 All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. 
+are selected via config. No one-off scripts.
 
 Usage:
   # Run with a config file
@@ -33,6 +33,7 @@ import numpy as np
 import mlflow
 import mlflow.sklearn
 import mlflow.pytorch
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -117,8 +118,6 @@ def run_baseline(cfg: Dict, run_id_holder: list):
     from sklearn.pipeline import Pipeline
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import f1_score, precision_score, recall_score
-
     log.info("Running TF-IDF + Logistic Regression baseline")
     train_texts, train_labels, _ = load_split(cfg["data_dir"], "train")
     val_texts, val_labels, val_meeting_ids = load_split(cfg["data_dir"], "val")
@@ -319,7 +318,6 @@ def run_roberta(cfg: Dict, run_id_holder: list):
         AutoTokenizer, AutoModelForSequenceClassification,
         get_linear_schedule_with_warmup,
     )
-    from sklearn.metrics import f1_score, precision_score, recall_score
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Device: {device}")
