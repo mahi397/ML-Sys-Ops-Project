@@ -5,8 +5,8 @@ shows Ray Train making training more robust than plain train.py
 by automatically resuming from checkpoints after worker failure.
 
 Usage:
-  # Install Ray 
-  pip install "ray[train]==2.10.0" --break-system-packages
+  # Install Ray
+  pip install "ray[train]==2.10.0"
 
   # Start a single-node Ray cluster
   ray start --head --num-gpus=1
@@ -140,9 +140,6 @@ def train_func(config):
     loss_fn = torch.nn.CrossEntropyLoss()
 
     # ── Resume from checkpoint if one exists ─────────────────────────────────
-    # This is the key fault-tolerance feature.
-    # If this worker was killed after epoch N, Ray finds the checkpoint
-    # saved at epoch N and resumes here — skipping epochs 1..N entirely.
     start_epoch = 1
     checkpoint = ray.train.get_checkpoint()
     if checkpoint:
@@ -156,6 +153,28 @@ def train_func(config):
                   f"— continuing from epoch {start_epoch}", flush=True)
     else:
         print("No checkpoint found — starting from epoch 1", flush=True)
+
+    # ── MLflow logging ────────────────────────────────────────────────────────
+    # Only rank 0 worker logs to MLflow (avoid duplicate runs in distributed)
+    import mlflow
+    should_log = ray.train.get_context().get_world_rank() == 0
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:8000")
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(config.get("experiment_name", "jitsi-topic-segmentation"))
+
+    run_name = f"ray-train-{'resume' if start_epoch > 1 else 'fresh'}-ep{start_epoch}"
+    mlflow_run = mlflow.start_run(run_name=run_name) if should_log else None
+    if should_log:
+        mlflow.log_params({
+            "model_name": config["model_name"],
+            "lr": config["lr"],
+            "batch_size": config["batch_size"],
+            "epochs": config["epochs"],
+            "start_epoch": start_epoch,
+            "resumed": start_epoch > 1,
+            "ray_train": True,
+            "git_sha": os.environ.get("GIT_SHA", "unknown"),
+        })
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, config["epochs"] + 1):
@@ -196,9 +215,15 @@ def train_func(config):
         print(f"Epoch {epoch}/{config['epochs']} | loss={avg_loss:.4f} | "
               f"val_f1={val_f1:.4f} | time={epoch_time:.1f}s", flush=True)
 
+        # Log to MLflow
+        if should_log:
+            mlflow.log_metrics({
+                "train_loss": round(avg_loss, 4),
+                "val_f1": round(val_f1, 4),
+                "epoch_time_sec": round(epoch_time, 1),
+            }, step=epoch)
+
         # ── Save checkpoint to persistent storage after every epoch ───────────
-        # Even if the worker is killed immediately after this line,
-        # the next worker will find this checkpoint and resume from epoch+1.
         ckpt_data = {
             "epoch": epoch,
             "model": model.state_dict(),
@@ -206,7 +231,6 @@ def train_func(config):
             "scheduler": scheduler.state_dict(),
         }
 
-        # Write checkpoint to a temp dir then pass to Ray
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             torch.save(ckpt_data, os.path.join(tmp, "state.pt"))
@@ -221,6 +245,10 @@ def train_func(config):
             )
         print(f"  Checkpoint saved after epoch {epoch} "
               f"(kill the job now to demo fault tolerance)", flush=True)
+
+    # Close MLflow run
+    if should_log and mlflow_run:
+        mlflow.end_run()
 
 
 def main():
