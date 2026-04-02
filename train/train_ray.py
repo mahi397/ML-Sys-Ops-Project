@@ -229,6 +229,9 @@ def main():
     parser.add_argument("--data_dir", default="/home/cc/ami_processed")
     parser.add_argument("--storage_path", default="/home/cc/artifacts/ray_checkpoints")
     parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--restore_path", default=None,
+                        help="Path to a previous Ray Train run directory to restore from. "
+                             "Pass the experiment dir (not the checkpoint dir) to resume.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -246,32 +249,49 @@ def main():
     from ray.train import RunConfig, ScalingConfig, FailureConfig
     from ray.train.torch import TorchTrainer
 
-    # Local mode — Ray starts its own single-node cluster inside the container.
-    # No separate `ray start --head` needed.
     ray.init(ignore_reinit_error=True)
     log.info(f"Ray initialized: {ray.cluster_resources()}")
 
-    trainer = TorchTrainer(
-        train_func,
-        train_loop_config=cfg,
-        scaling_config=ScalingConfig(
-            num_workers=args.num_workers,
-            use_gpu=True,
-            resources_per_worker={"GPU": 1, "CPU": 2},
-        ),
-        run_config=RunConfig(
-            name="jitsi-roberta-fault-tolerant",
-            storage_path=args.storage_path,
-            # Key: automatically retry up to 3 times on worker failure
-            # Each retry loads the last saved checkpoint
-            failure_config=FailureConfig(max_failures=3),
-        ),
+    scaling_config = ScalingConfig(
+        num_workers=args.num_workers,
+        use_gpu=True,
+        resources_per_worker={"GPU": 1, "CPU": 2},
+    )
+    run_config = RunConfig(
+        name="jitsi-roberta-fault-tolerant",
+        storage_path=args.storage_path,
+        failure_config=FailureConfig(max_failures=3),
     )
 
-    log.info("Starting Ray Train job — kill after epoch 1 checkpoint to demo fault tolerance")
+    if args.restore_path:
+        # ── Resume from a previous interrupted run ────────────────────────────
+        # TorchTrainer.restore() loads the full trainer state including the last
+        # checkpoint. The train_func will call ray.train.get_checkpoint() and
+        # find the saved state, then skip already-completed epochs.
+        # This is the key fault-tolerance feature being demonstrated.
+        log.info(f"Restoring from: {args.restore_path}")
+        print(f"RESTORING from previous run at: {args.restore_path}", flush=True)
+        print(f"Training will resume from the last saved checkpoint", flush=True)
+        trainer = TorchTrainer.restore(
+            path=args.restore_path,
+            train_loop_per_worker=train_func,
+            train_loop_config=cfg,
+            scaling_config=scaling_config,
+        )
+    else:
+        log.info("Starting Ray Train job — kill after epoch 1 checkpoint to demo fault tolerance")
+        trainer = TorchTrainer(
+            train_func,
+            train_loop_config=cfg,
+            scaling_config=scaling_config,
+            run_config=run_config,
+        )
+
     result = trainer.fit()
     print(f"\nFinal metrics: {result.metrics}", flush=True)
     print(f"Checkpoint path: {result.checkpoint}", flush=True)
+    # Print the experiment path so the demo script can pass it to the next run
+    print(f"EXPERIMENT_PATH: {result.path}", flush=True)
 
 
 if __name__ == "__main__":
