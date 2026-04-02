@@ -177,79 +177,95 @@ def train_func(config):
             "git_sha": os.environ.get("GIT_SHA", "unknown"),
         })
 
-    # ── Training loop ─────────────────────────────────────────────────────────
-    for epoch in range(start_epoch, config["epochs"] + 1):
-        model.train()
-        train_loss = 0.0
-        t0 = time.time()
+    epoch = start_epoch - 1  # track last completed epoch for finally block
+    try:
+        # ── Training loop ─────────────────────────────────────────────────────
+        for epoch in range(start_epoch, config["epochs"] + 1):
+            model.train()
+            train_loss = 0.0
+            t0 = time.time()
 
-        for batch in train_loader:
-            optimizer.zero_grad()
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            loss = loss_fn(outputs.logits, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            train_loss += loss.item()
-
-        # Validation
-        model.eval()
-        val_preds, val_true = [], []
-        with torch.no_grad():
-            for batch in val_loader:
+            for batch in train_loader:
+                optimizer.zero_grad()
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
-                logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-                probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
-                preds = (probs >= 0.3).astype(int)
-                val_preds.extend(preds)
-                val_true.extend(batch["labels"].cpu().numpy())
+                labels = batch["labels"].to(device)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                loss = loss_fn(outputs.logits, labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                train_loss += loss.item()
 
-        val_f1 = f1_score(val_true, val_preds, zero_division=0)
-        avg_loss = train_loss / len(train_loader)
-        epoch_time = time.time() - t0
+            # Validation
+            model.eval()
+            val_probs, val_true, val_mids = [], [], []
+            with torch.no_grad():
+                for batch in val_loader:
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+                    probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+                    val_probs.extend(probs)
+                    val_true.extend(batch["labels"].cpu().numpy())
+                    val_mids.extend(batch.get("meeting_ids", ["unknown"] * len(probs)))
 
-        print(f"Epoch {epoch}/{config['epochs']} | loss={avg_loss:.4f} | "
-              f"val_f1={val_f1:.4f} | time={epoch_time:.1f}s", flush=True)
+            import numpy as np
+            val_probs_arr = np.array(val_probs)
+            val_true_arr = np.array(val_true)
+            best_pk, best_thr, best_f1 = 1.0, 0.5, 0.0
+            for thr in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]:
+                preds = (val_probs_arr >= thr).astype(int)
+                f1 = f1_score(val_true_arr, preds, zero_division=0)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_thr = thr
+                    best_pk = 1.0 - f1
 
-        # Log to MLflow
-        if should_log:
-            mlflow.log_metrics({
-                "train_loss": round(avg_loss, 4),
-                "val_f1": round(val_f1, 4),
-                "epoch_time_sec": round(epoch_time, 1),
-            }, step=epoch)
+            val_f1 = best_f1
+            avg_loss = train_loss / len(train_loader)
+            epoch_time = time.time() - t0
 
-        # ── Save checkpoint to persistent storage after every epoch ───────────
-        ckpt_data = {
-            "epoch": epoch,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-        }
+            print(f"Epoch {epoch}/{config['epochs']} | loss={avg_loss:.4f} | "
+                  f"val_f1={val_f1:.4f} (thr={best_thr:.2f}) | time={epoch_time:.1f}s",
+                  flush=True)
 
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            torch.save(ckpt_data, os.path.join(tmp, "state.pt"))
-            checkpoint = ray.train.Checkpoint.from_directory(tmp)
-            ray.train.report(
-                metrics={
-                    "epoch": epoch,
+            if should_log:
+                mlflow.log_metrics({
                     "train_loss": round(avg_loss, 4),
                     "val_f1": round(val_f1, 4),
-                },
-                checkpoint=checkpoint,
-            )
-        print(f"  Checkpoint saved after epoch {epoch} "
-              f"(kill the job now to demo fault tolerance)", flush=True)
+                    "val_best_threshold": best_thr,
+                    "epoch_time_sec": round(epoch_time, 1),
+                }, step=epoch)
 
-    # Close MLflow run
-    if should_log and mlflow_run:
-        mlflow.end_run()
+            ckpt_data = {
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            }
+
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                torch.save(ckpt_data, os.path.join(tmp, "state.pt"))
+                checkpoint = ray.train.Checkpoint.from_directory(tmp)
+                ray.train.report(
+                    metrics={
+                        "epoch": epoch,
+                        "train_loss": round(avg_loss, 4),
+                        "val_f1": round(val_f1, 4),
+                    },
+                    checkpoint=checkpoint,
+                )
+            print(f"  Checkpoint saved after epoch {epoch} "
+                  f"(kill the job now to demo fault tolerance)", flush=True)
+
+    finally:
+        # Always close the MLflow run — even if the job is killed mid-training.
+        # Without this, runs stay in RUNNING state in MLflow indefinitely.
+        if should_log and mlflow_run:
+            mlflow.end_run(status="FINISHED" if epoch == config["epochs"] else "KILLED")
 
 
 def main():
