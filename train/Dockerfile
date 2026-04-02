@@ -20,7 +20,8 @@ RUN pip install --no-cache-dir \
     pyyaml==6.0.1 \
     tqdm==4.66.4 \
     accelerate==0.30.0 \
-    nltk==3.8.1
+    nltk==3.8.1 \
+    "ray[train]==2.10.0"
 
 COPY . /app
 
