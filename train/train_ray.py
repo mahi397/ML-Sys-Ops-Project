@@ -1,12 +1,12 @@
 """
 train_ray.py  —  Ray Train wrapper for fault-tolerant RoBERTa fine-tuning.
 
-shows Ray Train making training more robust than plain train.py
+to show Ray Train making training more robust than plain train.py
 by automatically resuming from checkpoints after worker failure.
 
 Usage:
-  # Install Ray (on host, not in container)
-  pip install "ray[train]==2.10.0" --break-system-packages
+  # Install Ray 
+  pip install "ray[train]==2.10.0" 
 
   # Start a single-node Ray cluster
   ray start --head --num-gpus=1
@@ -246,8 +246,10 @@ def main():
     from ray.train import RunConfig, ScalingConfig, FailureConfig
     from ray.train.torch import TorchTrainer
 
-    ray.init(address="auto", ignore_reinit_error=True)
-    log.info(f"Ray cluster: {ray.cluster_resources()}")
+    # Local mode — Ray starts its own single-node cluster inside the container.
+    # No separate `ray start --head` needed.
+    ray.init(ignore_reinit_error=True)
+    log.info(f"Ray initialized: {ray.cluster_resources()}")
 
     trainer = TorchTrainer(
         train_func,
