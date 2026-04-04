@@ -16,7 +16,7 @@ EOF
 # Submit the job from inside the container where Ray is running
 docker exec -e GIT_SHA=$GIT_SHA ray-head \
   /bin/bash -c "cd /app/train && ray job submit \
-    --address http://127.0.0.1:8265 \
+    --address http://127.0.0.1:6379 \
     --runtime-env runtime_ray.json \
     --working-dir . \
     -- python train_ray.py --config configs/roberta_base_frozen.yaml"
