@@ -1,5 +1,5 @@
 """
-Run this once on the Chameleon instance to export RoBERTa to ONNX.
+Chameleon instance to export RoBERTa to ONNX
 Usage: python3 scripts/export_onnx.py
 Output: models/roberta_seg.onnx
 """

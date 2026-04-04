@@ -1,8 +1,7 @@
 # -------------------------------------------------------
 # SHARED CONTRACT WITH TRAINING ROLE (Mahima)
-# This file must be identical to the one used in training.
+# This file must be identical to the one used in training
 # Format: [SPEAKER_X]: text
-# Any change must be coordinated with Mahima.
 # -------------------------------------------------------
 
 def format_window_for_roberta(window: list) -> str:
