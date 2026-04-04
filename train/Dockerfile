@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir \
     nltk==3.8.1 \
     "ray[train]==2.10.0"
 
+# Download NLTK data at build time so workers don't need internet access at runtime
+RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
+
 COPY . /app
 
-ENTRYPOINT ["python", "train.py"]
+ENTRYPOINT ["python"]
