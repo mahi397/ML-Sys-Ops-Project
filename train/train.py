@@ -29,6 +29,8 @@ import platform
 from pathlib import Path
 from typing import Dict, Any
 
+import nltk
+from nltk.metrics.segmentation import windowdiff, pk as pk_metric
 import numpy as np
 import mlflow
 import mlflow.sklearn
@@ -193,13 +195,13 @@ def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
     are not real topic boundaries and corrupt the window-based calculations.
     Lower is better for both.
     """
-    try:
-        import nltk
-        nltk.download("punkt", quiet=True)
-        from nltk.metrics.segmentation import windowdiff, pk as pk_metric
-    except ImportError:
-        log.warning("nltk not installed — skipping WindowDiff/Pk.")
-        return {"window_diff": -1.0, "pk": -1.0}
+    # try:
+    #     import nltk
+    #     nltk.download("punkt", quiet=True)
+    #     from nltk.metrics.segmentation import windowdiff, pk as pk_metric
+    # except ImportError:
+    #     log.warning("nltk not installed — skipping WindowDiff/Pk.")
+    #     return {"window_diff": -1.0, "pk": -1.0}
 
     if meeting_ids is None:
         # No meeting grouping available — skip rather than compute incorrectly
