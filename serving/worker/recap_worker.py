@@ -141,7 +141,8 @@ if __name__ == "__main__":
     test_utterances = [
         {"position": i, "speaker": ["A","B","C"][i%3],
          "t_start": float(i*10), "t_end": float(i*10+9),
-         "text": f"utterance number {i} about topic {"alpha" if i < 5 else "beta"}"}
+         "text": f"utterance number {i} about topic {'alpha' if i < 5 else 'beta'}"
+        }
         for i in range(10)
     ]
     process_meeting("TEST001", test_utterances)

@@ -1,6 +1,20 @@
 services:
 
-  # Option A — PyTorch CPU baseline
+  # Baseline — PyTorch CPU (no GPU, no optimizations)
+  api_pytorch_cpu:
+    build: .
+    ports:
+      - "8002:8000"
+    environment:
+      - SERVING_MODE=pytorch
+      - BOUNDARY_THRESHOLD=0.5
+      - MODEL_PATH=/models/roberta-seg
+      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+      - CUDA_VISIBLE_DEVICES=""
+    volumes:
+      - ./models:/models
+
+  # Option A — PyTorch GPU baseline
   api_pytorch:
     build: .
     ports:
@@ -53,6 +67,22 @@ services:
               count: 1
               capabilities: [gpu]
 
+  api_onnx_gpu:
+    build: .
+    ports:
+      - "8003:8000"
+    environment:
+      - SERVING_MODE=onnx_gpu
+      - BOUNDARY_THRESHOLD=0.5
+      - MODEL_PATH=/models
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+            
   # async recap worker
   worker:
     build: .
