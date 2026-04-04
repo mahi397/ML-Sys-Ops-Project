@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir \
     tqdm==4.66.4 \
     accelerate==0.30.0 \
     nltk==3.8.1 \
-    "ray[train]==2.10.0"
+    "ray[train,default]==2.10.0"
 
 # Download NLTK data at build time so workers don't need internet access at runtime
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
