@@ -1,0 +1,67 @@
+services:
+
+  # Option A — PyTorch CPU baseline
+  api_pytorch:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SERVING_MODE=pytorch
+      - BOUNDARY_THRESHOLD=0.5
+      - MODEL_PATH=/models/roberta-seg
+      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Option B — ONNX CPU
+  api_onnx_cpu:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      - SERVING_MODE=onnx_cpu
+      - BOUNDARY_THRESHOLD=0.5
+      - ONNX_MODEL_PATH=/models/roberta_seg.onnx
+      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+    volumes:
+      - ./models:/models
+
+  # Option C — ONNX GPU via Triton
+  triton:
+    image: nvcr.io/nvidia/tritonserver:23.10-py3
+    ports:
+      - "8100:8000"
+      - "8101:8001"
+      - "8102:8002"
+    volumes:
+      - ./triton_models:/models
+    command: tritonserver --model-repository=/models
+    profiles:
+      - triton
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # async recap worker
+  worker:
+    build: .
+    command: python3 worker/recap_worker.py
+    environment:
+      - BOUNDARY_THRESHOLD=0.5
+      - MODEL_PATH=/models/roberta-seg
+      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+    volumes:
+      - ./models:/models
+    depends_on:
+      - api_pytorch

@@ -1,0 +1,37 @@
+name: "roberta_segmenter"
+backend: "onnxruntime"
+max_batch_size: 256
+
+input [
+  {
+    name: "input_ids"
+    data_type: TYPE_INT64
+    dims: [512]
+  },
+  {
+    name: "attention_mask"
+    data_type: TYPE_INT64
+    dims: [512]
+  }
+]
+
+output [
+  {
+    name: "logits"
+    data_type: TYPE_FP32
+    dims: [2]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [64, 128, 256]
+  max_queue_delay_microseconds: 5000
+}
