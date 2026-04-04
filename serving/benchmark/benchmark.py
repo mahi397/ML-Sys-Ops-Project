@@ -37,6 +37,20 @@ SAMPLE_B = {
     "meeting_context": {"total_segments": 4, "segment_index_in_meeting": 1}
 }
 
+def get_cpu_ram():
+    try:
+        r = subprocess.run(
+            ["ps", "aux", "--sort=-%mem"],
+            capture_output=True, text=True
+        )
+        # also get total memory usage
+        mem = subprocess.run(
+            ["free", "-m"],
+            capture_output=True, text=True
+        )
+        return mem.stdout.split('\n')[1].split()[2] + " MB RAM used"
+    except:
+        return "N/A"
 
 def get_vram():
     try:
