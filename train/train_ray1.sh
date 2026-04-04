@@ -13,7 +13,7 @@ cat > runtime_ray.json << EOF
 }
 EOF
 
-ray job submit \
-  --runtime-env runtime_ray.json \
-  --working-dir . \
-  -- python train_ray1.py --config configs/roberta_base_frozen.yaml
+docker exec -e GIT_SHA=$GIT_SHA ray-head ray job submit \
+  --working-dir /app \
+  --runtime-env /app/runtime_ray.json \
+  -- python train_ray.py --config configs/roberta_base_frozen.yaml
