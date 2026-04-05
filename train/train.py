@@ -577,6 +577,118 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     return final_metrics
 
 
+# hyperparameter sweep using Optuna
+def run_sweep(base_cfg: Dict, args) -> Dict:
+    """
+    Run an Optuna hyperparameter sweep over the base config, then retrain
+    the best config for full epochs. All trials are logged to MLflow.
+
+    Returns the final metrics of the best retrained model.
+    """
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    sweep_experiment = base_cfg.get("experiment_name", "jitsi-topic-segmentation") + "-sweep"
+    mlflow.set_experiment(sweep_experiment)
+
+    #SQLite storage => resumable if interrupted
+    os.makedirs(args.output_dir, exist_ok=True)
+    storage = f"sqlite:///{os.path.join(args.output_dir, 'optuna_study.db')}"
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=base_cfg.get("seed", 42)),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1),
+        study_name="hparam-sweep",
+        storage=storage,
+        load_if_exists=True,
+    )
+
+    completed = len([t for t in study.trials
+                     if t.state == optuna.trial.TrialState.COMPLETE])
+    remaining = max(0, args.n_trials - completed)
+    log.info(f"Sweep: {args.n_trials} trials total, {completed} done, {remaining} remaining")
+
+    def objective(trial):
+        cfg = base_cfg.copy()
+        cfg["lr"] = trial.suggest_float("lr", 1e-5, 5e-5, log=True)
+        cfg["batch_size"] = trial.suggest_categorical("batch_size", [16, 32])
+        cfg["warmup_ratio"] = trial.suggest_float("warmup_ratio", 0.05, 0.2)
+        cfg["weight_decay"] = trial.suggest_float("weight_decay", 0.01, 0.1)
+        cfg["dropout"] = trial.suggest_float("dropout", 0.1, 0.4)
+        cfg["max_oversample"] = trial.suggest_float("max_oversample", 2.0, 8.0)
+        cfg["epochs"] = args.epochs_per_trial
+        cfg["early_stopping_patience"] = 2
+        cfg["output_dir"] = os.path.join(args.output_dir, f"trial_{trial.number}")
+        cfg["experiment_name"] = sweep_experiment
+        os.makedirs(cfg["output_dir"], exist_ok=True)
+        run_id_holder = []
+        try:
+            metrics = run_roberta(cfg, run_id_holder)
+            val_pk = metrics.get("best_val_pk", 1.0)
+            trial.report(val_pk, step=cfg["epochs"])
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+            print(f"Trial {trial.number:02d} | val_pk={val_pk:.4f} | "
+                  f"lr={cfg['lr']:.2e} bs={cfg['batch_size']} "
+                  f"wd={cfg['weight_decay']:.3f} dropout={cfg['dropout']:.2f} "
+                  f"oversample={cfg['max_oversample']:.1f}", flush=True)
+            return val_pk
+        except optuna.exceptions.TrialPruned:
+            raise
+        except Exception as e:
+            log.error(f"Trial {trial.number} failed: {e}")
+            return 1.0
+
+    study.optimize(objective, n_trials=remaining)
+
+    best = study.best_trial
+    log.info(f"Best trial #{best.number}: val_pk={best.value:.4f}")
+
+    #print all completed trials sorted by val_pk
+    completed_trials = [t for t in study.trials
+                        if t.state == optuna.trial.TrialState.COMPLETE]
+    print("\nAll trials (sorted by val_pk):", flush=True)
+    for t in sorted(completed_trials, key=lambda t: t.value):
+        print(f"  Trial {t.number:02d} | val_pk={t.value:.4f} | "
+              f"lr={t.params.get('lr','?'):.2e} bs={t.params.get('batch_size','?')} "
+              f"wd={t.params.get('weight_decay','?'):.3f} "
+              f"dropout={t.params.get('dropout','?'):.2f} "
+              f"oversample={t.params.get('max_oversample','?'):.1f}", flush=True)
+
+    #build best config and save it
+    best_cfg = base_cfg.copy()
+    best_cfg.update(best.params)
+    best_cfg["epochs"] = base_cfg.get("epochs", 8)
+    best_cfg["early_stopping_patience"] = base_cfg.get("early_stopping_patience", 3)
+    best_cfg["output_dir"] = os.path.join(args.output_dir, "best_model")
+    best_cfg["experiment_name"] = base_cfg.get("experiment_name", "jitsi-topic-segmentation")
+
+    best_params_path = os.path.join(args.output_dir, "best_params.yaml")
+    with open(best_params_path, "w") as f:
+        yaml.dump(best_cfg, f, default_flow_style=False)
+    log.info(f"Best config saved to {best_params_path}")
+
+    #log sweep summary to MLflow
+    with mlflow.start_run(run_name="sweep-summary"):
+        mlflow.log_params(best.params)
+        mlflow.log_metric("best_val_pk", best.value)
+        mlflow.log_metric("n_trials_completed", len(completed_trials))
+        mlflow.log_metric("n_trials_pruned",
+                          len([t for t in study.trials
+                               if t.state == optuna.trial.TrialState.PRUNED]))
+        mlflow.log_param("best_trial_number", best.number)
+        mlflow.log_artifact(best_params_path, artifact_path="best_config")
+
+    #retrain best config for full epochs
+    log.info("Retraining best config for full epochs...")
+    mlflow.set_experiment(best_cfg["experiment_name"])
+    run_id_holder = []
+    metrics = run_roberta(best_cfg, run_id_holder)
+    print(f"\nBest retrain Run ID: {run_id_holder[0] if run_id_holder else 'N/A'}")
+    return metrics
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -590,9 +702,17 @@ def main():
     parser.add_argument("--data_dir", default=None)
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--experiment_name", default=None)
+    parser.add_argument("--sweep", action="store_true",
+                        help="Run Optuna sweep then retrain best config. "
+                             "Ignores --epochs during sweep trials.")
+    parser.add_argument("--n_trials", type=int, default=20,
+                        help="Number of Optuna trials (sweep mode only)")
+    parser.add_argument("--epochs_per_trial", type=int, default=3,
+                        help="Epochs per trial during sweep (shorter = faster)")
     args = parser.parse_args()
 
-    overrides = {k: v for k, v in vars(args).items() if k not in ("config",)}
+    overrides = {k: v for k, v in vars(args).items()
+                 if k not in ("config", "sweep", "n_trials", "epochs_per_trial")}
     cfg = load_config(args.config, overrides)
 
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:8000"))
@@ -600,7 +720,14 @@ def main():
 
     run_id_holder = []
 
-    if cfg["model_name"] == "baseline":
+    if args.sweep:
+        if cfg["model_name"] == "baseline":
+            print("Sweep not supported for baseline model.", flush=True)
+            return
+        #output_dir for sweep artifacts
+        args.output_dir = args.output_dir or cfg.get("output_dir", "/artifacts/sweep")
+        metrics = run_sweep(cfg, args)
+    elif cfg["model_name"] == "baseline":
         metrics = run_baseline(cfg, run_id_holder)
     else:
         metrics = run_roberta(cfg, run_id_holder)
