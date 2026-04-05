@@ -1,22 +1,11 @@
 """
-train.py  —  Single configurable training script for topic boundary detection.
-
-All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta)
-are selected via config. 
-
+training script for topic boundary detection. All candidates (baseline, roberta-base frozen, roberta-base full, distilroberta) are selected via config. 
 Usage:
-  # Run with a config file
+  #with a config file
   python train.py --config configs/roberta_base_frozen.yaml
 
-  # Override individual params on CLI
+  #CLI args
   python train.py --config configs/roberta_base_frozen.yaml --lr 3e-5 --epochs 3
-
-  # Baseline (no GPU needed)
-  python train.py --config configs/baseline.yaml
-
-MLflow tracking:
-  Set MLFLOW_TRACKING_URI env var to your Chameleon MLflow instance before running.
-  export MLFLOW_TRACKING_URI=http://<floating-ip>:8000
 """
 
 import argparse
@@ -28,7 +17,6 @@ import logging
 import platform
 from pathlib import Path
 from typing import Dict, Any
-
 import nltk
 from nltk.metrics.segmentation import windowdiff, pk as pk_metric
 import numpy as np
@@ -41,11 +29,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 
-# ── Config loading ─────────────────────────────────────────────────────────────
-
+#load config  
 DEFAULT_CONFIG = {
-    "model_name": "roberta-base",      # or "distilroberta-base", "roberta-large", "baseline"
-    "freeze_backbone": False,           # True = train head only
+    "model_name": "roberta-base",      
+    "freeze_backbone": False,           
     "lr": 2e-5,
     "batch_size": 16,
     "epochs": 5,
@@ -53,13 +40,12 @@ DEFAULT_CONFIG = {
     "weight_decay": 0.01,
     "max_seq_len": 256,
     "dropout": 0.1,
-    "early_stopping_patience": 2,      # stop if val F1 doesn't improve for N epochs
-    "data_dir": "/data/ami_processed", # path to JSONL splits from preprocess_ami.py
+    "early_stopping_patience": 2,      
+    "data_dir": "/data/ami_processed", 
     "output_dir": "/artifacts/models",
     "experiment_name": "jitsi-topic-segmentation",
     "seed": 42,
 }
-
 
 def load_config(config_path: str, overrides: Dict) -> Dict:
     cfg = DEFAULT_CONFIG.copy()
@@ -67,7 +53,6 @@ def load_config(config_path: str, overrides: Dict) -> Dict:
         with open(config_path) as f:
             cfg.update(yaml.safe_load(f))
     cfg.update({k: v for k, v in overrides.items() if v is not None})
-    # Ensure numeric types are correct — YAML sometimes reads scientific notation as str
     for key in ("lr", "weight_decay", "warmup_ratio", "dropout", "feedback_weight"):
         if key in cfg and cfg[key] is not None:
             cfg[key] = float(cfg[key])
@@ -76,12 +61,7 @@ def load_config(config_path: str, overrides: Dict) -> Dict:
             cfg[key] = int(cfg[key])
     return cfg
 
-
-# ── Tokenization — must be IDENTICAL to serving code ──────────────────────────
-# Decision: speaker tag format [SPEAKER_X] is stored as a separate "speaker"
-# field in the JSON so if we change the format (e.g. to <speaker=A>), we only
-# change this function and the serving mirror — the JSON contract is unchanged.
-
+#tokenization
 def format_window(window: list) -> str:
     """
     Convert a 7-utterance window to the string fed to RoBERTa.
@@ -95,8 +75,7 @@ def format_window(window: list) -> str:
     return " ".join(parts)
 
 
-# ── Data loading ───────────────────────────────────────────────────────────────
-
+#Data loading 
 def load_jsonl(path: str):
     examples = []
     with open(path) as f:
@@ -114,8 +93,7 @@ def load_split(data_dir: str, split: str):
     return texts, labels, meeting_ids
 
 
-# ── Baseline: TF-IDF + Logistic Regression ────────────────────────────────────
-
+#baseline: tfidf+logistic regression
 def run_baseline(cfg: Dict, run_id_holder: list):
     from sklearn.pipeline import Pipeline
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -135,15 +113,15 @@ def run_baseline(cfg: Dict, run_id_holder: list):
     pipe.fit(train_texts, train_labels)
     train_time = time.time() - t0
 
-    # Baseline uses predict_proba for threshold sweeping
+    #threshold sweeping
     val_probs = pipe.predict_proba(val_texts)[:, 1]
     test_probs = pipe.predict_proba(test_texts)[:, 1]
 
-    # Sweep thresholds on val set
+    #sweep thresholds on val set
     best_threshold, val_metrics, ref_metrics = sweep_thresholds(
         val_probs, val_labels, val_meeting_ids)
 
-    # Apply best threshold to test set
+    #apply best threshold to test set
     test_preds = (test_probs >= best_threshold).astype(int)
     test_seg = compute_segmentation_metrics(
         test_labels, test_preds.tolist(), test_meeting_ids)
@@ -182,33 +160,23 @@ def run_baseline(cfg: Dict, run_id_holder: list):
     return metrics
 
 
-# ── Segmentation metrics (WindowDiff and Pk) ──────────────────────────────────
-# These are standard topic segmentation metrics beyond binary F1.
+#topic segmentation metrics windowDiff and Pk
 # WindowDiff penalizes off-by-one boundary placement, Pk measures probability
-# of misclassifying a pair of utterances as in the same/different segment.
-
+# of misclassifying a pair of utterances as in the same/different segment
 def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
     """
     Compute WindowDiff and Pk averaged across meetings.
-    Both metrics must be computed per meeting then averaged — computing them
+    Both metrics must be computed per meeting then averaged. computing them
     on the concatenated corpus sequence is incorrect because meeting boundaries
     are not real topic boundaries and corrupt the window-based calculations.
     Lower is better for both.
     """
-    # try:
-    #     import nltk
-    #     nltk.download("punkt", quiet=True)
-    #     from nltk.metrics.segmentation import windowdiff, pk as pk_metric
-    # except ImportError:
-    #     log.warning("nltk not installed — skipping WindowDiff/Pk.")
-    #     return {"window_diff": -1.0, "pk": -1.0}
-
     if meeting_ids is None:
-        # No meeting grouping available — skip rather than compute incorrectly
+        # No meeting grouping available -> skip rather than compute incorrectly
         log.warning("No meeting_ids provided — skipping WindowDiff/Pk.")
         return {"window_diff": -1.0, "pk": -1.0}
 
-    # Group labels by meeting
+    #group labels by meeting
     from collections import defaultdict
     meeting_true = defaultdict(list)
     meeting_pred = defaultdict(list)
@@ -221,7 +189,7 @@ def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
         ref = "".join(str(l) for l in meeting_true[mid])
         hyp = "".join(str(l) for l in meeting_pred[mid])
         if len(ref) < 4:
-            continue  # too short for meaningful segmentation metrics
+            continue  #too short for meaningful segmentation metrics
         k = max(2, len(ref) // 10)
         try:
             wd_scores.append(windowdiff(ref, hyp, k=k, boundary="1"))
@@ -238,9 +206,7 @@ def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
     }
 
 
-
-# ── Threshold sweeping ────────────────────────────────────────────────────────
-# With severe class imbalance (~40:1), the model outputs low probabilities
+#Threshold sweeping: with severe class imbalance (~40:1), the model outputs low probabilities
 # for boundaries (e.g. 0.10-0.25) rather than > 0.5. Using a fixed threshold
 # of 0.5 predicts zero boundaries and gives F1=0.
 # Threshold sweeping finds the best threshold on the val set, which is then
@@ -295,7 +261,6 @@ def sweep_thresholds(probs, true_labels, meeting_ids):
     }
 
 
-
 def log_environment():
     """Log GPU info, Python version, and hostname to MLflow."""
     import torch
@@ -311,8 +276,7 @@ def log_environment():
     mlflow.log_params(env)
 
 
-# ── RoBERTa training ───────────────────────────────────────────────────────────
-
+#RoBERTa training 
 def run_roberta(cfg: Dict, run_id_holder: list):
     import torch
     from torch.utils.data import Dataset, DataLoader
@@ -327,8 +291,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     torch.manual_seed(cfg["seed"])
     np.random.seed(cfg["seed"])
 
-    # ── Dataset ──────────────────────────────────────────────────────────────
-
+    #dataset 
     class WindowDataset(Dataset):
         def __init__(self, texts, labels, tokenizer, max_len):
             self.encodings = tokenizer(
@@ -352,7 +315,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
 
     tokenizer = AutoTokenizer.from_pretrained(cfg["model_name"])
 
-    # Add speaker tokens so they are not split by the tokenizer
+    #add speaker tokens so they are not split by the tokenizer
     special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
@@ -365,7 +328,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     val_ds = WindowDataset(val_texts, val_labels, tokenizer, cfg["max_seq_len"])
     test_ds = WindowDataset(test_texts, test_labels, tokenizer, cfg["max_seq_len"])
 
-    # ── Oversample minority class via WeightedRandomSampler ───────────────────
+    # Oversample minority class via WeightedRandomSampler 
     # WeightedRandomSampler with full inverse-frequency weighting (40:1) causes
     # the model to see the same ~480 boundary examples ~40x per epoch, leading
     # to memorization and val_f1 collapse after epoch 2.
@@ -389,20 +352,20 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     val_loader = DataLoader(val_ds, batch_size=cfg["batch_size"] * 2, num_workers=2)
     test_loader = DataLoader(test_ds, batch_size=cfg["batch_size"] * 2, num_workers=2)
 
-    # ── Model ─────────────────────────────────────────────────────────────────
+    #model 
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg["model_name"],
         num_labels=2,
         hidden_dropout_prob=cfg["dropout"],
         attention_probs_dropout_prob=cfg["dropout"],
     )
-    # Resize embeddings to accommodate [SPEAKER_X] tokens
+    #resize embeddings to accommodate [SPEAKER_X] tokens
     model.resize_token_embeddings(len(tokenizer))
 
     if cfg["freeze_backbone"]:
-        # Decision: freeze all encoder layers, train classification head only.
-        # This produces a faster-to-train, smaller-footprint model at the cost
-        # of some task-specific representation quality. Good "fast" serving candidate.
+        #freeze all encoder layers, train classification head only.
+        #This produces a faster-to-train, smaller-footprint model at the cost
+        #of some task-specific representation quality. Good fast serving candidate
         log.info("Freezing backbone — training classification head only")
         for name, param in model.named_parameters():
             if "classifier" not in name:
@@ -413,10 +376,10 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"Trainable parameters: {n_trainable:,}")
 
-    # Standard loss — class balance handled by WeightedRandomSampler above
+    #standard loss — class balance handled by WeightedRandomSampler above
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    # ── Optimizer / scheduler ─────────────────────────────────────────────────
+    #optimizer/scheduler 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=cfg["lr"],
@@ -426,8 +389,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     warmup_steps = int(cfg["warmup_ratio"] * total_steps)
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
-    # ── Training loop ─────────────────────────────────────────────────────────
-
+    # training loop
     run_name = (
         f"{cfg['model_name'].replace('/', '-')}"
         f"-{'frozen' if cfg['freeze_backbone'] else 'full'}"
@@ -447,7 +409,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     with mlflow.start_run(run_name=run_name) as run:
         run_id_holder.append(run.info.run_id)
 
-        # Log all config params
+        #log all config params
         mlflow.log_params(cfg)
         mlflow.log_params({"n_trainable_params": n_trainable})
         log_environment()
@@ -474,7 +436,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
 
             epoch_time = time.time() - epoch_start
 
-            # ── Validation with threshold sweep ──────────────────────────────
+            # validation with threshold sweep 
             model.eval()
             val_probs, val_true = [], []
             with torch.no_grad():
@@ -486,11 +448,11 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                     val_probs.extend(probs)
                     val_true.extend(batch["labels"].numpy())
 
-            # Sweep thresholds — pick best by val Pk
+            #sweep thresholds — pick best by val Pk
             epoch_threshold, epoch_metrics, ref_metrics = sweep_thresholds(
                 val_probs, val_true, val_meeting_ids)
 
-            # Smooth threshold — don't allow jumps > 0.15 from the previous epoch.
+            #smooth threshold — don't allow jumps > 0.15 from the previous epoch.
             # Wild threshold jumps indicate the model's probability distribution
             # is unstable (overfitting symptom). Smoothing prevents the sweep
             # from chasing noise while still allowing gradual adaptation.
@@ -501,7 +463,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                     prev_epoch_threshold - max_jump,
                     prev_epoch_threshold + max_jump,
                 ))
-                # Recompute metrics with the smoothed threshold
+                #recompute metrics with the smoothed threshold
                 smoothed_preds = (np.array(val_probs) >= epoch_threshold).astype(int)
                 smoothed_seg = compute_segmentation_metrics(
                     val_true, smoothed_preds.tolist(), val_meeting_ids)
@@ -540,7 +502,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                   f"predicted={epoch_metrics['n_predicted']} true={epoch_metrics['n_true']} | "
                   f"time={epoch_time:.1f}s", flush=True)
 
-            # ── Early stopping on Pk (lower is better) ────────────────────────
+            #early stopping on Pk (lower is better) 
             if val_pk < best_val_pk:
                 prev_best = best_val_pk
                 best_val_pk = val_pk
@@ -551,7 +513,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                 print(f"   New best val_pk: {val_pk:.4f} (improved from {prev_best:.4f}), "
                       f"threshold={best_threshold:.2f}, checkpoint saved", flush=True)
             else:
-                # Don't count patience if model hasn't predicted any boundaries yet
+                #don't count patience if model hasn't predicted any boundaries yet
                 if epoch_metrics["n_predicted"] > 0:
                     patience_counter += 1
                     print(f"   val_pk did not improve ({val_pk:.4f} vs best {best_val_pk:.4f}), "
@@ -564,7 +526,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                           f"val_pk did not improve for {patience_counter} epochs", flush=True)
                     break
 
-        # ── Final test evaluation ─────────────────────────────────────────────
+        #final test evaluation 
         model.load_state_dict(torch.load(best_model_path))
         model.eval()
         test_probs, test_true = [], []
@@ -577,7 +539,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                 test_probs.extend(probs)
                 test_true.extend(batch["labels"].numpy())
 
-        # Apply best threshold found on val set
+        #apply best threshold found on val set
         test_preds = (np.array(test_probs) >= best_threshold).astype(int)
         test_seg_metrics = compute_segmentation_metrics(
             test_true, test_preds.tolist(), test_meeting_ids)
@@ -605,7 +567,7 @@ def run_roberta(cfg: Dict, run_id_holder: list):
                  f"Test Pk: {final_metrics['test_pk']:.4f} | "
                  f"Best threshold: {best_threshold:.2f}")
 
-        # Log model + tokenizer as MLflow artifact
+        #log model & tokenizer as MLflow artifact
         mlflow.pytorch.log_model(model, artifact_path="model",
                                   pip_requirements=["transformers==4.40.0", "torch==2.2.0"])
         tokenizer.save_pretrained(os.path.join(cfg["output_dir"], "tokenizer"))
@@ -615,12 +577,10 @@ def run_roberta(cfg: Dict, run_id_holder: list):
     return final_metrics
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None, help="Path to YAML config file")
-    # Allow any config key to be overridden on CLI
     parser.add_argument("--model_name", default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
@@ -635,7 +595,6 @@ def main():
     overrides = {k: v for k, v in vars(args).items() if k not in ("config",)}
     cfg = load_config(args.config, overrides)
 
-    # MLflow experiment
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:8000"))
     mlflow.set_experiment(cfg["experiment_name"])
 
