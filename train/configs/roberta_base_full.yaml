@@ -1,7 +1,3 @@
-# configs/roberta_base_full.yaml
-# Candidate v2: roberta-base, full fine-tune
-# All layers trained → best quality/size tradeoff for this model.
-# "Quality" candidate in the manager table.
 model_name: roberta-base
 freeze_backbone: false
 lr: 2e-5
