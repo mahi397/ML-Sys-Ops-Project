@@ -15,7 +15,7 @@ services:
       - ./models:/models
 
   # Option A — PyTorch GPU baseline
-  api_pytorch:
+  api_pytorch_gpu:
     build: .
     ports:
       - "8000:8000"
@@ -74,7 +74,8 @@ services:
     environment:
       - SERVING_MODE=onnx_gpu
       - BOUNDARY_THRESHOLD=0.5
-      - MODEL_PATH=/models
+      #- MODEL_PATH=/models 
+      - ONNX_MODEL_PATH=/models/roberta_seg.onnx
     volumes:
       - ./models:/models
     deploy:
@@ -82,7 +83,7 @@ services:
         reservations:
           devices:
             - capabilities: [gpu]
-            
+
   # async recap worker
   worker:
     build: .
@@ -95,3 +96,21 @@ services:
       - ./models:/models
     depends_on:
       - api_pytorch
+
+#multiworker PyTorch with 4 workers (for better GPU utilization)
+  api_pytorch_multiworker:
+    build: .
+    ports:
+      - "8004:8000"
+    environment:
+      - SERVING_MODE=pytorch
+      - BOUNDARY_THRESHOLD=0.5
+      - MODEL_PATH=/models/roberta-seg
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

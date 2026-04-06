@@ -4,6 +4,7 @@ from transformers import RobertaTokenizer
 from app.config import BOUNDARY_THRESHOLD
 from app.tokenize import format_window_for_roberta
 
+
 tokenizer   = None
 ort_session = None
 
@@ -30,6 +31,12 @@ def load_onnx_model(model_path: str, use_gpu: bool = False):
         providers=providers
     )
     print(f"[model_onnx.py] Providers in use: {ort_session.get_providers()}")
+
+    opts = ort.SessionOptions()
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.intra_op_num_threads = 4
+
+    session = ort.InferenceSession("models/roberta_seg.onnx", opts, providers=["CPUExecutionProvider"])
 
 
 def predict_boundary_onnx(body) -> dict:

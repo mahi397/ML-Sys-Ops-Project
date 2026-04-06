@@ -27,26 +27,6 @@ serving
 └── README.md               # Documentation for the project
 ```
 
-## Setup Instructions
 
-1. **Clone the repository**:
-   ```
-   git clone <repository-url>
-   cd serving
-   ```
-
-2. **Install dependencies**:
-   ```
-   pip install -r requirements.txt
-   ```
-
-3. **Run the application**:
-   ```
-   python app/main.py
-   ```
-
-## Usage
-
-- The application serves a large language model and provides endpoints for inference.
-- Use the provided scripts to export models to ONNX format and benchmark their performance.
+- The application serves a large language model and provides endpoints for inference
 

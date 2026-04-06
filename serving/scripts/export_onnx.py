@@ -5,7 +5,9 @@ Output: models/roberta_seg.onnx
 """
 import torch
 import os
+import onnx
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
+from onnxruntime.quantization import quantize_dynamic, QuantType
 
 MODEL_PATH  = os.getenv("MODEL_PATH", "roberta-base")
 OUTPUT_PATH = "models/roberta_seg.onnx"
@@ -44,6 +46,13 @@ torch.onnx.export(
     do_constant_folding=True
 )
 
-import onnx
+
 onnx.checker.check_model(onnx.load(OUTPUT_PATH))
 print(f"Done. Saved to {OUTPUT_PATH}")
+
+quantize_dynamic(
+    "models/roberta_seg.onnx",           # input
+    "models/roberta_seg_int8.onnx",      # output
+    weight_type=QuantType.QInt8
+)
+print("INT8 quantized model saved to models/roberta_seg_int8.onnx")

@@ -25,15 +25,6 @@ async def lifespan(app: FastAPI):
         load_onnx_model(ONNX_MODEL_PATH, use_gpu=False)
     elif SERVING_MODE == "onnx_gpu":
         load_onnx_model(ONNX_MODEL_PATH, use_gpu=True)
-    # In main.py, add a new endpoint or mode
-    # Add ONNX GPU mode in config.py:
-    # SERVING_MODE can now be: "pytorch", "onnx_cpu", "onnx_gpu"
-
-    # In main.py where model is loaded, add:
-    elif SERVING_MODE == "onnx_gpu":
-        session = ort.InferenceSession(os.path.join(MODEL_PATH, "roberta_seg.onnx"),
-            providers=["CUDAExecutionProvider"]
-        )    
     load_llm()
     yield
 

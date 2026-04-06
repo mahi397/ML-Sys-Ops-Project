@@ -1,6 +1,5 @@
 # -------------------------------------------------------
 # SHARED CONTRACT WITH TRAINING ROLE (Mahima)
-# This file must be identical to the one used in training
 # Format: [SPEAKER_X]: text
 # -------------------------------------------------------
 
