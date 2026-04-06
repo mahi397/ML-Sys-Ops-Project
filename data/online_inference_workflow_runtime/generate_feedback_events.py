@@ -101,7 +101,7 @@ def main() -> None:
         summary_row = cur.fetchone()
         if not summary_row:
             raise RuntimeError(f"No llm_generated summary found for {args.meeting_id}")
-        summary_id = summary_row["summary_id"]
+        generated_summary_id = summary_row["summary_id"]
 
         cur.execute(
             """
@@ -119,7 +119,7 @@ def main() -> None:
             WHERE ss.summary_id = %s
             ORDER BY ss.segment_index
             """,
-            (summary_id,),
+            (generated_summary_id,),
         )
         segments = cur.fetchall()
 
@@ -182,8 +182,8 @@ def main() -> None:
         events.append(
             {
                 "meeting_id": args.meeting_id,
-                "summary_id": summary_id,
-                "segment_summary_id": seg["segment_summary_id"],
+                "summary_id": None,
+                "segment_summary_id": None,
                 "event_type": event_type,
                 "event_source": "emulated",
                 "before_payload": before,
@@ -198,8 +198,8 @@ def main() -> None:
             events.append(
                 {
                     "meeting_id": args.meeting_id,
-                    "summary_id": summary_id,
-                    "segment_summary_id": longest["segment_summary_id"],
+                    "summary_id": None,
+                    "segment_summary_id": None,
                     "event_type": split_ev["event_type"],
                     "event_source": "emulated",
                     "before_payload": split_ev["before_payload"],
@@ -212,8 +212,8 @@ def main() -> None:
         events.append(
             {
                 "meeting_id": args.meeting_id,
-                "summary_id": summary_id,
-                "segment_summary_id": segments[0]["segment_summary_id"],
+                "summary_id": None,
+                "segment_summary_id": None,
                 "event_type": merge_ev["event_type"],
                 "event_source": "emulated",
                 "before_payload": merge_ev["before_payload"],

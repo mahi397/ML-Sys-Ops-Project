@@ -48,8 +48,8 @@ CREATE TABLE IF NOT EXISTS segment_summaries (
 CREATE TABLE IF NOT EXISTS feedback_events (
     feedback_event_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    summary_id BIGINT REFERENCES summaries(summary_id) ON DELETE CASCADE,
-    segment_summary_id BIGINT REFERENCES segment_summaries(segment_summary_id) ON DELETE CASCADE,
+    summary_id BIGINT REFERENCES summaries(summary_id) ON DELETE SET NULL,
+    segment_summary_id BIGINT REFERENCES segment_summaries(segment_summary_id) ON DELETE SET NULL,
     event_type TEXT NOT NULL CHECK (
         event_type IN (
             'accept_summary',
