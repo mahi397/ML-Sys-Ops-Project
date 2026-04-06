@@ -1,0 +1,23 @@
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends curl git build-essential cmake && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements_ray.txt .
+RUN pip install --no-cache-dir -r requirements_ray.txt
+
+# install llama-cpp-python with CUDA support
+RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install llama-cpp-python==0.2.56
+
+COPY ray_serve/ ./ray_serve/
+
+EXPOSE 8000
+
+CMD ["python3", "ray_serve/serve.py"]
