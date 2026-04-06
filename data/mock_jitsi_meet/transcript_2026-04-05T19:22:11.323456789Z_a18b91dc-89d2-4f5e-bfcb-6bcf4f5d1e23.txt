@@ -1,0 +1,33 @@
+Transcript of conference held at Apr 05, 2026 in room sprintplanningnotes@muc.meet.jitsi
+Initial people present at 7:22:11 PM:
+	Aneesh
+	Shruti
+	Rohan
+
+Transcript, started at 7:22:11 PM:
+________________________________________________________________________________
+<7:22:11 PM> Aneesh joined the conference
+<7:22:14 PM> Shruti joined the conference
+<7:22:18 PM> Rohan joined the conference
+<7:22:33 PM> Aneesh: for this sprint I want the data tasks separated into ingest
+                      replay and feedback packaging so the demo story stays clear
+<7:22:45 PM> Shruti: that split works for me and I can take ownership of the
+                      recap and feedback artifact verification
+<7:22:58 PM> Rohan: I will help by checking the dataset manifests and the object
+                     prefixes after every pipeline run
+<7:23:22 PM> Aneesh: next topic is model evaluation because we need a short note
+                      explaining why historical data remains the training base
+<7:23:35 PM> Shruti: we should say old AMI data is the base train source and
+                      newer production like feedback meetings become evaluation
+<7:23:49 PM> Rohan: that is also cleaner for leakage because the same meeting
+                     never appears in both the old base and the new holdout set
+<7:24:11 PM> Aneesh: last topic is risk review and the biggest risk is still
+                      getting too few new meetings for validation and test
+<7:24:22 PM> Shruti: if needed we can generate more mock Jitsi transcripts with
+                      multiple speakers and multiple discussion blocks
+<7:24:34 PM> Rohan: I agree and I can upload them to block storage once the
+                     filenames and meeting ids are finalized
+________________________________________________________________________________
+
+
+End of transcript at Apr 05, 2026, 7:24:47 PM

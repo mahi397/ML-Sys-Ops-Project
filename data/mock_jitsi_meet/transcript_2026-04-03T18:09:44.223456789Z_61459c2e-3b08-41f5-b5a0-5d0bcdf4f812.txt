@@ -1,0 +1,33 @@
+Transcript of conference held at Apr 03, 2026 in room recapqareview@muc.meet.jitsi
+Initial people present at 6:09:44 PM:
+	Aneesh
+	Mihika
+	A2
+
+Transcript, started at 6:09:44 PM:
+________________________________________________________________________________
+<6:09:44 PM> Aneesh joined the conference
+<6:09:46 PM> Mihika joined the conference
+<6:09:48 PM> A2 joined the conference
+<6:10:02 PM> Aneesh: I want to review the recap quality metrics from the latest
+                      mock meetings before we change any thresholds
+<6:10:11 PM> Mihika: topic labels improved a lot but some short segments still
+                      produce weak bullets and they read too close to transcript text
+<6:10:23 PM> A2: the mock stage one output is also too conservative so several
+                   meetings collapse into one segment unless we tune the heuristic
+<6:10:45 PM> Aneesh: let's tune the boundary rule first and then rerun the
+                      segment assembly on the same meetings for comparison
+<6:10:57 PM> Mihika: I suggest we reward larger speaker changes and stronger
+                      pauses more so we can get at least three segments per meeting
+<6:11:10 PM> A2: once that looks reasonable I can capture before and after
+                   artifacts and attach them to the evaluation note
+<6:11:31 PM> Aneesh: after the threshold work we also need a simple acceptance
+                      checklist for the recap output before recording starts
+<6:11:42 PM> Mihika: yes the checklist should include segment count stable topic
+                      labels and object store confirmations
+<6:11:55 PM> A2: I will draft the checklist and save the command history too so
+                   the rerun is easy on a fresh VM
+________________________________________________________________________________
+
+
+End of transcript at Apr 03, 2026, 6:12:08 PM

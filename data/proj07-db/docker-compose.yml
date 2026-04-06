@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-proj07_sql_db}
+      POSTGRES_USER: ${POSTGRES_USER:-proj07_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-proj07}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ${POSTGRES_DATA_DIR:-/mnt/block/postgres-data}:/var/lib/postgresql/data
+      - ./init_sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proj07_user} -d ${POSTGRES_DB:-proj07_sql_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer:4.8.1
+    container_name: adminer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${ADMINER_PORT:-5050}:8080"
+

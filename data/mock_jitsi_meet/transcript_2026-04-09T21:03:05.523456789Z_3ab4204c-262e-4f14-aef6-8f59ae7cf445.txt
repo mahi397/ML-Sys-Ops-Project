@@ -1,0 +1,35 @@
+Transcript of conference held at Apr 09, 2026 in room modelreviewsync@muc.meet.jitsi
+Initial people present at 9:03:05 PM:
+	Aneesh
+	Mihika
+	Shruti
+	A2
+
+Transcript, started at 9:03:05 PM:
+________________________________________________________________________________
+<9:03:05 PM> Aneesh joined the conference
+<9:03:08 PM> Mihika joined the conference
+<9:03:10 PM> Shruti joined the conference
+<9:03:12 PM> A2 joined the conference
+<9:03:28 PM> Aneesh: I want to compare the older roberta dataset version against
+                      the new augmented version before we build the next snapshot
+<9:03:39 PM> Mihika: v2 definitely has broader phrasing coverage in train but
+                      val and test remain the original historical holdout splits
+<9:03:52 PM> Shruti: that is why the next version should probably merge the old
+                      base and use only the newer production like meetings for eval
+<9:04:05 PM> A2: yes and the feedback pool is the correct source for those new
+                   meetings as long as we split by meeting id
+<9:04:29 PM> Aneesh: for the recap output itself I still want cleaner bullets so
+                      the generated JSON feels closer to a real llm response
+<9:04:40 PM> Mihika: we can keep mock summaries for now but the prompt template
+                      should still push the output toward concise action oriented bullets
+<9:04:53 PM> Shruti: and we should preserve model version tags because the demo
+                      viewers will ask how we trace outputs back to a run
+<9:05:07 PM> A2: I can include those tags in the final recap artifact and also
+                   in the materialized corrected recap file
+<9:05:33 PM> Aneesh: good let's treat dataset packaging and recap quality as the
+                      last two items before we finalize the slide screenshots
+________________________________________________________________________________
+
+
+End of transcript at Apr 09, 2026, 9:05:45 PM

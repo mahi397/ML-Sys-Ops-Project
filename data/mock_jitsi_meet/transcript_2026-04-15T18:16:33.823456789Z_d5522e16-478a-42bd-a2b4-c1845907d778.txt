@@ -1,0 +1,33 @@
+Transcript of conference held at Apr 15, 2026 in room retrospectiveboard@muc.meet.jitsi
+Initial people present at 6:16:33 PM:
+	Aneesh
+	Mihika
+	Rohan
+
+Transcript, started at 6:16:33 PM:
+________________________________________________________________________________
+<6:16:33 PM> Aneesh joined the conference
+<6:16:35 PM> Mihika joined the conference
+<6:16:38 PM> Rohan joined the conference
+<6:16:54 PM> Aneesh: for the retrospective let's begin with what worked in the
+                      initial implementation from the data side
+<6:17:05 PM> Mihika: ingest worked recap artifacts worked and the online payload
+                      path finally became easy to demonstrate on one VM
+<6:17:19 PM> Rohan: the endpoint replay script also helped because it gave us a
+                     visible service contract without needing full integration
+<6:17:44 PM> Aneesh: what still felt rough was the final batch objective because
+                      the feedback pool is not the same thing as train and eval
+<6:17:56 PM> Mihika: right so the next clean step is to generate more new mock
+                      meetings and create a temporal snapshot on top of them
+<6:18:09 PM> Rohan: and once that snapshot exists the story becomes very clear
+                     old historical data trains and new production like data evaluates
+<6:18:34 PM> Aneesh: last question is whether we can reuse these same transcripts
+                      later when the real pull from user machines is ready
+<6:18:45 PM> Mihika: yes because the format matches real Jitsi exports and the
+                      internal meeting ids are already separated from filenames
+<6:18:59 PM> Rohan: that means the current mock set is still useful even after
+                     the real integration arrives
+________________________________________________________________________________
+
+
+End of transcript at Apr 15, 2026, 6:19:12 PM

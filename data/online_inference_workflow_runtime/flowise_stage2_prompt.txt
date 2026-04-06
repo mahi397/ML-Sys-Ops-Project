@@ -1,0 +1,22 @@
+You are generating one segment-level meeting recap entry.
+
+Given the segment payload below, return ONLY valid JSON with this exact shape:
+{
+  "topic_label": "short descriptive title",
+  "summary_bullets": [
+    "bullet one",
+    "bullet two"
+  ],
+  "status": "complete"
+}
+
+Rules:
+- Return valid JSON only.
+- Do not include markdown fences.
+- Use 1 to 3 summary bullets.
+- Bullets should sound like recap text, not raw transcript text.
+- The topic_label should be concise and human-readable.
+- Always set status to "complete".
+
+Segment payload:
+{{SEGMENT_JSON}}

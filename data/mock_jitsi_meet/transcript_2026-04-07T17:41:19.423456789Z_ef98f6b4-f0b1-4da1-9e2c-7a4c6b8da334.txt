@@ -1,0 +1,33 @@
+Transcript of conference held at Apr 07, 2026 in room bugtriagesession@muc.meet.jitsi
+Initial people present at 5:41:19 PM:
+	Aneesh
+	A2
+	Ben
+
+Transcript, started at 5:41:19 PM:
+________________________________________________________________________________
+<5:41:19 PM> Aneesh joined the conference
+<5:41:20 PM> A2 joined the conference
+<5:41:24 PM> Ben joined the conference
+<5:41:39 PM> Aneesh: first bug is that some replay runs store only one segment
+                      even when the meeting obviously has three discussion blocks
+<5:41:50 PM> A2: the root cause is likely the mock boundary score because it is
+                   mostly driven by pauses and our current ingest compresses them
+<5:42:01 PM> Ben: we should either preserve explicit silence duration or add
+                    topical cues to the mock scorer for the demo meetings
+<5:42:26 PM> Aneesh: second bug is a schema mismatch in one recap artifact where
+                      the older stale file still contains utterance internals
+<5:42:37 PM> A2: that one is easy and I can remove the stale artifact from the
+                   block storage folder after we regenerate the clean version
+<5:42:50 PM> Ben: I will also check that the feedback pool manifest uses the new
+                    naming and no longer pretends to be train val and test
+<5:43:14 PM> Aneesh: final item is smoke testing one of the historically failed
+                      AMI meetings through the main run ingest path
+<5:43:24 PM> A2: I already patched the parser for missing timestamps so ES2011c
+                   should be a good regression meeting to rerun
+<5:43:36 PM> Ben: if that passes we can mark the ingest path as ready for the
+                    initial implementation recording
+________________________________________________________________________________
+
+
+End of transcript at Apr 07, 2026, 5:43:48 PM

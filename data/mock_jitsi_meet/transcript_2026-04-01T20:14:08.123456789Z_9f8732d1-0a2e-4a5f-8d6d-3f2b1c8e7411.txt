@@ -1,0 +1,35 @@
+Transcript of conference held at Apr 01, 2026 in room productsyncalpha@muc.meet.jitsi
+Initial people present at 8:14:08 PM:
+	Aneesh
+	Shruti
+	A2
+
+Transcript, started at 8:14:08 PM:
+________________________________________________________________________________
+<8:14:08 PM> Aneesh joined the conference
+<8:14:11 PM> Shruti joined the conference
+<8:14:13 PM> A2 joined the conference
+<8:14:32 PM> Aneesh: let's close the transcript cleanup issue first and make sure
+                      the english normalization is stable before tomorrow
+<8:14:41 PM> Shruti: I checked three recent meetings and punctuation looks
+                      better now but speaker labels still drift in a few places
+<8:14:54 PM> A2: I can patch the parser so wrapped lines keep the same speaker
+                   assignment and we can rerun the sample meetings tonight
+<8:15:04 PM> Aneesh: good after that we need to lock the recap service contract
+                      because the backend team wants one final request schema
+<8:15:16 PM> Shruti: I will write down the segment input fields and the response
+                      fields for topic label summary bullets and status
+<8:15:27 PM> A2: please add model version and request id as well so the stored
+                   artifact can be traced later during debugging
+<8:15:49 PM> Aneesh: once the contract is done we should prepare a short demo
+                      run with one meeting and show the whole loop
+<8:16:01 PM> Shruti: I can own the demo notes and I will also list the object
+                      store keys so we can verify the uploads quickly
+<8:16:13 PM> A2: then I will run one end to end smoke test on the VM and save
+                   the logs next to the artifacts
+<8:16:29 PM> Aneesh: perfect let's keep the final action items as parser fix api
+                      contract review and one smoke test before midnight
+________________________________________________________________________________
+
+
+End of transcript at Apr 01, 2026, 8:16:42 PM

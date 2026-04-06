@@ -1,0 +1,33 @@
+Transcript of conference held at Apr 13, 2026 in room deploymentreadiness@muc.meet.jitsi
+Initial people present at 8:47:26 PM:
+	Aneesh
+	Shruti
+	Ben
+
+Transcript, started at 8:47:26 PM:
+________________________________________________________________________________
+<8:47:26 PM> Aneesh joined the conference
+<8:47:28 PM> Shruti joined the conference
+<8:47:32 PM> Ben joined the conference
+<8:47:47 PM> Aneesh: I want a final readiness pass on the block storage layout
+                      before we freeze the demo commands
+<8:47:58 PM> Shruti: the current structure is clear but we should archive stale
+                      feedback folders so the narrative stays clean during recording
+<8:48:11 PM> Ben: I also want the pipeline wrappers to echo final artifact paths
+                    because that makes the external confirmation step much easier
+<8:48:35 PM> Aneesh: next item is GitHub packaging since I want a fresh VM setup
+                      to depend on the repo rather than a second scripts folder
+<8:48:47 PM> Shruti: the new pipeline entrypoints help a lot there and the env
+                      file keeps the block storage and object storage paths stable
+<8:49:00 PM> Ben: once we add mock meeting generation the entire objective three
+                    flow can run without manually copying transcript files
+<8:49:24 PM> Aneesh: last item is recording order because I want the outputs to
+                      appear in the same order as the rubric objectives
+<8:49:36 PM> Shruti: then show external data first online feature path second
+                      endpoint replay third and feedback packaging last
+<8:49:48 PM> Ben: that order also reduces confusion because every later step
+                    clearly builds on the earlier artifacts
+________________________________________________________________________________
+
+
+End of transcript at Apr 13, 2026, 8:50:02 PM
