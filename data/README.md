@@ -10,7 +10,7 @@ This bundle assumes:
 - `/mnt/block` is attached and writable
 - `rclone` is already configured on the VM
 - Docker and the Docker Compose plugin are installed
-- the raw AMI dataset is already present in Chameleon object storage
+- the setup step can download the raw AMI dataset and upload it into Chameleon object storage
 - you want Postgres data to live on block storage under `/mnt/block/postgres-data`
 
 ## What is inside
@@ -33,7 +33,7 @@ This bundle assumes:
 - `requirements.txt`
   - shared Python dependencies for this bundle
 - `setup.sh`
-  - creates the Python environment, installs dependencies, copies env templates, prepares block-storage folders, and seeds the mock Jitsi transcripts
+  - creates the Python environment, installs dependencies, copies env templates, prepares block-storage folders, uploads the raw AMI corpus to object storage if needed, and seeds the mock Jitsi transcripts
 
 ## Recommended flow
 
