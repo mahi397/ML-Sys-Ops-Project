@@ -96,11 +96,7 @@ Next steps:
    cd "${DATA_DIR}/proj07-db" && docker compose up -d
 3. Run the runtimes in order:
    bash "${DATA_DIR}/external_data_training_runtime/run_external_data_training_batch.sh"
-   bash "${DATA_DIR}/online_inference_workflow_runtime/run_online_inference_workflow_batch.sh"
    bash "${DATA_DIR}/endpoint_replay_runtime/run_endpoint_replay_batch.sh"
+   bash "${DATA_DIR}/online_inference_workflow_runtime/run_online_inference_workflow_batch.sh"
    bash "${DATA_DIR}/retraining_dataset_runtime/run_retraining_dataset_batch.sh"
-
-Important:
-- endpoint replay depends on existing Stage 1 request artifacts
-- on a fresh VM, run the online inference workflow before endpoint replay
 EOF

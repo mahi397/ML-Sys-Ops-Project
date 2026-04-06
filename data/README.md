@@ -10,7 +10,8 @@ This bundle assumes:
 - `/mnt/block` is attached and writable
 - `rclone` is already configured on the VM
 - Docker and the Docker Compose plugin are installed
-
+- the raw AMI dataset is already present in Chameleon object storage
+- you want Postgres data to live on block storage under `/mnt/block/postgres-data`
 
 ## What is inside
 
@@ -60,15 +61,15 @@ source .venv/bin/activate
 
 ```bash
 bash external_data_training_runtime/run_external_data_training_batch.sh
-bash online_inference_workflow_runtime/run_online_inference_workflow_batch.sh
 bash endpoint_replay_runtime/run_endpoint_replay_batch.sh
+bash online_inference_workflow_runtime/run_online_inference_workflow_batch.sh
 bash retraining_dataset_runtime/run_retraining_dataset_batch.sh
 ```
 
 Why this order:
 
-- `endpoint_replay_runtime` expects existing Stage 1 request artifacts
-- `online_inference_workflow_runtime` creates those artifacts as part of the mocked production flow
+- `endpoint_replay_runtime` is now independently runnable in synthetic mode
+- `online_inference_workflow_runtime` is the separate raw-transcript-to-online-feature path
 
 ## Important note about first-time DB initialization
 

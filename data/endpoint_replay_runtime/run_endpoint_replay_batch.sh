@@ -22,10 +22,13 @@ SEGMENTS_ROOT="${SEGMENTS_ROOT:-/mnt/block/user-behaviour/reconstructed_segments
 RECAP_ROOT="${RECAP_ROOT:-/mnt/block/user-behaviour/recaps/generated}"
 LOG_ROOT="${LOG_ROOT:-/mnt/block/user-behaviour/logs/endpoint_replay}"
 
+INPUT_MODE="${INPUT_MODE:-synthetic}"
 STAGE1_MODE="${STAGE1_MODE:-mock}"
 STAGE2_MODE="${STAGE2_MODE:-mock}"
 VERSION="${VERSION:-1}"
 MODEL_VERSION="${MODEL_VERSION:-flowise-stage2-v1}"
+SYNTHETIC_MEETING_COUNT="${SYNTHETIC_MEETING_COUNT:-3}"
+SYNTHETIC_SEED="${SYNTHETIC_SEED:-42}"
 STAGE1_URL="${STAGE1_URL:-}"
 STAGE2_URL="${STAGE2_URL:-}"
 FLOWISE_BASE_URL="${FLOWISE_BASE_URL:-}"
@@ -53,7 +56,33 @@ if [[ $# -gt 0 ]]; then
   for arg in "$@"; do
     meeting_ids+=("${arg}")
   done
-else
+fi
+
+if [[ "${INPUT_MODE}" == "synthetic" ]]; then
+  declare -a synthetic_args=(
+    --output-root "${ONLINE_STAGE1_ROOT}"
+    --version "${VERSION}"
+    --seed "${SYNTHETIC_SEED}"
+    --upload-artifacts
+    --rclone-remote "${RCLONE_REMOTE}"
+    --bucket "${BUCKET}"
+    --log-file "${LOG_ROOT}/synthetic_input_generation.log"
+  )
+  if [[ ${#meeting_ids[@]} -gt 0 ]]; then
+    for meeting_id in "${meeting_ids[@]}"; do
+      synthetic_args+=(--meeting-id "${meeting_id}")
+    done
+  else
+    synthetic_args+=(--meeting-count "${SYNTHETIC_MEETING_COUNT}")
+  fi
+
+  meeting_ids=()
+  while IFS= read -r line; do
+    if [[ -n "${line}" ]]; then
+      meeting_ids+=("${line}")
+    fi
+  done < <("${PYTHON_BIN}" "${SCRIPT_DIR}/generate_synthetic_endpoint_inputs.py" "${synthetic_args[@]}")
+elif [[ ${#meeting_ids[@]} -eq 0 ]]; then
   while IFS= read -r line; do
     if [[ -n "${line}" ]]; then
       meeting_ids+=("${line}")
@@ -62,7 +91,11 @@ else
 fi
 
 if [[ ${#meeting_ids[@]} -eq 0 ]]; then
-  echo "No endpoint replay meetings found. Build Stage 1 request artifacts first." >&2
+  if [[ "${INPUT_MODE}" == "synthetic" ]]; then
+    echo "No synthetic endpoint replay meetings were generated." >&2
+  else
+    echo "No endpoint replay meetings found. Build Stage 1 request artifacts first or set INPUT_MODE=synthetic." >&2
+  fi
   exit 1
 fi
 
@@ -88,23 +121,30 @@ for meeting_id in "${meeting_ids[@]}"; do
   echo "=== Endpoint replay meeting ==="
   echo "Meeting ID: ${meeting_id}"
 
+  declare -a replay_args=(
+    --meeting-id "${meeting_id}"
+    --version "${VERSION}"
+    --stage1-requests-jsonl "${ONLINE_STAGE1_ROOT}/${meeting_id}/v${VERSION}/stage1_requests.jsonl"
+    --model-utterances-json "${ONLINE_STAGE1_ROOT}/${meeting_id}/v${VERSION}/model_utterances.json"
+    --stage1-mode "${STAGE1_MODE}"
+    --stage2-mode "${STAGE2_MODE}"
+    --model-version "${MODEL_VERSION}"
+    --upload-artifacts
+    --stage1-response-root "${STAGE1_RESPONSE_ROOT}"
+    --stage2-input-root "${ONLINE_STAGE2_ROOT}"
+    --stage2-response-root "${STAGE2_RESPONSE_ROOT}"
+    --segments-root "${SEGMENTS_ROOT}"
+    --recap-root "${RECAP_ROOT}"
+    --rclone-remote "${RCLONE_REMOTE}"
+    --bucket "${BUCKET}"
+    --log-file "${LOG_ROOT}/${meeting_id}_endpoint_replay.log"
+  )
+  if [[ "${INPUT_MODE}" == "synthetic" ]]; then
+    replay_args+=(--skip-db-registration)
+  fi
+
   "${PYTHON_BIN}" "${SCRIPT_DIR}/replay_to_hypothetical_endpoints.py" \
-    --meeting-id "${meeting_id}" \
-    --version "${VERSION}" \
-    --stage1-requests-jsonl "${ONLINE_STAGE1_ROOT}/${meeting_id}/v${VERSION}/stage1_requests.jsonl" \
-    --model-utterances-json "${ONLINE_STAGE1_ROOT}/${meeting_id}/v${VERSION}/model_utterances.json" \
-    --stage1-mode "${STAGE1_MODE}" \
-    --stage2-mode "${STAGE2_MODE}" \
-    --model-version "${MODEL_VERSION}" \
-    --upload-artifacts \
-    --stage1-response-root "${STAGE1_RESPONSE_ROOT}" \
-    --stage2-input-root "${ONLINE_STAGE2_ROOT}" \
-    --stage2-response-root "${STAGE2_RESPONSE_ROOT}" \
-    --segments-root "${SEGMENTS_ROOT}" \
-    --recap-root "${RECAP_ROOT}" \
-    --rclone-remote "${RCLONE_REMOTE}" \
-    --bucket "${BUCKET}" \
-    --log-file "${LOG_ROOT}/${meeting_id}_endpoint_replay.log" \
+    "${replay_args[@]}" \
     "${optional_args[@]}"
 done
 

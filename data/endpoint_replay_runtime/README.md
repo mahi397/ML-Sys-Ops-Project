@@ -2,21 +2,24 @@
 
 This folder is a self-contained runtime bundle for replaying hypothetical endpoint traffic:
 
-- start from existing Stage 1 online inference request artifacts
+- generate synthetic Stage 1 request artifacts by default, or start from existing Stage 1 request artifacts
 - hit hypothetical Stage 1 and Stage 2 endpoints using mock or HTTP/Flowise modes
 - store request/response artifacts in object storage
 - store reconstructed segments and generated recap artifacts
-- register the resulting runtime state in Postgres
+- optionally register the resulting runtime state in Postgres when replaying real DB-backed meetings
 
 ## Expected inputs
 
-This runtime assumes the Stage 1 request artifacts already exist, for example from the online inference workflow or any other synthetic/request-building step:
+By default, this runtime is independently runnable and will generate synthetic Stage 1 request artifacts for endpoint replay.
+
+If you set `INPUT_MODE=existing`, it instead expects Stage 1 request artifacts such as:
 
 - `/mnt/block/user-behaviour/online_inference/stage1/{meeting_id}/v{version}/stage1_requests.jsonl`
 - `/mnt/block/user-behaviour/online_inference/stage1/{meeting_id}/v{version}/model_utterances.json`
 
 ## Files
 
+- `generate_synthetic_endpoint_inputs.py`: builds synthetic Stage 1 request artifacts for standalone replay
 - `replay_to_hypothetical_endpoints.py`: replays Stage 1 and Stage 2 hypothetical endpoint traffic
 - `discover_endpoint_replay_meetings.py`: finds meetings that already have Stage 1 request artifacts
 - `feedback_common.py`: shared DB/object-store helpers used by the replay script
@@ -36,15 +39,16 @@ This runtime assumes the Stage 1 request artifacts already exist, for example fr
 python3 -m pip install -r requirements.txt
 ```
 
-## Run all discoverable meetings
+## Run the standalone synthetic replay flow
 
 ```bash
 bash run_endpoint_replay_batch.sh
 ```
 
-## Run only selected meetings
+## Run against existing Stage 1 request artifacts
 
 ```bash
+INPUT_MODE=existing \
 bash run_endpoint_replay_batch.sh \
   jitsi_20260401T201408Z_9f8732d1 \
   jitsi_20260403T180944Z_61459c2e

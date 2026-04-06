@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--meeting-id", required=True)
     parser.add_argument("--version", type=int, default=1)
+    parser.add_argument(
+        "--skip-db-registration",
+        action="store_true",
+        help="Use this for synthetic standalone replay when no canonical Postgres meeting exists.",
+    )
 
     parser.add_argument(
         "--stage1-requests-jsonl",
@@ -840,88 +845,91 @@ def main() -> None:
                 logger,
             )
 
-    conn = get_conn()
-    upsert_meeting_artifact(
-        conn,
-        args.meeting_id,
-        "stage1_responses_jsonl",
-        artifact_uri(stage1_responses_jsonl, stage1_response_jsonl_key, args.upload_artifacts),
-        "application/x-ndjson",
-        args.version,
-    )
-    upsert_meeting_artifact(
-        conn,
-        args.meeting_id,
-        "stage1_responses_json",
-        artifact_uri(stage1_responses_json, stage1_response_json_key, args.upload_artifacts),
-        "application/json",
-        args.version,
-    )
-    upsert_meeting_artifact(
-        conn,
-        args.meeting_id,
-        "stage2_inputs_jsonl",
-        artifact_uri(stage2_inputs_jsonl, stage2_inputs_jsonl_key, args.upload_artifacts),
-        "application/x-ndjson",
-        args.version,
-    )
-    upsert_meeting_artifact(
-        conn,
-        args.meeting_id,
-        "stage2_inputs_json",
-        artifact_uri(stage2_inputs_json, stage2_inputs_json_key, args.upload_artifacts),
-        "application/json",
-        args.version,
-    )
-    upsert_meeting_artifact(
-        conn,
-        args.meeting_id,
-        "reconstructed_segments_json",
-        artifact_uri(reconstructed_segments_path, reconstructed_segments_key, args.upload_artifacts),
-        "application/json",
-        args.version,
-    )
-
-    register_stage1_predictions(conn, args.meeting_id, stage1_requests, stage1_responses)
-
-    if stage2_outputs:
+    if args.skip_db_registration:
+        logger.info("Skipping Postgres registration for synthetic standalone replay")
+    else:
+        conn = get_conn()
         upsert_meeting_artifact(
             conn,
             args.meeting_id,
-            "stage2_responses_jsonl",
-            artifact_uri(stage2_responses_jsonl, stage2_response_jsonl_key, args.upload_artifacts),
+            "stage1_responses_jsonl",
+            artifact_uri(stage1_responses_jsonl, stage1_response_jsonl_key, args.upload_artifacts),
             "application/x-ndjson",
             args.version,
         )
         upsert_meeting_artifact(
             conn,
             args.meeting_id,
-            "stage2_responses_json",
-            artifact_uri(stage2_responses_json, stage2_response_json_key, args.upload_artifacts),
+            "stage1_responses_json",
+            artifact_uri(stage1_responses_json, stage1_response_json_key, args.upload_artifacts),
             "application/json",
             args.version,
         )
         upsert_meeting_artifact(
             conn,
             args.meeting_id,
-            "summary_json",
-            artifact_uri(recap_path, recap_key, args.upload_artifacts),
+            "stage2_inputs_jsonl",
+            artifact_uri(stage2_inputs_jsonl, stage2_inputs_jsonl_key, args.upload_artifacts),
+            "application/x-ndjson",
+            args.version,
+        )
+        upsert_meeting_artifact(
+            conn,
+            args.meeting_id,
+            "stage2_inputs_json",
+            artifact_uri(stage2_inputs_json, stage2_inputs_json_key, args.upload_artifacts),
             "application/json",
             args.version,
         )
-        register_recap_outputs(
+        upsert_meeting_artifact(
             conn,
             args.meeting_id,
+            "reconstructed_segments_json",
+            artifact_uri(reconstructed_segments_path, reconstructed_segments_key, args.upload_artifacts),
+            "application/json",
             args.version,
-            artifact_uri(recap_path, recap_key, args.upload_artifacts),
-            stage2_inputs,
-            stage2_outputs,
-            args.model_version,
-            args.prompt_template.name,
-            args.stage2_mode,
         )
 
-    conn.commit()
+        register_stage1_predictions(conn, args.meeting_id, stage1_requests, stage1_responses)
+
+        if stage2_outputs:
+            upsert_meeting_artifact(
+                conn,
+                args.meeting_id,
+                "stage2_responses_jsonl",
+                artifact_uri(stage2_responses_jsonl, stage2_response_jsonl_key, args.upload_artifacts),
+                "application/x-ndjson",
+                args.version,
+            )
+            upsert_meeting_artifact(
+                conn,
+                args.meeting_id,
+                "stage2_responses_json",
+                artifact_uri(stage2_responses_json, stage2_response_json_key, args.upload_artifacts),
+                "application/json",
+                args.version,
+            )
+            upsert_meeting_artifact(
+                conn,
+                args.meeting_id,
+                "summary_json",
+                artifact_uri(recap_path, recap_key, args.upload_artifacts),
+                "application/json",
+                args.version,
+            )
+            register_recap_outputs(
+                conn,
+                args.meeting_id,
+                args.version,
+                artifact_uri(recap_path, recap_key, args.upload_artifacts),
+                stage2_inputs,
+                stage2_outputs,
+                args.model_version,
+                args.prompt_template.name,
+                args.stage2_mode,
+            )
+
+        conn.commit()
 
     logger.info(
         "Completed replay for meeting=%s stage1_responses=%d stage2_inputs=%d stage2_outputs=%d",
