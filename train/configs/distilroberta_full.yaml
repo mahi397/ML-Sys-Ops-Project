@@ -1,8 +1,3 @@
-# configs/distilroberta_full.yaml
-# Candidate v3: distilroberta-base, full fine-tune
-# 6 layers vs 12 in roberta-base → ~2x faster inference, ~40% smaller.
-# Tradeoff: some quality loss vs roberta-base full.
-# "Efficient" candidate — good if serving latency is critical (<2s SLA).
 model_name: distilroberta-base
 freeze_backbone: false
 lr: 3e-5
