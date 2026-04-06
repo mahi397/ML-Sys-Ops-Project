@@ -1,19 +1,4 @@
 """
-Ray Serve deployment for Jitsi Meeting Recap pipeline.
-
-Why Ray Serve over FastAPI:
-1. Multi-model composition: RoBERTa (Stage A) and Mistral-7B (Stage B) are separate
-   deployments that can scale independently. Stage B is 40x slower, so it needs
-   more replicas or a different scaling policy.
-2. Built-in autoscaling: Ray Serve auto-scales each deployment based on queue depth,
-   so bursty meeting-end traffic (5 concurrent meetings) is handled without manual
-   worker tuning.
-3. Request batching: Native batching support for Stage A — similar to Triton's
-   dynamic batching but within the Python serving framework.
-4. Resource isolation: Each deployment gets its own CPU/GPU allocation, preventing
-   the LLM from starving the segmenter.
-
-Usage:
   # Start Ray Serve
   python3 ray_serve/serve.py
 
@@ -23,7 +8,6 @@ Usage:
   #   POST /summarize  (same JSON schema)
   #   POST /recap      (full pipeline — new endpoint)
 
-Assisted by Claude Sonnet 4.6
 """
 
 import ray
@@ -38,7 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 
-# ── Shared tokenization (same contract as training) ─────────────────────────
+
 def format_window_for_roberta(window: list) -> str:
     sorted_window = sorted(window, key=lambda u: u["position"])
     return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
@@ -218,7 +202,7 @@ JSON format:
             })
 
 
-# ── Health endpoint ─────────────────────────────────────────────────────────
+# Health endpoint 
 @serve.deployment(name="health", num_replicas=1)
 class HealthDeployment:
     async def __call__(self, request: Request) -> JSONResponse:
@@ -229,7 +213,7 @@ class HealthDeployment:
         })
 
 
-# ── Full Pipeline: Recap endpoint (chains A → B) ───────────────────────────
+# ── Full Pipeline: Recap endpoint
 @serve.deployment(
     name="recap_pipeline",
     num_replicas=1,
@@ -262,7 +246,7 @@ class RecapPipelineDeployment:
         utterances = body["utterances"]
         t0 = time.perf_counter()
 
-        # Stage A — segmentation (all windows)
+        # Stage A segmentation (all windows)
         windows = self._build_windows(utterances)
         decisions = []
         for w in windows:
@@ -270,7 +254,7 @@ class RecapPipelineDeployment:
             # Call segmenter deployment directly via handle
             from starlette.testclient import TestClient
             import httpx
-            # Use internal Ray Serve handle for deployment-to-deployment calls
+            # Use internal Ray  handle for deployment-to-deployment calls
             ref = await self.segmenter.predict_single.remote(payload)
             decision = await ref
             decisions.append(decision)
@@ -333,13 +317,13 @@ class RecapPipelineDeployment:
         return JSONResponse(content=recap)
 
 
-# ── Bind and run ────────────────────────────────────────────────────────────
+
 segmenter = SegmenterDeployment.bind()
 summarizer = SummarizerDeployment.bind()
 health = HealthDeployment.bind()
 recap_pipeline = RecapPipelineDeployment.bind(segmenter, summarizer)
 
-# Create the application with route mapping
+#  application with route mapping
 app = serve.run(
     {
         "/health": health,

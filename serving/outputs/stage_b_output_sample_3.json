@@ -1,0 +1,17 @@
+{
+  "meeting_id": "DEMO003",
+  "segment_id": 1,
+  "t_start": 10.0,
+  "t_end": 118.0,
+  "topic_label": "Sprint Review",
+  "summary_bullets": [
+    "Database migration script completed",
+    "Pull request reviewed with comments",
+    "CI pipeline passed after test fixes",
+    "All sprint blockers resolved",
+    "Auth service refactor upcoming",
+    "Speaker A to handle session management changes",
+    "Speaker C to handle oauth integration"
+  ],
+  "status": "complete"
+}

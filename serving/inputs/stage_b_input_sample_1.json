@@ -1,0 +1,16 @@
+{
+  "meeting_id": "ES2002a",
+  "segment_id": 1,
+  "t_start": 98.3,
+  "t_end": 312.7,
+  "utterances": [
+    {"position": 0, "speaker": "A", "t_start": 98.3, "t_end": 109.1, "text": "we need to finalize the interface before the next sprint"},
+    {"position": 1, "speaker": "B", "t_start": 110.0, "t_end": 121.4, "text": "agreed the api contract should be locked down first"}
+    
+  ],
+  "total_utterances": 2,
+  "meeting_context": {
+    "total_segments": 4,
+    "segment_index_in_meeting": 1
+  }
+}

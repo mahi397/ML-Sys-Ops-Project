@@ -1,5 +1,5 @@
 # -------------------------------------------------------
-# SHARED CONTRACT WITH TRAINING ROLE (Mahima)
+# SHARED part WITH TRAINING ROLE (Mahima)
 # Format: [SPEAKER_X]: text
 # -------------------------------------------------------
 

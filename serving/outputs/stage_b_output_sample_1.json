@@ -1,0 +1,12 @@
+{
+  "meeting_id": "ES2002a",
+  "segment_id": 1,
+  "t_start": 98.3,
+  "t_end": 312.7,
+  "topic_label": "Finalizing Interface",
+  "summary_bullets": [
+    "Agreed upon need to finalize interface",
+    "API contract needs to be locked down first"
+  ],
+  "status": "complete"
+}

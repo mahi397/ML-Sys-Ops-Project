@@ -1,0 +1,14 @@
+{
+  "meeting_id": "ES2002a",
+  "window": [
+    {"position": 0, "speaker": "A", "t_start": 98.3, "t_end": 109.1, "text": "we need to finalize the interface"},
+    {"position": 1, "speaker": "B", "t_start": 110.0, "t_end": 121.4, "text": "agreed the api contract should be locked down"},
+    {"position": 2, "speaker": "C", "t_start": 122.0, "t_end": 134.7, "text": "i can have a draft ready by thursday"},
+    {"position": 3, "speaker": "A", "t_start": 135.1, "t_end": 147.9, "text": "thursday works should we loop in frontend"},
+    {"position": 4, "speaker": "B", "t_start": 165.2, "t_end": 178.4, "text": "can we revisit the budget numbers"},
+    {"position": 5, "speaker": "C", "t_start": 179.0, "t_end": 191.3, "text": "yes q3 projections changed significantly"},
+    {"position": 6, "speaker": "A", "t_start": 192.1, "t_end": 204.8, "text": "right we should update the forecast"}
+  ],
+  "transition_index": 3,
+  "meeting_offset_seconds": 98.3
+}

@@ -1,0 +1,11 @@
+{
+  "meeting_id": "ES2002a",
+  "transition_after_position": 3,
+  "boundary_probability": 0.40926143527030945,
+  "is_boundary": false,
+  "t_boundary": 147.9,
+  "segment_so_far": {
+    "t_start": 98.3,
+    "t_end": 147.9
+  }
+}

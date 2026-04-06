@@ -1,0 +1,11 @@
+{
+  "meeting_id": "DEMO003",
+  "transition_after_position": 3,
+  "boundary_probability": 0.41321253776550293,
+  "is_boundary": false,
+  "t_boundary": 61.0,
+  "segment_so_far": {
+    "t_start": 10.0,
+    "t_end": 61.0
+  }
+}

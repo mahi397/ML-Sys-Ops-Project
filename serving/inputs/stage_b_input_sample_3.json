@@ -1,0 +1,20 @@
+{
+  "meeting_id": "DEMO003",
+  "segment_id": 1,
+  "t_start": 10.0,
+  "t_end": 118.0,
+  "utterances": [
+    {"position": 0, "speaker": "A", "t_start": 10.0, "t_end": 22.0, "text": "yesterday i finished the database migration script"},
+    {"position": 1, "speaker": "B", "t_start": 23.0, "t_end": 35.0, "text": "i reviewed the pull request and left some comments"},
+    {"position": 2, "speaker": "C", "t_start": 36.0, "t_end": 48.0, "text": "the ci pipeline is green now after fixing the flaky test"},
+    {"position": 3, "speaker": "A", "t_start": 49.0, "t_end": 61.0, "text": "nice so all blockers from last sprint are resolved"},
+    {"position": 4, "speaker": "B", "t_start": 80.0, "t_end": 92.0, "text": "moving on to this sprint we have the auth service refactor"},
+    {"position": 5, "speaker": "C", "t_start": 93.0, "t_end": 105.0, "text": "i can take the oauth integration piece"},
+    {"position": 6, "speaker": "A", "t_start": 106.0, "t_end": 118.0, "text": "and i will handle the session management changes"}
+  ],
+  "total_utterances": 7,
+  "meeting_context": {
+    "total_segments": 2,
+    "segment_index_in_meeting": 1
+  }
+}
