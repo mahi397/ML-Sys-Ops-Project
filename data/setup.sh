@@ -25,6 +25,10 @@ function require_cmd() {
   }
 }
 
+function has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
 function copy_if_missing() {
   local src="$1"
   local dst="$2"
@@ -92,7 +96,11 @@ function stage_ami_corpus_to_object_store() {
   curl -L --fail --retry 3 "${AMI_ARCHIVE_URL}" --output "${AMI_ARCHIVE_PATH}"
 
   banner "Extracting AMI raw corpus into ${AMI_LOCAL_ROOT}"
-  unzip -oq "${AMI_ARCHIVE_PATH}" -d "${AMI_LOCAL_ROOT}"
+  if has_cmd unzip; then
+    unzip -oq "${AMI_ARCHIVE_PATH}" -d "${AMI_LOCAL_ROOT}"
+  else
+    python3 -m zipfile -e "${AMI_ARCHIVE_PATH}" "${AMI_LOCAL_ROOT}"
+  fi
 
   banner "Uploading AMI raw corpus to ${RCLONE_REMOTE}:${OBJECT_BUCKET}/${AMI_OBJECT_PREFIX}"
   rclone copy "${AMI_LOCAL_ROOT}" "${RCLONE_REMOTE}:${OBJECT_BUCKET}/${AMI_OBJECT_PREFIX}" -P
@@ -104,7 +112,6 @@ require_cmd python3
 require_cmd docker
 require_cmd rclone
 require_cmd curl
-require_cmd unzip
 
 if docker compose version >/dev/null 2>&1; then
   :
