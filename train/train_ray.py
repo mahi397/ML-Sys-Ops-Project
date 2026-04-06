@@ -1,25 +1,18 @@
 """
-train_ray.py  —  Ray Train wrapper for fault-tolerant RoBERTa fine-tuning.
-
-shows Ray Train making training more robust than plain train.py
+Ray Train wrapper for fault-tolerant RoBERTa fine-tuning. shows Ray Train making training more robust than plain train.py
 by automatically resuming from checkpoints after worker failure.
 
 Usage:
-  # Install Ray
-  pip install "ray[train]==2.10.0"
-
-  # Start a single-node Ray cluster
+  #start a single-node Ray cluster
   ray start --head --num-gpus=1
 
-  export MLFLOW_TRACKING_URI=http://129.114.25.90:8000
-
-  # Run (and kill after epoch 1 to demo fault tolerance)
+  #Run (and kill after epoch 1 to demo fault tolerance)
   python train_ray.py \
     --config /home/cc/ML-Sys-Ops-Project/train/configs/roberta_base_full.yaml \
     --data_dir /home/cc/ami_processed \
     --storage_path /home/cc/artifacts/ray_checkpoints
 
-  # Rerun same command — resumes from checkpoint
+  #Rerun same command, resumes from checkpoint
   python train_ray.py \
     --config /home/cc/ML-Sys-Ops-Project/train/configs/roberta_base_full.yaml \
     --data_dir /home/cc/ami_processed \
@@ -101,7 +94,7 @@ def train_func(config):
     train_texts, train_labels = load_split(data_dir, "train")
     val_texts, val_labels = load_split(data_dir, "val")
 
-    # WeightedRandomSampler for class imbalance
+    #WeightedRandomSampler for class imbalance
     n_pos = sum(train_labels)
     n_neg = len(train_labels) - n_pos
     max_oversample = config.get("max_oversample", 5.0)
@@ -116,7 +109,7 @@ def train_func(config):
                               sampler=sampler, num_workers=2)
     val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=2)
 
-    # Prepare loaders for distributed training
+    #Prepare loaders for distributed training
     train_loader = ray.train.torch.prepare_data_loader(train_loader)
     val_loader = ray.train.torch.prepare_data_loader(val_loader)
 
@@ -127,7 +120,7 @@ def train_func(config):
     )
     model.resize_token_embeddings(len(tokenizer))
 
-    # Prepare model for distributed training
+    #Prepare model for training
     model = ray.train.torch.prepare_model(model)
 
     optimizer = torch.optim.AdamW(
@@ -140,7 +133,7 @@ def train_func(config):
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    # ── Resume from checkpoint if one exists ─────────────────────────────────
+    #Resume from checkpoint if one exists
     start_epoch = 1
     checkpoint = ray.train.get_checkpoint()
     if checkpoint:
@@ -155,8 +148,8 @@ def train_func(config):
     else:
         print("No checkpoint found — starting from epoch 1", flush=True)
 
-    # ── MLflow logging ────────────────────────────────────────────────────────
-    # Only rank 0 worker logs to MLflow (avoid duplicate runs in distributed)
+    #MLflow logging 
+    #Only rank 0 worker logs to MLflow 
     import mlflow
     should_log = ray.train.get_context().get_world_rank() == 0
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:8000")
@@ -177,9 +170,9 @@ def train_func(config):
             "git_sha": os.environ.get("GIT_SHA", "unknown"),
         })
 
-    epoch = start_epoch - 1  # track last completed epoch for finally block
+    epoch = start_epoch - 1  #track last completed epoch for finally block
     try:
-        # ── Training loop ─────────────────────────────────────────────────────
+        #Training loop 
         for epoch in range(start_epoch, config["epochs"] + 1):
             model.train()
             train_loss = 0.0
@@ -198,7 +191,7 @@ def train_func(config):
                 scheduler.step()
                 train_loss += loss.item()
 
-            # Validation
+            #Validation
             model.eval()
             val_probs, val_true, val_mids = [], [], []
             with torch.no_grad():
@@ -262,8 +255,8 @@ def train_func(config):
                   f"(kill the job now to demo fault tolerance)", flush=True)
 
     finally:
-        # Always close the MLflow run — even if the job is killed mid-training.
-        # Without this, runs stay in RUNNING state in MLflow indefinitely.
+        #Always close the MLflow run even if the job is killed mid-training.
+        #Without this, runs stay in RUNNING state in MLflow indefinitely.
         if should_log and mlflow_run:
             mlflow.end_run(status="FINISHED" if epoch == config["epochs"] else "KILLED")
 
@@ -309,11 +302,11 @@ def main():
     )
 
     if args.restore_path:
-        # ── Resume from a previous interrupted run ────────────────────────────
-        # TorchTrainer.restore() loads the full trainer state including the last
-        # checkpoint. The train_func will call ray.train.get_checkpoint() and
-        # find the saved state, then skip already-completed epochs.
-        # This is the key fault-tolerance feature being demonstrated.
+        #Resume from a previous interrupted run 
+        #TorchTrainer.restore() loads the full trainer state including the last
+        #checkpoint. The train_func will call ray.train.get_checkpoint() and
+        #find the saved state, then skip already-completed epochs.
+        #This is the key fault-tolerance feature being demonstrated
         log.info(f"Restoring from: {args.restore_path}")
         print(f"RESTORING from previous run at: {args.restore_path}", flush=True)
         print(f"Training will resume from the last saved checkpoint", flush=True)
@@ -335,7 +328,7 @@ def main():
     result = trainer.fit()
     print(f"\nFinal metrics: {result.metrics}", flush=True)
     print(f"Checkpoint path: {result.checkpoint}", flush=True)
-    # Print the experiment path so the demo script can pass it to the next run
+    #Print the experiment path so the demo script can pass it to the next run
     print(f"EXPERIMENT_PATH: {result.path}", flush=True)
 
 

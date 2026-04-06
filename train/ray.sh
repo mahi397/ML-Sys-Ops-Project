@@ -23,7 +23,7 @@ DOCKER_RUN="docker run --rm --gpus all \
   --storage_path /ray_checkpoints \
   --num_workers 1"
 
-# Clean up previous run
+#Clean up previous run
 sudo rm -rf ${STORAGE}/jitsi-roberta-fault-tolerant
 mkdir -p ${STORAGE}
 
@@ -31,7 +31,7 @@ echo "[run 1] starting training"
 ${DOCKER_RUN} &
 DOCKER_PID=$!
 
-# Wait for first checkpoint
+#Wait for first checkpoint
 echo "[run 1] waiting for epoch 1 checkpoint..."
 for i in $(seq 1 120); do
     sleep 15
@@ -43,8 +43,7 @@ for i in $(seq 1 120); do
     fi
 done
 
-# The restore path for TorchTrainer.restore() is the experiment root,
-# not the trial subdirectory
+#The restore path for TorchTrainer.restore() is the experiment root
 EXPERIMENT_DIR="${STORAGE}/jitsi-roberta-fault-tolerant"
 EXPERIMENT_DIR_CONTAINER="/ray_checkpoints/jitsi-roberta-fault-tolerant"
 CHECKPOINT_COUNT=$(find ${STORAGE} -name "state.pt" | wc -l)
