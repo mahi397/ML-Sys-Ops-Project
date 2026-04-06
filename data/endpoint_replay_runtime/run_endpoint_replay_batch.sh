@@ -48,7 +48,7 @@ mkdir -p \
   "${RECAP_ROOT}" \
   "${LOG_ROOT}"
 
-declare -a meeting_ids
+declare -a meeting_ids=()
 if [[ $# -gt 0 ]]; then
   for arg in "$@"; do
     meeting_ids+=("${arg}")
@@ -66,7 +66,7 @@ if [[ ${#meeting_ids[@]} -eq 0 ]]; then
   exit 1
 fi
 
-declare -a optional_args
+declare -a optional_args=()
 if [[ -n "${STAGE1_URL}" ]]; then
   optional_args+=(--stage1-url "${STAGE1_URL}")
 fi

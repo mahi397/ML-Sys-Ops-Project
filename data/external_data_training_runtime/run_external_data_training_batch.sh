@@ -29,7 +29,7 @@ STAGE1_V2_ROOT="${STAGE1_V2_ROOT:-${STAGE1_ROOT}/v2}"
 
 DATASET_VERSION="${DATASET_VERSION:-1}"
 BASE_SCHEMA_SQL="${BASE_SCHEMA_SQL:-${SCRIPT_DIR}/001_init_postgres_schema.sql}"
-DEFAULT_AMI_MEETINGS="${DEFAULT_AMI_MEETINGS:-ES2002a ES2002b ES2003a ES2004a ES2005a ES2006a ES2007a ES2008a}"
+AMI_MEETING_FILTER="${AMI_MEETING_FILTER:-}"
 
 if [[ "${BASE_SCHEMA_SQL}" != /* ]]; then
   BASE_SCHEMA_SQL="${SCRIPT_DIR}/${BASE_SCHEMA_SQL#./}"
@@ -128,46 +128,60 @@ ensure_layout
 ensure_base_schema
 ensure_ami_shared_cache
 
-declare -a meetings
+declare -a meetings=()
 if [[ $# -gt 0 ]]; then
   for arg in "$@"; do
     meetings+=("${arg}")
   done
-else
+elif [[ -n "${AMI_MEETING_FILTER}" ]]; then
   # shellcheck disable=SC2206
-  meetings=(${DEFAULT_AMI_MEETINGS})
+  meetings=(${AMI_MEETING_FILTER})
 fi
-
-meeting_list="$(meeting_csv "${meetings[@]}")"
 
 echo
 echo "External data training runtime: AMI data -> object storage -> canonical Postgres -> Stage 1 datasets"
-echo "Meetings: ${meetings[*]}"
+if [[ ${#meetings[@]} -gt 0 ]]; then
+  echo "Meetings: ${meetings[*]}"
+else
+  echo "Meetings: all discoverable AMI meetings in object storage"
+fi
+
+declare -a ingest_args=(
+  --rclone-remote "${RCLONE_REMOTE}"
+  --bucket "${OBJECT_BUCKET}"
+  --prefix "${AMI_OBJECT_PREFIX}"
+  --raw-root "${RAW_ROOT}"
+  --processed-root "${PROCESSED_ROOT}"
+  --scripts-dir "${SCRIPT_DIR}"
+  --pg-container "${DB_CONTAINER}"
+  --db-user "${DB_USER}"
+  --db-name "${DB_NAME}"
+  --log-file "${INGEST_LOG_ROOT}/external_data_training_run_ingest.log"
+)
+
+declare -a dataset_args=(
+  --pg-container "${DB_CONTAINER}"
+  --db-user "${DB_USER}"
+  --db-name "${DB_NAME}"
+  --dataset-root "${STAGE1_V1_ROOT}"
+  --dataset-version "${DATASET_VERSION}"
+  --log-file "${INGEST_LOG_ROOT}/external_data_training_build_stage1_dataset.log"
+  --rclone-remote "${RCLONE_REMOTE}"
+  --object-bucket "${OBJECT_BUCKET}"
+  --object-prefix "datasets/roberta_stage1/v1"
+)
+
+if [[ ${#meetings[@]} -gt 0 ]]; then
+  meeting_list="$(meeting_csv "${meetings[@]}")"
+  ingest_args=(--meeting "${meetings[@]}" "${ingest_args[@]}")
+  dataset_args=(--meeting-ids "${meeting_list}" "${dataset_args[@]}")
+fi
 
 "${PYTHON_BIN}" "${SCRIPT_DIR}/run_ingest.py" \
-  --meeting "${meetings[@]}" \
-  --rclone-remote "${RCLONE_REMOTE}" \
-  --bucket "${OBJECT_BUCKET}" \
-  --prefix "${AMI_OBJECT_PREFIX}" \
-  --raw-root "${RAW_ROOT}" \
-  --processed-root "${PROCESSED_ROOT}" \
-  --scripts-dir "${SCRIPT_DIR}" \
-  --pg-container "${DB_CONTAINER}" \
-  --db-user "${DB_USER}" \
-  --db-name "${DB_NAME}" \
-  --log-file "${INGEST_LOG_ROOT}/external_data_training_run_ingest.log"
+  "${ingest_args[@]}"
 
 "${PYTHON_BIN}" "${SCRIPT_DIR}/build_st1_db.py" \
-  --meeting-ids "${meeting_list}" \
-  --pg-container "${DB_CONTAINER}" \
-  --db-user "${DB_USER}" \
-  --db-name "${DB_NAME}" \
-  --dataset-root "${STAGE1_V1_ROOT}" \
-  --dataset-version "${DATASET_VERSION}" \
-  --log-file "${INGEST_LOG_ROOT}/external_data_training_build_stage1_dataset.log" \
-  --rclone-remote "${RCLONE_REMOTE}" \
-  --object-bucket "${OBJECT_BUCKET}" \
-  --object-prefix "datasets/roberta_stage1/v1"
+  "${dataset_args[@]}"
 
 "${PYTHON_BIN}" "${SCRIPT_DIR}/augment_stage1_train.py" \
   --skip-download-input \

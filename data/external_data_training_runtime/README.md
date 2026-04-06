@@ -44,16 +44,24 @@ This runtime expects:
 3. Update values if your VM paths, bucket, or DB settings differ.
 4. The scripts use only the Python standard library, so `requirements.txt` is informational.
 
-## Run the default AMI subset
+## Run the full discoverable AMI corpus
 
 ```bash
 bash run_external_data_training_batch.sh
 ```
 
-## Run selected meetings
+## Run only selected meetings
 
 ```bash
 bash run_external_data_training_batch.sh ES2011c ES2014a TS3005c
+```
+
+## Optional env-based subset filter
+
+If you want a bounded run without passing CLI arguments, set:
+
+```bash
+AMI_MEETING_FILTER="ES2002a ES2002b ES2003a"
 ```
 
 ## Local outputs

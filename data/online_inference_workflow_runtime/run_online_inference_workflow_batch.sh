@@ -126,7 +126,7 @@ function process_transcript() {
     --version "${FEEDBACK_VERSION}"
 }
 
-declare -a transcript_paths
+declare -a transcript_paths=()
 if [[ $# -gt 0 ]]; then
   for arg in "$@"; do
     if [[ "${arg}" = /* ]]; then

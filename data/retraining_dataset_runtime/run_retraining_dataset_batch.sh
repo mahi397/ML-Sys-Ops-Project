@@ -43,7 +43,7 @@ export STAGE1_FEEDBACK_POOL_PREFIX
 
 mkdir -p "${LOCAL_TMP_ROOT}" "${LOG_ROOT}"
 
-declare -a meeting_ids
+declare -a meeting_ids=()
 if [[ $# -gt 0 ]]; then
   for arg in "$@"; do
     meeting_ids+=("${arg}")
@@ -61,7 +61,7 @@ if [[ ${#meeting_ids[@]} -eq 0 ]]; then
   exit 0
 fi
 
-declare -a meeting_flag_args
+declare -a meeting_flag_args=()
 for meeting_id in "${meeting_ids[@]}"; do
   meeting_flag_args+=(--meeting-id "${meeting_id}")
 done
