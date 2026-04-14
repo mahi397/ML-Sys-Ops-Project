@@ -1,0 +1,48 @@
+{
+  "meeting_id": "ES2002a",
+  "segment_id": 2,
+  "t_start": 98.3,
+  "t_end": 312.7,
+  "utterances": [
+    {
+      "position": 0,
+      "speaker": "A",
+      "t_start": 98.3,
+      "t_end": 109.1,
+      "text": "we need to finalize the interface before the next sprint"
+    },
+    {
+      "position": 1,
+      "speaker": "B",
+      "t_start": 110.0,
+      "t_end": 121.4,
+      "text": "agreed the api contract should be locked down first"
+    },
+    {
+      "position": 2,
+      "speaker": "C",
+      "t_start": 122.0,
+      "t_end": 134.7,
+      "text": "i can have a draft ready by thursday if that works"
+    },
+    {
+      "position": 3,
+      "speaker": "A",
+      "t_start": 135.1,
+      "t_end": 147.9,
+      "text": "thursday works should we also loop in the frontend team"
+    },
+    {
+      "position": 4,
+      "speaker": "B",
+      "t_start": 165.2,
+      "t_end": 178.4,
+      "text": "actually before that can we revisit the budget numbers"
+    }
+  ],
+  "total_utterances": 5,
+  "meeting_context": {
+    "total_segments": 4,
+    "segment_index_in_meeting": 2
+  }
+}
