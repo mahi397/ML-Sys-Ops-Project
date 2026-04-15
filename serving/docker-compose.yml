@@ -20,7 +20,7 @@ services:
       - "8000:8000"    # API: /health, /segment, /summarize, /recap, /metrics
       - "8265:8265"    # Ray Dashboard
       - "9091:9091"
-    gpus: all  
+    #gpus: all  
     environment:
       - MODEL_PATH=/models/roberta-seg
       - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
@@ -31,13 +31,13 @@ services:
       - ./models:/models
       - ray_tmp:/tmp/ray
     
-    #deploy:
-    #  resources:
-    #    reservations:
-    #      devices:
-    #        - driver: nvidia
-    #          count: 1
-    #          capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - jitsi-net
     healthcheck:
