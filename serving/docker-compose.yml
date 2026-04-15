@@ -30,13 +30,14 @@ services:
     volumes:
       - ./models:/models
       - ray_tmp:/tmp/ray
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: 1
+    #          capabilities: [gpu]
     networks:
       - jitsi-net
     healthcheck:
