@@ -19,6 +19,7 @@ services:
     ports:
       - "8000:8000"    # API: /health, /segment, /summarize, /recap, /metrics
       - "8265:8265"    # Ray Dashboard
+      - "9091:9091"
     environment:
       - MODEL_PATH=/models/roberta-seg
       - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
@@ -26,7 +27,7 @@ services:
       - MAX_SEGMENT_UTTERANCES=200
       - RAY_DEDUP_LOGS=0
     volumes:
-      - ./models:/models:ro
+      - ./models:/models
       - ray_tmp:/tmp/ray
     deploy:
       resources:
