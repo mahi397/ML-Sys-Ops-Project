@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir llama-cpp-python==0.2.56 \
 
 COPY serve.py .
 COPY metrics_server.py .
+COPY benchmark_ray.py .
 
 EXPOSE 8000 8265
 
