@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
@@ -13,8 +13,9 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone &
 COPY requirements_ray.txt .
 RUN pip install --no-cache-dir -r requirements_ray.txt
 
-# Install llama-cpp-python with CUDA support (devel image has nvcc)
-RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install --no-cache-dir llama-cpp-python==0.2.56
+# Install pre-built llama-cpp-python with CUDA support (no compilation needed)
+RUN pip install --no-cache-dir llama-cpp-python==0.2.56 \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 
 COPY serve.py .
 
