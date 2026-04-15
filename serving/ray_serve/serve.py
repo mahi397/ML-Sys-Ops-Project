@@ -179,8 +179,8 @@ class MetricsDeployment:
     ray_actor_options={"num_gpus": 0.3},
 )
 class SegmenterDeployment:
-    def __init__(self, metrics_handle):
-        self.metrics = metrics_handle
+    def __init__(self):
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
@@ -285,8 +285,8 @@ class SegmenterDeployment:
     ray_actor_options={"num_gpus": 0.7},
 )
 class SummarizerDeployment:
-    def __init__(self, metrics_handle):
-        self.metrics = metrics_handle
+    def __init__(self):
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         self.llm = None
         if LLM_MODEL_PATH and os.path.exists(LLM_MODEL_PATH):
             from llama_cpp import Llama
@@ -400,9 +400,8 @@ JSON format:
 
 @serve.deployment(name="recap_pipeline", num_replicas=1)
 class RecapPipelineDeployment:
-    def __init__(self, metrics_handle):
-        self.metrics = metrics_handle
-        # Look up already-deployed handles — avoids creating duplicate GPU actors
+    def __init__(self):
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         self.segmenter = serve.get_deployment_handle("segmenter", app_name="segmenter")
         self.summarizer = serve.get_deployment_handle("summarizer", app_name="summarizer")
 
@@ -553,21 +552,22 @@ class HealthDeployment:
 # BIND & RUN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ray.init(ignore_reinit_error=True, num_gpus=1)
+ray.init(ignore_reinit_error=True, num_gpus=1, dashboard_host="0.0.0.0")
 
+# Each deployment looks up the shared metrics actor at runtime via
+# serve.get_deployment_handle("metrics", app_name="metrics"), so there
+# is exactly ONE MetricsDeployment actor that all apps write to.
 metrics    = MetricsDeployment.bind()
-segmenter  = SegmenterDeployment.bind(metrics)   # 0.3 GPU
-summarizer = SummarizerDeployment.bind(metrics)  # 0.7 GPU  (total = 1.0)
+segmenter  = SegmenterDeployment.bind()   # 0.3 GPU
+summarizer = SummarizerDeployment.bind()  # 0.7 GPU  (total = 1.0)
 health     = HealthDeployment.bind()
-# recap only needs metrics — it looks up segmenter/summarizer handles at
-# runtime via serve.get_deployment_handle, so no extra GPU actors are created.
-recap = RecapPipelineDeployment.bind(metrics)
+recap      = RecapPipelineDeployment.bind()
 
 serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 
-# Deploy segmenter and summarizer first so their handles exist when recap starts.
-serve.run(health,     name="health",     route_prefix="/health")
+# metrics MUST be deployed first — other actors look it up by name on init.
 serve.run(metrics,    name="metrics",    route_prefix="/metrics")
+serve.run(health,     name="health",     route_prefix="/health")
 serve.run(segmenter,  name="segmenter",  route_prefix="/segment")
 serve.run(summarizer, name="summarizer", route_prefix="/summarize")
 serve.run(recap,      name="recap",      route_prefix="/recap")
