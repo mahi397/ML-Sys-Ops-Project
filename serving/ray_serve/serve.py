@@ -1,16 +1,12 @@
 """
-Ray Serve deployment for Jitsi Meeting Recap pipeline
-Replaces FastAPI (app/main.py) with independent model scaling + Prometheus metrics
-Matches the EXACT same JSON contract as the FastAPI version
-  - SegmentInput / SegmentOutput  (from app/schemas.py)
-  - SummarizeInput / SummarizeOutput
-  - recap_worker.py pipeline logic
+Ray Serve deployment for Jitsi Meeting Recap pipeline.
+Prometheus metrics for Grafana monitoring.
 
 Endpoints:
   GET  /health      → system health
   POST /segment     → Stage A: RoBERTa boundary detection
   POST /summarize   → Stage B: Mistral-7B summarization
-  POST /recap       → Full pipeline: segment all → assemble → summarize each
+  POST /recap       → Full pipeline
   GET  /metrics     → Prometheus scrape endpoint
 """
 
@@ -25,13 +21,9 @@ import psutil
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from prometheus_client import (
-    Counter, Histogram, Gauge, Info,
-    generate_latest, CONTENT_TYPE_LATEST, CollectorRegistry
-)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CONFIG — same env vars as app/config.py
+# CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 
 BOUNDARY_THRESHOLD = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
@@ -40,100 +32,141 @@ LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
 DEVICE             = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROMETHEUS METRICS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-REGISTRY = CollectorRegistry()
-
-REQUEST_COUNT = Counter(
-    'jitsi_requests_total', 'Total requests by endpoint and status',
-    ['endpoint', 'status'], registry=REGISTRY
-)
-REQUEST_LATENCY = Histogram(
-    'jitsi_request_latency_seconds', 'Request latency in seconds',
-    ['endpoint'],
-    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
-    registry=REGISTRY
-)
-ACTIVE_REQUESTS = Gauge(
-    'jitsi_active_requests', 'Currently processing requests',
-    ['endpoint'], registry=REGISTRY
-)
-BATCH_SIZE = Histogram(
-    'jitsi_batch_size', 'Batch sizes for batched inference',
-    ['model'], buckets=[1, 2, 4, 8, 16], registry=REGISTRY
-)
-CONFIDENCE_SCORE = Histogram(
-    'jitsi_boundary_confidence', 'Boundary prediction confidence scores',
-    [], buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-    registry=REGISTRY
-)
-SEGMENTS_DETECTED = Counter(
-    'jitsi_segments_detected_total', 'Total topic boundaries detected',
-    registry=REGISTRY
-)
-SUMMARY_LENGTH = Histogram(
-    'jitsi_summary_length_chars', 'Summary length in characters',
-    [], buckets=[50, 100, 200, 500, 1000, 2000, 5000], registry=REGISTRY
-)
-GPU_MEMORY_USED = Gauge(
-    'jitsi_gpu_memory_used_mb', 'GPU memory used in MB', registry=REGISTRY
-)
-GPU_MEMORY_TOTAL = Gauge(
-    'jitsi_gpu_memory_total_mb', 'GPU memory total in MB', registry=REGISTRY
-)
-GPU_UTILIZATION = Gauge(
-    'jitsi_gpu_utilization_percent', 'GPU utilization %', registry=REGISTRY
-)
-CPU_UTILIZATION = Gauge(
-    'jitsi_cpu_utilization_percent', 'CPU utilization %', registry=REGISTRY
-)
-RAM_USED = Gauge(
-    'jitsi_ram_used_mb', 'RAM used in MB', registry=REGISTRY
-)
-MODEL_LOADED = Gauge(
-    'jitsi_model_loaded', 'Whether model is loaded (1=yes, 0=no)',
-    ['model_name'], registry=REGISTRY
-)
-SLA_VIOLATIONS = Counter(
-    'jitsi_sla_violations_total', 'SLA violations by endpoint and type',
-    ['endpoint', 'sla_type'], registry=REGISTRY
-)
-RECAP_SEGMENTS_PER_MEETING = Histogram(
-    'jitsi_recap_segments_per_meeting', 'Number of segments per meeting recap',
-    [], buckets=[1, 2, 3, 5, 8, 10, 15, 20], registry=REGISTRY
-)
-RECAP_DURATION = Histogram(
-    'jitsi_recap_duration_seconds', 'Total recap pipeline duration',
-    [], buckets=[5, 10, 30, 60, 120, 180, 300, 600], registry=REGISTRY
-)
-MODEL_INFO = Info('jitsi_model', 'Model version info', registry=REGISTRY)
-
-
-def update_system_metrics():
-    """Update GPU/CPU/RAM gauges."""
-    try:
-        if torch.cuda.is_available():
-            mem_used = torch.cuda.memory_allocated(0) / 1024 / 1024
-            mem_total = torch.cuda.get_device_properties(0).total_mem / 1024 / 1024
-            GPU_MEMORY_USED.set(mem_used)
-            GPU_MEMORY_TOTAL.set(mem_total)
-            GPU_UTILIZATION.set((mem_used / mem_total) * 100 if mem_total > 0 else 0)
-    except Exception:
-        pass
-    CPU_UTILIZATION.set(psutil.cpu_percent())
-    RAM_USED.set(psutil.virtual_memory().used / 1024 / 1024)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TOKENIZATION — same as app/tokenize.py
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def format_window_for_roberta(window: list) -> str:
-    """Same format as app/tokenize.py — matches training data format."""
     sorted_window = sorted(window, key=lambda u: u["position"])
     return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# METRICS ENDPOINT — owns the Prometheus registry
+# Must be defined FIRST so other deployments don't touch prometheus objects
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="metrics", num_replicas=1)
+class MetricsDeployment:
+    def __init__(self):
+        from prometheus_client import (
+            Counter, Histogram, Gauge, Info,
+            CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+        )
+        self.registry = CollectorRegistry()
+        self.generate_latest = generate_latest
+        self.CONTENT_TYPE_LATEST = CONTENT_TYPE_LATEST
+
+        # All metrics live here — other deployments push data via /metrics/record
+        self.request_count = Counter(
+            'jitsi_requests_total', 'Total requests',
+            ['endpoint', 'status'], registry=self.registry
+        )
+        self.request_latency = Histogram(
+            'jitsi_request_latency_seconds', 'Latency',
+            ['endpoint'],
+            buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+            registry=self.registry
+        )
+        self.batch_size = Histogram(
+            'jitsi_batch_size', 'Batch sizes',
+            ['model'], buckets=[1, 2, 4, 8, 16], registry=self.registry
+        )
+        self.confidence = Histogram(
+            'jitsi_boundary_confidence', 'Confidence scores',
+            [], buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            registry=self.registry
+        )
+        self.segments_detected = Counter(
+            'jitsi_segments_detected_total', 'Boundaries detected',
+            registry=self.registry
+        )
+        self.summary_length = Histogram(
+            'jitsi_summary_length_chars', 'Summary length',
+            [], buckets=[50, 100, 200, 500, 1000, 2000, 5000],
+            registry=self.registry
+        )
+        self.gpu_mem_used = Gauge(
+            'jitsi_gpu_memory_used_mb', 'GPU mem used', registry=self.registry
+        )
+        self.gpu_mem_total = Gauge(
+            'jitsi_gpu_memory_total_mb', 'GPU mem total', registry=self.registry
+        )
+        self.cpu_util = Gauge(
+            'jitsi_cpu_utilization_percent', 'CPU %', registry=self.registry
+        )
+        self.ram_used = Gauge(
+            'jitsi_ram_used_mb', 'RAM used', registry=self.registry
+        )
+        self.model_loaded = Gauge(
+            'jitsi_model_loaded', 'Model loaded',
+            ['model_name'], registry=self.registry
+        )
+        self.sla_violations = Counter(
+            'jitsi_sla_violations_total', 'SLA violations',
+            ['endpoint', 'sla_type'], registry=self.registry
+        )
+        self.recap_duration = Histogram(
+            'jitsi_recap_duration_seconds', 'Recap duration',
+            [], buckets=[5, 10, 30, 60, 120, 180, 300, 600],
+            registry=self.registry
+        )
+        self.recap_segments = Histogram(
+            'jitsi_recap_segments_per_meeting', 'Segments per meeting',
+            [], buckets=[1, 2, 3, 5, 8, 10, 15, 20],
+            registry=self.registry
+        )
+        self.active_requests = Gauge(
+            'jitsi_active_requests', 'Active requests',
+            ['endpoint'], registry=self.registry
+        )
+
+    def _update_system(self):
+        try:
+            if torch.cuda.is_available():
+                mem_used = torch.cuda.memory_allocated(0) / 1024 / 1024
+                mem_total = torch.cuda.get_device_properties(0).total_mem / 1024 / 1024
+                self.gpu_mem_used.set(mem_used)
+                self.gpu_mem_total.set(mem_total)
+        except:
+            pass
+        self.cpu_util.set(psutil.cpu_percent())
+        self.ram_used.set(psutil.virtual_memory().used / 1024 / 1024)
+
+    def record(self, data: dict):
+        """Record metrics from other deployments."""
+        endpoint = data.get("endpoint", "")
+        status = data.get("status", "success")
+        latency = data.get("latency", 0)
+
+        self.request_count.labels(endpoint=endpoint, status=status).inc()
+        if latency > 0:
+            self.request_latency.labels(endpoint=endpoint).observe(latency)
+
+        if "batch_size" in data:
+            self.batch_size.labels(model="segmenter").observe(data["batch_size"])
+        if "confidence" in data:
+            self.confidence.observe(data["confidence"])
+        if data.get("is_boundary"):
+            self.segments_detected.inc()
+        if "summary_length" in data:
+            self.summary_length.observe(data["summary_length"])
+        if "sla_violation" in data:
+            self.sla_violations.labels(
+                endpoint=endpoint, sla_type=data["sla_violation"]
+            ).inc()
+        if "model_loaded" in data:
+            self.model_loaded.labels(model_name=data["model_name"]).set(
+                1 if data["model_loaded"] else 0
+            )
+        if "recap_duration" in data:
+            self.recap_duration.observe(data["recap_duration"])
+        if "recap_segments" in data:
+            self.recap_segments.observe(data["recap_segments"])
+
+    async def __call__(self, request: Request) -> Response:
+        self._update_system()
+        return Response(
+            content=self.generate_latest(self.registry),
+            media_type=self.CONTENT_TYPE_LATEST
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -144,10 +177,10 @@ def format_window_for_roberta(window: list) -> str:
     name="segmenter",
     num_replicas=1,
     ray_actor_options={"num_gpus": 0.3},
-    max_ongoing_requests=10,
 )
 class SegmenterDeployment:
-    def __init__(self):
+    def __init__(self, metrics_handle):
+        self.metrics = metrics_handle
         self.device = DEVICE
         self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
@@ -163,21 +196,17 @@ class SegmenterDeployment:
 
         self.model.to(self.device)
         self.model.eval()
-        MODEL_LOADED.labels(model_name="roberta_segmenter").set(1)
-        MODEL_INFO.info({
-            'segmenter_path': MODEL_PATH,
-            'segmenter_device': self.device,
-            'threshold': str(self.threshold)
+
+        # Report model loaded
+        self.metrics.record.remote({
+            "endpoint": "segment", "model_loaded": True,
+            "model_name": "roberta_segmenter"
         })
         print(f"[segmenter] Ready on {self.device}, threshold={self.threshold}")
 
     @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)
     async def batch_predict(self, requests: list) -> list:
-        """
-        Native Ray Serve batching — groups up to 8 concurrent requests
-        into a single GPU forward pass.
-        """
-        BATCH_SIZE.labels(model="segmenter").observe(len(requests))
+        batch_size = len(requests)
 
         texts = []
         metadata = []
@@ -201,13 +230,14 @@ class SegmenterDeployment:
             probs = torch.softmax(logits, dim=1)
             boundary_probs = probs[:, 1].cpu().tolist()
 
-        # Build responses — EXACT same format as SegmentOutput in schemas.py
         results = []
         for prob, meta in zip(boundary_probs, metadata):
             is_boundary = prob >= self.threshold
-            CONFIDENCE_SCORE.observe(prob)
-            if is_boundary:
-                SEGMENTS_DETECTED.inc()
+            # Record metrics async (non-blocking)
+            self.metrics.record.remote({
+                "endpoint": "segment", "batch_size": batch_size,
+                "confidence": prob, "is_boundary": is_boundary
+            })
             results.append({
                 "meeting_id": meta["meeting_id"],
                 "transition_after_position": meta["transition_index"],
@@ -222,33 +252,27 @@ class SegmenterDeployment:
         return results
 
     async def predict_single(self, body: dict) -> dict:
-        """Called by RecapPipeline via DeploymentHandle."""
         result = await self.batch_predict(body)
         return result
 
     async def __call__(self, request: Request) -> JSONResponse:
-        """HTTP endpoint: POST /segment — same contract as FastAPI."""
         start = time.time()
-        ACTIVE_REQUESTS.labels(endpoint="segment").inc()
         try:
             body = await request.json()
             if "window" not in body:
-                REQUEST_COUNT.labels(endpoint="segment", status="error").inc()
-                return JSONResponse({"error": "Missing 'window' field"}, status_code=400)
+                self.metrics.record.remote({"endpoint": "segment", "status": "error"})
+                return JSONResponse({"error": "Missing 'window'"}, status_code=400)
 
             result = await self.predict_single(body)
             latency = time.time() - start
-            REQUEST_LATENCY.labels(endpoint="segment").observe(latency)
-            REQUEST_COUNT.labels(endpoint="segment", status="success").inc()
+            record = {"endpoint": "segment", "status": "success", "latency": latency}
             if latency > 2.0:
-                SLA_VIOLATIONS.labels(endpoint="segment", sla_type="latency_2s").inc()
-            update_system_metrics()
+                record["sla_violation"] = "latency_2s"
+            self.metrics.record.remote(record)
             return JSONResponse(content=result)
         except Exception as e:
-            REQUEST_COUNT.labels(endpoint="segment", status="error").inc()
+            self.metrics.record.remote({"endpoint": "segment", "status": "error"})
             return JSONResponse({"error": str(e)}, status_code=500)
-        finally:
-            ACTIVE_REQUESTS.labels(endpoint="segment").dec()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -259,10 +283,10 @@ class SegmenterDeployment:
     name="summarizer",
     num_replicas=1,
     ray_actor_options={"num_gpus": 0.7},
-    max_ongoing_requests=3,
 )
 class SummarizerDeployment:
-    def __init__(self):
+    def __init__(self, metrics_handle):
+        self.metrics = metrics_handle
         self.llm = None
         if LLM_MODEL_PATH and os.path.exists(LLM_MODEL_PATH):
             from llama_cpp import Llama
@@ -272,20 +296,24 @@ class SummarizerDeployment:
                 n_ctx=4096,
                 verbose=False
             )
-            MODEL_LOADED.labels(model_name="mistral_summarizer").set(1)
+            self.metrics.record.remote({
+                "endpoint": "summarize", "model_loaded": True,
+                "model_name": "mistral_summarizer"
+            })
             print(f"[summarizer] LLM loaded from {LLM_MODEL_PATH}")
         else:
-            MODEL_LOADED.labels(model_name="mistral_summarizer").set(0)
+            self.metrics.record.remote({
+                "endpoint": "summarize", "model_loaded": False,
+                "model_name": "mistral_summarizer"
+            })
             print(f"[summarizer] No LLM at '{LLM_MODEL_PATH}' — draft mode")
 
     def _summarize(self, body: dict) -> dict:
-        """Core summarization logic — same as app/llm.py + recap_worker.py contract."""
         meeting_id = body.get("meeting_id", "unknown")
         segment_id = body.get("segment_id", 0)
         t_start = body.get("t_start", 0)
         t_end = body.get("t_end", 0)
 
-        # No LLM → draft response (same as FastAPI fallback)
         if self.llm is None:
             return {
                 "meeting_id": meeting_id, "segment_id": segment_id,
@@ -331,67 +359,53 @@ JSON format:
             }
 
     async def summarize_dict(self, body: dict) -> dict:
-        """Called by RecapPipeline via DeploymentHandle — takes dict, returns dict."""
         start = time.time()
         result = self._summarize(body)
         latency = time.time() - start
-        REQUEST_LATENCY.labels(endpoint="summarize").observe(latency)
-        status = "success" if result["status"] != "error" else "error"
-        REQUEST_COUNT.labels(endpoint="summarize", status=status).inc()
+        record = {"endpoint": "summarize", "status": "success", "latency": latency}
         if result["status"] == "complete":
-            SUMMARY_LENGTH.observe(
-                len(result.get("topic_label", "")) +
-                len(" ".join(result.get("summary_bullets", [])))
+            record["summary_length"] = len(
+                result.get("topic_label", "") +
+                " ".join(result.get("summary_bullets", []))
             )
         if latency > 30.0:
-            SLA_VIOLATIONS.labels(endpoint="summarize", sla_type="latency_30s").inc()
-        update_system_metrics()
+            record["sla_violation"] = "latency_30s"
+        self.metrics.record.remote(record)
         return result
 
     async def __call__(self, request: Request) -> JSONResponse:
-        """HTTP endpoint: POST /summarize — same contract as FastAPI."""
         start = time.time()
-        ACTIVE_REQUESTS.labels(endpoint="summarize").inc()
         try:
             body = await request.json()
             result = self._summarize(body)
             latency = time.time() - start
-            REQUEST_LATENCY.labels(endpoint="summarize").observe(latency)
-            status = "success" if result["status"] != "error" else "error"
-            REQUEST_COUNT.labels(endpoint="summarize", status=status).inc()
+            record = {"endpoint": "summarize", "status": "success", "latency": latency}
             if result["status"] == "complete":
-                SUMMARY_LENGTH.observe(
-                    len(result.get("topic_label", "")) +
-                    len(" ".join(result.get("summary_bullets", [])))
+                record["summary_length"] = len(
+                    result.get("topic_label", "") +
+                    " ".join(result.get("summary_bullets", []))
                 )
             if latency > 30.0:
-                SLA_VIOLATIONS.labels(endpoint="summarize", sla_type="latency_30s").inc()
-            update_system_metrics()
+                record["sla_violation"] = "latency_30s"
+            self.metrics.record.remote(record)
             return JSONResponse(content=result)
         except Exception as e:
-            REQUEST_COUNT.labels(endpoint="summarize", status="error").inc()
+            self.metrics.record.remote({"endpoint": "summarize", "status": "error"})
             return JSONResponse({"error": str(e)}, status_code=500)
-        finally:
-            ACTIVE_REQUESTS.labels(endpoint="summarize").dec()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FULL PIPELINE: /recap
-# Same logic as worker/recap_worker.py but via Ray Serve DeploymentHandles
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@serve.deployment(
-    name="recap_pipeline",
-    num_replicas=1,
-    max_ongoing_requests=2,
-)
+@serve.deployment(name="recap_pipeline", num_replicas=1)
 class RecapPipelineDeployment:
-    def __init__(self, segmenter_handle, summarizer_handle):
+    def __init__(self, segmenter_handle, summarizer_handle, metrics_handle):
         self.segmenter = segmenter_handle
         self.summarizer = summarizer_handle
+        self.metrics = metrics_handle
 
     def _build_windows(self, utterances, window_size=7):
-        """Same as recap_worker.py build_windows()."""
         windows = []
         half = window_size // 2
         for i in range(len(utterances) - 1):
@@ -412,12 +426,10 @@ class RecapPipelineDeployment:
         return windows
 
     def _assemble_segments(self, utterances, decisions):
-        """Same as recap_worker.py assemble_segments()."""
         segments = []
         current = []
         seg_id = 1
         seg_start = utterances[0]["t_start"] if utterances else 0.0
-
         for i, decision in enumerate(decisions):
             current.append(utterances[i])
             if decision["is_boundary"] or i == len(decisions) - 1:
@@ -434,40 +446,33 @@ class RecapPipelineDeployment:
         return segments
 
     async def __call__(self, request: Request) -> JSONResponse:
-        """POST /recap — full meeting recap pipeline."""
         start = time.time()
-        ACTIVE_REQUESTS.labels(endpoint="recap").inc()
         try:
             body = await request.json()
             meeting_id = body.get("meeting_id", "unknown")
             utterances = body.get("utterances", [])
 
             if not utterances or len(utterances) < 2:
-                REQUEST_COUNT.labels(endpoint="recap", status="error").inc()
+                self.metrics.record.remote({"endpoint": "recap", "status": "error"})
                 return JSONResponse({"error": "Need at least 2 utterances"}, status_code=400)
 
-            # ── Stage A: segment all windows ─────────────────────────────
+            # Stage A
             windows = self._build_windows(utterances)
-
-            # Fire all segmentation requests via DeploymentHandle
             seg_refs = []
             for w in windows:
                 payload = {"meeting_id": meeting_id, **w}
                 ref = self.segmenter.predict_single.remote(payload)
                 seg_refs.append(ref)
 
-            # Gather results
             decisions = []
             for ref in seg_refs:
                 result = await ref
                 decisions.append(result)
 
-            # ── Assemble segments ────────────────────────────────────────
+            # Assemble
             segments = self._assemble_segments(utterances, decisions)
-            RECAP_SEGMENTS_PER_MEETING.observe(len(segments))
-            print(f"[recap] {meeting_id}: {len(segments)} segments from {len(utterances)} utterances")
 
-            # ── Stage B: summarize each segment ──────────────────────────
+            # Stage B
             summaries = []
             for seg in segments:
                 sum_payload = {
@@ -482,19 +487,18 @@ class RecapPipelineDeployment:
                         "segment_index_in_meeting": seg["segment_id"]
                     }
                 }
-                # Call summarizer via DeploymentHandle (dict→dict, no HTTP)
                 sum_result = await self.summarizer.summarize_dict.remote(sum_payload)
                 summaries.append(sum_result)
 
             elapsed = time.time() - start
-            REQUEST_LATENCY.labels(endpoint="recap").observe(elapsed)
-            REQUEST_COUNT.labels(endpoint="recap", status="success").inc()
-            RECAP_DURATION.observe(elapsed)
+            record = {
+                "endpoint": "recap", "status": "success", "latency": elapsed,
+                "recap_duration": elapsed, "recap_segments": len(segments)
+            }
             if elapsed > 300.0:
-                SLA_VIOLATIONS.labels(endpoint="recap", sla_type="latency_300s").inc()
-            update_system_metrics()
+                record["sla_violation"] = "latency_300s"
+            self.metrics.record.remote(record)
 
-            # Same output format as recap_worker.py
             return JSONResponse(content={
                 "meeting_id": meeting_id,
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -504,24 +508,8 @@ class RecapPipelineDeployment:
             })
 
         except Exception as e:
-            REQUEST_COUNT.labels(endpoint="recap", status="error").inc()
+            self.metrics.record.remote({"endpoint": "recap", "status": "error"})
             return JSONResponse({"error": str(e)}, status_code=500)
-        finally:
-            ACTIVE_REQUESTS.labels(endpoint="recap").dec()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# METRICS ENDPOINT (Prometheus scrapes this)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@serve.deployment(name="metrics", num_replicas=1)
-class MetricsDeployment:
-    async def __call__(self, request: Request) -> Response:
-        update_system_metrics()
-        return Response(
-            content=generate_latest(REGISTRY),
-            media_type=CONTENT_TYPE_LATEST
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -550,11 +538,11 @@ class HealthDeployment:
 
 ray.init(ignore_reinit_error=True)
 
-segmenter   = SegmenterDeployment.bind()
-summarizer  = SummarizerDeployment.bind()
-health      = HealthDeployment.bind()
 metrics     = MetricsDeployment.bind()
-recap       = RecapPipelineDeployment.bind(segmenter, summarizer)
+segmenter   = SegmenterDeployment.bind(metrics)
+summarizer  = SummarizerDeployment.bind(metrics)
+health      = HealthDeployment.bind()
+recap       = RecapPipelineDeployment.bind(segmenter, summarizer, metrics)
 
 serve.run(
     {
@@ -573,7 +561,6 @@ serve.run(
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
 print("Endpoints: /health, /segment, /summarize, /recap, /metrics")
-print("Ray Dashboard: http://0.0.0.0:8265")
 print("=" * 60)
 
 import signal
