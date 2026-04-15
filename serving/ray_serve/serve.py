@@ -30,7 +30,7 @@ BOUNDARY_THRESHOLD = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
 MODEL_PATH         = os.getenv("MODEL_PATH", "roberta-base")
 LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
-DEVICE             = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE             = "cuda" #if torch.cuda.is_available() else "cpu"
 
 
 def format_window_for_roberta(window: list) -> str:
@@ -181,7 +181,8 @@ class MetricsDeployment:
 class SegmenterDeployment:
     def __init__(self, metrics_handle):
         self.metrics = metrics_handle
-        self.device = DEVICE
+        #self.device = DEVICE
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 
