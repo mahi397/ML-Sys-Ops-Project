@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel
 
 WORKDIR /app
 
@@ -13,10 +13,9 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone &
 COPY requirements_ray.txt .
 RUN pip install --no-cache-dir -r requirements_ray.txt
 
-# Install llama-cpp-python with CUDA support for Mistral-7B on RTX 6000
+# Install llama-cpp-python with CUDA support (devel image has nvcc)
 RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install --no-cache-dir llama-cpp-python==0.2.56
 
-# Copy serve.py into container
 COPY serve.py .
 
 EXPOSE 8000 8265
