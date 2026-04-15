@@ -30,7 +30,7 @@ BOUNDARY_THRESHOLD = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
 MODEL_PATH         = os.getenv("MODEL_PATH", "roberta-base")
 LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
-DEVICE             = "cuda" #if torch.cuda.is_available() else "cpu"
+DEVICE             = "cuda"  # overridden per-actor in __init__
 
 
 def format_window_for_roberta(window: list) -> str:
@@ -181,7 +181,6 @@ class MetricsDeployment:
 class SegmenterDeployment:
     def __init__(self, metrics_handle):
         self.metrics = metrics_handle
-        #self.device = DEVICE
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
@@ -401,10 +400,11 @@ JSON format:
 
 @serve.deployment(name="recap_pipeline", num_replicas=1)
 class RecapPipelineDeployment:
-    def __init__(self, segmenter_handle, summarizer_handle, metrics_handle):
-        self.segmenter = segmenter_handle
-        self.summarizer = summarizer_handle
+    def __init__(self, metrics_handle):
         self.metrics = metrics_handle
+        # Look up already-deployed handles — avoids creating duplicate GPU actors
+        self.segmenter = serve.get_deployment_handle("segmenter", app_name="segmenter")
+        self.summarizer = serve.get_deployment_handle("summarizer", app_name="summarizer")
 
     def _build_windows(self, utterances, window_size=7):
         windows = []
@@ -537,25 +537,24 @@ class HealthDeployment:
 # BIND & RUN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from starlette.routing import Route
-from starlette.applications import Starlette
-
 ray.init(ignore_reinit_error=True, num_gpus=1)
 
-metrics     = MetricsDeployment.bind()
-segmenter   = SegmenterDeployment.bind(metrics)
-summarizer  = SummarizerDeployment.bind(metrics)
-health      = HealthDeployment.bind()
-recap       = RecapPipelineDeployment.bind(segmenter, summarizer, metrics)
+metrics    = MetricsDeployment.bind()
+segmenter  = SegmenterDeployment.bind(metrics)   # 0.3 GPU
+summarizer = SummarizerDeployment.bind(metrics)  # 0.7 GPU  (total = 1.0)
+health     = HealthDeployment.bind()
+# recap only needs metrics — it looks up segmenter/summarizer handles at
+# runtime via serve.get_deployment_handle, so no extra GPU actors are created.
+recap = RecapPipelineDeployment.bind(metrics)
 
-# Ray Serve 2.9 needs individual serve.run per deployment
 serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 
-serve.run(health, name="health", route_prefix="/health")
-serve.run(segmenter, name="segmenter", route_prefix="/segment")
+# Deploy segmenter and summarizer first so their handles exist when recap starts.
+serve.run(health,     name="health",     route_prefix="/health")
+serve.run(metrics,    name="metrics",    route_prefix="/metrics")
+serve.run(segmenter,  name="segmenter",  route_prefix="/segment")
 serve.run(summarizer, name="summarizer", route_prefix="/summarize")
-serve.run(recap, name="recap", route_prefix="/recap")
-serve.run(metrics, name="metrics", route_prefix="/metrics")
+serve.run(recap,      name="recap",      route_prefix="/recap")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
