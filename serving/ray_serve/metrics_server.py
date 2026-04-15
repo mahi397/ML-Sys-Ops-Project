@@ -153,6 +153,21 @@ SAMPLE_SEGMENT = {
     "transition_index": 3,
     "meeting_offset_seconds": 0.0
 }
+SAMPLE_SUMMARIZE = {
+    "meeting_id": "PROBE",
+    "segment_id": 1,
+    "t_start": 0.0,
+    "t_end": 70.0,
+    "utterances": [
+        {"speaker": "A", "text": "we need to finalize the interface before the next sprint"},
+        {"speaker": "B", "text": "agreed the api contract should be locked down first"},
+        {"speaker": "C", "text": "i can have a draft ready by thursday if that works"},
+    ],
+    "total_utterances": 3,
+    "meeting_context": {"total_segments": 1, "segment_index_in_meeting": 1}
+}
+
+
 
 
 def probe_loop():
@@ -166,6 +181,7 @@ def probe_loop():
     # Wait for Ray Serve to finish loading models
     print("[metrics] Waiting 30s for Ray Serve to start...")
     time.sleep(30)
+    summarize_tick = 0 
 
     while True:
         try:
@@ -208,11 +224,39 @@ def probe_loop():
                     SLA_VIOLATIONS.labels(
                         endpoint="segment", sla_type="latency_2s"
                     ).inc()
-
+                    SLA_VIOLATIONS.labels(endpoint="segment", sla_type="latency_2s").inc()
                 # Model is working
                 MODEL_LOADED.labels(model_name="roberta_segmenter").set(1)
             else:
                 REQUEST_COUNT.labels(endpoint="segment", status="error").inc()
+            
+            # ── Probe /summarize every ~60s (LLM is slow) ────────
+            summarize_tick += 1
+            if summarize_tick >= 6:
+                summarize_tick = 0
+                try:
+                    t0 = time.time()
+                    r = req.post(
+                        "http://localhost:8000/summarize",
+                        json=SAMPLE_SUMMARIZE,
+                        timeout=60
+                    )
+                    latency = time.time() - t0
+                    if r.status_code == 200:
+                        result = r.json()
+                        REQUEST_COUNT.labels(endpoint="summarize", status="success").inc()
+                        REQUEST_LATENCY.labels(endpoint="summarize").observe(latency)
+                        MODEL_LOADED.labels(model_name="mistral_summarizer").set(1)
+                        summary_text = result.get("topic_label", "") + " ".join(result.get("summary_bullets", []))
+                        if summary_text:
+                            SUMMARY_LENGTH.observe(len(summary_text))
+                        if latency > 30.0:
+                            SLA_VIOLATIONS.labels(endpoint="summarize", sla_type="latency_30s").inc()
+                    else:
+                        REQUEST_COUNT.labels(endpoint="summarize", status="error").inc()
+                except Exception as e:
+                    print(f"[metrics] Summarize probe error: {e}")
+    
 
         except req.exceptions.ConnectionError:
             # Ray Serve not ready yet
@@ -225,7 +269,7 @@ def probe_loop():
 
         # Probe every 10 seconds
         time.sleep(10)
-
+        
 
 # ═══════════════════════════════════════════════════════════════════
 # HTTP SERVER — Prometheus scrapes this
