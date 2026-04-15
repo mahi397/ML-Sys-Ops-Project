@@ -539,7 +539,7 @@ class HealthDeployment:
 from starlette.routing import Route
 from starlette.applications import Starlette
 
-ray.init(ignore_reinit_error=True)
+ray.init(ignore_reinit_error=True, num_gpus=1)
 
 metrics     = MetricsDeployment.bind()
 segmenter   = SegmenterDeployment.bind(metrics)
