@@ -1,5 +1,5 @@
 """
-Triton Inference Server benchmark for roberta_segmenter.
+Triton Inference Server benchmark
 Usage:
   python3 benchmark/benchmark_triton.py --url localhost:8100 --label C_triton_gpu
   python3 benchmark/benchmark_triton.py --url localhost:8100 --label C_triton_gpu --concurrency 5

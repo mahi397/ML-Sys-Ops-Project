@@ -1,6 +1,6 @@
 """
-Async recap worker.
-Chains Stage A (segmentation) → Stage B (summarization) → writes recap JSON.
+Async recap worker
+Chains Stage A (segmentation) - Stage B (summarization) - writes recap JSON.
 """
 import json
 import time
@@ -15,7 +15,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def build_windows(utterances: list, window_size: int = 7) -> list:
-    """Slide a window of size 7 over utterances, centered on each transition."""
+    """Slide a window of size 7 over utterance centered on each transition"""
     windows = []
     half = window_size // 2
     for i in range(len(utterances) - 1):
@@ -48,7 +48,7 @@ def build_windows(utterances: list, window_size: int = 7) -> list:
 
 
 def assemble_segments(utterances: list, boundary_outputs: list) -> list:
-    """Group utterances into confirmed segments from boundary decisions."""
+    """Group utterances into confirmed segments from boundary decisions"""
     segments   = []
     current    = []
     seg_id     = 1
