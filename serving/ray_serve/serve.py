@@ -144,7 +144,7 @@ def format_window_for_roberta(window: list) -> str:
     name="segmenter",
     num_replicas=1,
     ray_actor_options={"num_gpus": 0.3},
-    max_ongoing_requests=10,
+    max_ongoing_requests=3,
 )
 class SegmenterDeployment:
     def __init__(self):
