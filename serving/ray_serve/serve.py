@@ -520,16 +520,32 @@ class RecapPipelineDeployment:
 @serve.deployment(name="health", num_replicas=1)
 class HealthDeployment:
     async def __call__(self, request: Request) -> JSONResponse:
-        gpu_available = torch.cuda.is_available()
-        gpu_name = torch.cuda.get_device_name(0) if gpu_available else "none"
-        gpu_mem_gb = (torch.cuda.get_device_properties(0).total_mem / 1024**3
-                      if gpu_available else 0)
+        # Health actor has no num_gpus, so CUDA_VISIBLE_DEVICES="" in this process.
+        # Use Ray cluster resources to detect GPU presence, nvidia-smi for details.
+        cluster_gpus = ray.cluster_resources().get("GPU", 0)
+        gpu_available = cluster_gpus > 0
+        gpu_name = "none"
+        gpu_mem_gb = 0.0
+        if gpu_available:
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=name,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if r.returncode == 0:
+                    parts = r.stdout.strip().split(", ")
+                    gpu_name = parts[0]
+                    gpu_mem_gb = round(int(parts[1]) / 1024, 1) if len(parts) > 1 else 0.0
+            except Exception:
+                gpu_name = "unknown"
         return JSONResponse(content={
             "status": "ok",
             "mode": "ray_serve",
             "device": "cuda" if gpu_available else "cpu",
             "gpu": gpu_name,
-            "gpu_memory_gb": round(gpu_mem_gb, 1)
+            "gpu_memory_gb": gpu_mem_gb
         })
 
 
