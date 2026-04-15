@@ -135,7 +135,7 @@ def run_full_meeting(url, num_windows=800):
     total = time.perf_counter() - t0
     print(f"\n  Total: {total:.1f}s  (SLA: 300s)")
     print(f"  Errors: {errors}/{num_windows}")
-    print(f"  {'✅ PASS' if total < 300 else '❌ FAIL'}")
+    print(f"  {'PASS' if total < 300 else 'FAIL'}")
     print(f"  VRAM peak: {get_vram()}")
 
 
@@ -154,7 +154,7 @@ if __name__ == "__main__":
         h = requests.get(f"{args.url}/health", timeout=5)
         print(f"Health: {h.json()}")
     except Exception as e:
-        print(f"❌ Cannot reach {args.url}/health — {e}")
+        print(f"Cannot reach {args.url}/health — {e}")
         print("Is the stack running? Try: docker compose logs ray-serve")
         exit(1)
 

@@ -518,17 +518,90 @@ class RecapPipelineDeployment:
 
 @serve.deployment(name="health", num_replicas=1)
 class HealthDeployment:
-    async def __call__(self, request: Request) -> JSONResponse:
+    def __init__(self):
+        from prometheus_client import (
+            Counter, Histogram, Gauge,
+            CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+        )
+        self.registry = CollectorRegistry()
+        self.generate_latest = generate_latest
+        self.CONTENT_TYPE_LATEST = CONTENT_TYPE_LATEST
+
+        self.request_count = Counter('jitsi_requests_total', 'Total requests',
+            ['endpoint', 'status'], registry=self.registry)
+        self.request_latency = Histogram('jitsi_request_latency_seconds', 'Latency',
+            ['endpoint'],
+            buckets=[0.005,0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.0,5.0,10.0,30.0,60.0],
+            registry=self.registry)
+        self.confidence = Histogram('jitsi_boundary_confidence', 'Confidence',
+            [], buckets=[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0], registry=self.registry)
+        self.segments_detected = Counter('jitsi_segments_detected_total', 'Boundaries',
+            registry=self.registry)
+        self.gpu_mem_used = Gauge('jitsi_gpu_memory_used_mb', 'GPU used', registry=self.registry)
+        self.gpu_mem_total = Gauge('jitsi_gpu_memory_total_mb', 'GPU total', registry=self.registry)
+        self.cpu_util = Gauge('jitsi_cpu_utilization_percent', 'CPU', registry=self.registry)
+        self.ram_used = Gauge('jitsi_ram_used_mb', 'RAM', registry=self.registry)
+        self.sla_violations = Counter('jitsi_sla_violations_total', 'SLA',
+            ['endpoint', 'sla_type'], registry=self.registry)
+        self.batch_size = Histogram('jitsi_batch_size', 'Batch',
+            ['model'], buckets=[1,2,4,8,16], registry=self.registry)
+        self.active = Gauge('jitsi_active_requests', 'Active',
+            ['endpoint'], registry=self.registry)
+        self.model_loaded = Gauge('jitsi_model_loaded', 'Loaded',
+            ['model_name'], registry=self.registry)
+        self.summary_length = Histogram('jitsi_summary_length_chars', 'Summary len',
+            [], buckets=[50,100,200,500,1000,2000,5000], registry=self.registry)
+        self.recap_duration = Histogram('jitsi_recap_duration_seconds', 'Recap dur',
+            [], buckets=[5,10,30,60,120,180,300,600], registry=self.registry)
+        self.recap_segments = Histogram('jitsi_recap_segments_per_meeting', 'Segs/meeting',
+            [], buckets=[1,2,3,5,8,10,15,20], registry=self.registry)
+
+    def record(self, data: dict):
+        endpoint = data.get("endpoint", "")
+        status = data.get("status", "success")
+        latency = data.get("latency", 0)
+        self.request_count.labels(endpoint=endpoint, status=status).inc()
+        if latency > 0:
+            self.request_latency.labels(endpoint=endpoint).observe(latency)
+        if "batch_size" in data:
+            self.batch_size.labels(model="segmenter").observe(data["batch_size"])
+        if "confidence" in data:
+            self.confidence.observe(data["confidence"])
+        if data.get("is_boundary"):
+            self.segments_detected.inc()
+        if "summary_length" in data:
+            self.summary_length.observe(data["summary_length"])
+        if "sla_violation" in data:
+            self.sla_violations.labels(endpoint=endpoint, sla_type=data["sla_violation"]).inc()
+        if "model_loaded" in data:
+            self.model_loaded.labels(model_name=data["model_name"]).set(1 if data["model_loaded"] else 0)
+        if "recap_duration" in data:
+            self.recap_duration.observe(data["recap_duration"])
+        if "recap_segments" in data:
+            self.recap_segments.observe(data["recap_segments"])
+
+    def _update_system(self):
+        try:
+            if torch.cuda.is_available():
+                self.gpu_mem_used.set(torch.cuda.memory_allocated(0)/1024/1024)
+                self.gpu_mem_total.set(torch.cuda.get_device_properties(0).total_mem/1024/1024)
+        except: pass
+        self.cpu_util.set(psutil.cpu_percent())
+        self.ram_used.set(psutil.virtual_memory().used/1024/1024)
+
+    async def __call__(self, request: Request) -> Response:
+        path = request.url.path
+        if path == "/health/metrics" or request.query_params.get("metrics"):
+            self._update_system()
+            return Response(content=self.generate_latest(self.registry), media_type=self.CONTENT_TYPE_LATEST)
+        
         gpu_available = torch.cuda.is_available()
         gpu_name = torch.cuda.get_device_name(0) if gpu_available else "none"
-        gpu_mem_gb = (torch.cuda.get_device_properties(0).total_mem / 1024**3
-                      if gpu_available else 0)
+        gpu_mem_gb = (torch.cuda.get_device_properties(0).total_mem/1024**3 if gpu_available else 0)
         return JSONResponse(content={
-            "status": "ok",
-            "mode": "ray_serve",
+            "status": "ok", "mode": "ray_serve",
             "device": "cuda" if gpu_available else "cpu",
-            "gpu": gpu_name,
-            "gpu_memory_gb": round(gpu_mem_gb, 1)
+            "gpu": gpu_name, "gpu_memory_gb": round(gpu_mem_gb, 1)
         })
 
 
