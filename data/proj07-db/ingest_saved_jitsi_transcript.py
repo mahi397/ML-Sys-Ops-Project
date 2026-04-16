@@ -459,6 +459,22 @@ def upsert_host_user(cur, host_external_key: str) -> None:
     )
 
 
+def fetch_returning_id(cur, key: str) -> int:
+    row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(f"Expected RETURNING {key} row, but query returned none")
+
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        try:
+            return row[0]
+        except (KeyError, TypeError, IndexError) as exc:
+            raise RuntimeError(
+                f"Could not read RETURNING {key} from row of type {type(row).__name__}"
+            ) from exc
+
+
 def insert_rows(
     *,
     conn,
@@ -555,7 +571,10 @@ def insert_rows(
                     speaker["role"],
                 ),
             )
-            speaker_id_by_label[speaker["speaker_label"]] = cur.fetchone()[0]
+            speaker_id_by_label[speaker["speaker_label"]] = fetch_returning_id(
+                cur,
+                "meeting_speaker_id",
+            )
 
         for artifact in artifacts:
             cur.execute(
@@ -605,7 +624,10 @@ def insert_rows(
                     utterance["clean_text"],
                 ),
             )
-            utterance_id_by_index[utterance["utterance_index"]] = cur.fetchone()[0]
+            utterance_id_by_index[utterance["utterance_index"]] = fetch_returning_id(
+                cur,
+                "utterance_id",
+            )
 
         for transition in transitions:
             cur.execute(
