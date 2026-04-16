@@ -7,7 +7,7 @@ BEGIN;
 -- Stage 2 topic-segmented LLM summarization inputs/outputs
 
 CREATE TABLE users (
-    user_id BIGSERIAL PRIMARY KEY,
+    user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     email TEXT UNIQUE
 );
@@ -29,7 +29,7 @@ CREATE TABLE meetings (
 CREATE TABLE meeting_participants (
     meeting_participant_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     role TEXT NOT NULL CHECK (role IN ('host', 'participant')),
     can_view_summary BOOLEAN NOT NULL DEFAULT TRUE,
     can_edit_summary BOOLEAN NOT NULL DEFAULT FALSE,
@@ -42,7 +42,7 @@ CREATE TABLE meeting_participants (
 CREATE TABLE meeting_speakers (
     meeting_speaker_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+    user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
     speaker_label TEXT NOT NULL,
     display_name TEXT NOT NULL,
     role TEXT,
@@ -121,7 +121,7 @@ CREATE TABLE summaries (
         summary_type IN ('ami_gold', 'llm_generated', 'user_edited')
     ),
     summary_object_key TEXT NOT NULL,
-    created_by_user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+    created_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (meeting_id, summary_type, version)
