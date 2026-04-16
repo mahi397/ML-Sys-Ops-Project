@@ -1,0 +1,85 @@
+groups:
+  - name: latency_sla
+    rules:
+      - alert: SegmentationLatencyHigh
+        expr: histogram_quantile(0.95, rate(jitsi_request_latency_seconds_bucket{endpoint="segment"}[5m])) > 2.0
+        for: 2m
+        labels:
+          severity: critical
+          action: rollback
+        annotations:
+          summary: "Segmentation p95 > 2s SLA — trigger rollback"
+          description: "p95 = {{ $value }}s"
+
+      - alert: SummarizationLatencyHigh
+        expr: histogram_quantile(0.95, rate(jitsi_request_latency_seconds_bucket{endpoint="summarize"}[5m])) > 30.0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Summarization p95 > 30s"
+
+      - alert: RecapLatencyHigh
+        expr: histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[5m])) > 300.0
+        for: 2m
+        labels:
+          severity: critical
+          action: rollback
+        annotations:
+          summary: "Full recap p95 > 5min SLA"
+
+  - name: error_rate
+    rules:
+      - alert: HighErrorRate
+        expr: (rate(jitsi_requests_total{status="error"}[5m]) / rate(jitsi_requests_total[5m])) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+          action: rollback
+        annotations:
+          summary: "Error rate > 5% — trigger rollback"
+
+      - alert: ServiceDown
+        expr: rate(jitsi_requests_total{status="success"}[2m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful requests in 2 minutes"
+
+  - name: resources
+    rules:
+      - alert: GPUMemoryHigh
+        expr: jitsi_gpu_memory_used_mb > 21504
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU memory > 90% of RTX 6000 (24GB)"
+
+      - alert: CPUHigh
+        expr: jitsi_cpu_utilization_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU > 85%"
+
+  - name: model_health
+    rules:
+      - alert: ModelNotLoaded
+        expr: jitsi_model_loaded == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.model_name }} failed to load"
+
+      - alert: LowConfidenceScores
+        expr: histogram_quantile(0.5, rate(jitsi_boundary_confidence_bucket[10m])) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+          action: investigate
+        annotations:
+          summary: "Median boundary confidence < 0.3 — possible data drift"

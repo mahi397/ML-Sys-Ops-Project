@@ -1,0 +1,13 @@
+{
+  "meeting_id": "ES2002a",
+  "segment_id": 2,
+  "t_start": 98.3,
+  "t_end": 312.7,
+  "topic_label": "API Interface Finalization",
+  "summary_bullets": [
+    "Team agreed to lock down the API contract before the next sprint",
+    "Speaker C to prepare a draft by Thursday",
+    "Frontend team to be looped in after the contract is finalized"
+  ],
+  "status": "complete"
+}

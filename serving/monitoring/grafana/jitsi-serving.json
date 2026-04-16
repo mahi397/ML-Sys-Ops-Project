@@ -1,0 +1,147 @@
+{
+  "editable": true,
+  "graphTooltip": 1,
+  "liveNow": true,
+  "panels": [
+    { "title": "── System Overview ──", "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false },
+    {
+      "title": "Total Requests", "type": "stat", "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "sum(jitsi_requests_total)", "legendFormat": "Total" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }, { "color": "green", "value": 100 }] } } }
+    },
+    {
+      "title": "Success Rate", "type": "gauge", "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "sum(rate(jitsi_requests_total{status='success'}[5m])) / sum(rate(jitsi_requests_total[5m])) * 100", "legendFormat": "%" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 90 }, { "color": "green", "value": 95 }] } } }
+    },
+    {
+      "title": "GPU Memory (MB)", "type": "stat", "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "jitsi_gpu_memory_used_mb", "legendFormat": "Used" }],
+      "fieldConfig": { "defaults": { "unit": "decmbytes", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 18000 }, { "color": "red", "value": 21000 }] } } }
+    },
+    {
+      "title": "CPU %", "type": "gauge", "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "jitsi_cpu_utilization_percent", "legendFormat": "CPU" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 85 }] } } }
+    },
+    {
+      "title": "Active Requests", "type": "stat", "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "sum(jitsi_active_requests)", "legendFormat": "Active" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 5 }, { "color": "red", "value": 10 }] } } }
+    },
+    {
+      "title": "SLA Violations", "type": "stat", "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "sum(jitsi_sla_violations_total) or vector(0)", "legendFormat": "Violations" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }] } } }
+    },
+    { "title": "── Latency ──", "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "collapsed": false },
+    {
+      "title": "Segmentation Latency (p50/p95/p99)", "type": "timeseries", "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(jitsi_request_latency_seconds_bucket{endpoint='segment'}[1m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(jitsi_request_latency_seconds_bucket{endpoint='segment'}[1m]))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, rate(jitsi_request_latency_seconds_bucket{endpoint='segment'}[1m]))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 2.0 }] } } }
+    },
+    {
+      "title": "Summarization Latency (p50/p95/p99)", "type": "timeseries", "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(jitsi_request_latency_seconds_bucket{endpoint='summarize'}[1m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(jitsi_request_latency_seconds_bucket{endpoint='summarize'}[1m]))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, rate(jitsi_request_latency_seconds_bucket{endpoint='summarize'}[1m]))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } } }
+    },
+    { "title": "── Throughput & Errors ──", "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }, "collapsed": false },
+    {
+      "title": "Throughput (req/s)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 15 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "rate(jitsi_requests_total{endpoint='segment', status='success'}[1m])", "legendFormat": "Segment" },
+        { "expr": "rate(jitsi_requests_total{endpoint='summarize', status='success'}[1m])", "legendFormat": "Summarize" },
+        { "expr": "rate(jitsi_requests_total{endpoint='recap', status='success'}[1m])", "legendFormat": "Recap" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "bars", "fillOpacity": 50 } } }
+    },
+    {
+      "title": "Error Rate (%)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 15 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "rate(jitsi_requests_total{status='error', endpoint='segment'}[5m]) / rate(jitsi_requests_total{endpoint='segment'}[5m]) * 100", "legendFormat": "Segment %" },
+        { "expr": "rate(jitsi_requests_total{status='error', endpoint='summarize'}[5m]) / rate(jitsi_requests_total{endpoint='summarize'}[5m]) * 100", "legendFormat": "Summarize %" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "custom": { "drawStyle": "line", "fillOpacity": 20 }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 5 }] } } }
+    },
+    { "title": "── Model Metrics ──", "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }, "collapsed": false },
+    {
+      "title": "Boundary Confidence Distribution", "type": "histogram", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 23 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "rate(jitsi_boundary_confidence_bucket[5m])", "legendFormat": "{{ le }}", "format": "heatmap" }]
+    },
+    {
+      "title": "Avg Batch Size (Ray Serve)", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 23 },
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "rate(jitsi_batch_size_sum{model='segmenter'}[5m]) / rate(jitsi_batch_size_count{model='segmenter'}[5m])", "legendFormat": "Avg Batch" }]
+    },
+    {
+      "title": "Segments Detected", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 23 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "jitsi_segments_detected_total", "legendFormat": "Total" },
+        { "expr": "rate(jitsi_segments_detected_total[5m]) * 60", "legendFormat": "Per min" }
+      ]
+    },
+    { "title": "── Recap Pipeline ──", "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }, "collapsed": false },
+    {
+      "title": "Recap Duration (seconds)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(jitsi_recap_duration_seconds_bucket[5m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[5m]))", "legendFormat": "p95" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 300 }] } } }
+    },
+    {
+      "title": "Segments per Meeting", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "rate(jitsi_recap_segments_per_meeting_sum[5m]) / rate(jitsi_recap_segments_per_meeting_count[5m])", "legendFormat": "Avg Segments" }
+      ]
+    },
+    { "title": "── System Resources ──", "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 }, "collapsed": false },
+    {
+      "title": "GPU Memory Over Time", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 39 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "jitsi_gpu_memory_used_mb", "legendFormat": "Used (MB)" },
+        { "expr": "jitsi_gpu_memory_total_mb", "legendFormat": "Total (MB)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes", "custom": { "drawStyle": "line", "fillOpacity": 20 } } }
+    },
+    {
+      "title": "CPU & RAM", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 39 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "jitsi_cpu_utilization_percent", "legendFormat": "CPU %" },
+        { "expr": "jitsi_ram_used_mb / 1024", "legendFormat": "RAM (GB)" }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["jitsi", "ray-serve", "ml-serving", "rtx6000"],
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "Jitsi ML Serving — Ray Serve + RTX 6000",
+  "uid": "jitsi-ray-serve-main",
+  "version": 1
+}

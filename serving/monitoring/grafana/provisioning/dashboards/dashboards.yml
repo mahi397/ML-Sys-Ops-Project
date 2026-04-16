@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: 'Jitsi'
+    orgId: 1
+    folder: 'Jitsi'
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

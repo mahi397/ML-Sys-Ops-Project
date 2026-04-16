@@ -1,13 +1,13 @@
 """
-  # Start Ray Serve
-  python3 ray_serve/serve.py
+Ray Serve deployment for Jitsi Meeting Recap pipeline.
+Prometheus metrics for Grafana monitoring.
 
-  # Endpoints (same API contract as FastAPI):
-  #   GET  /health
-  #   POST /segment   (same JSON schema)
-  #   POST /summarize  (same JSON schema)
-  #   POST /recap      (full pipeline — new endpoint)
-
+Endpoints:
+  GET  /health      → system health
+  POST /segment     → Stage A: RoBERTa boundary detection
+  POST /summarize   → Stage B: Mistral-7B summarization
+  POST /recap       → Full pipeline
+  GET  /metrics     → Prometheus scrape endpoint
 """
 
 import ray
@@ -15,12 +15,152 @@ from ray import serve
 import torch
 import numpy as np
 import json
+import psutil
+import threading
+from pathlib import Path
 import os
 import time
+import psutil
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
+from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware import Middleware
+from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOCAL STORAGE — JSONL file store (drop-in until Postgres is ready)
+# Swap: replace RecapStore methods with Postgres queries, API stays the same.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+_RECAPS_FILE     = _DATA_DIR / "recaps.jsonl"
+_UTTERANCES_FILE = _DATA_DIR / "meeting_utterances.jsonl"
+_FEEDBACK_FILE   = _DATA_DIR / "feedback_corrections.jsonl"
+
+
+class RecapStore:
+    """Thread-safe local JSONL store. One record per line."""
+    def __init__(self):
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    # ── Recaps ──────────────────────────────────────────────────────
+
+    def save_recap(self, meeting_id: str, model_version: str, segments_json: list):
+        record = {
+            "recap_id": f"{meeting_id}_{int(time.time())}",
+            "meeting_id": meeting_id,
+            "model_version": model_version,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "segments_json": segments_json
+        }
+        with self._lock:
+            with open(_RECAPS_FILE, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        return record["recap_id"]
+
+    def get_recap(self, meeting_id: str):
+        if not _RECAPS_FILE.exists():
+            return None
+        result = None
+        with self._lock:
+            with open(_RECAPS_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    if rec["meeting_id"] == meeting_id:
+                        result = rec
+        return result
+
+    # ── Utterances ──────────────────────────────────────────────────
+
+    def save_utterances(self, meeting_id: str, utterances: list, decisions: list):
+        rows = []
+        for i, u in enumerate(utterances):
+            if i < len(decisions):
+                predicted_label = 1 if decisions[i].get("is_boundary") else 0
+                boundary_confidence = decisions[i].get("boundary_probability", 0.0)
+            else:
+                predicted_label = 0
+                boundary_confidence = 0.0
+            rows.append({
+                "meeting_id": meeting_id,
+                "utterance_idx": i,
+                "speaker": u.get("speaker", ""),
+                "text": u.get("text", ""),
+                "t_start": u.get("t_start", 0),
+                "t_end": u.get("t_end", 0),
+                "predicted_label": predicted_label,
+                "boundary_confidence": boundary_confidence
+            })
+        with self._lock:
+            with open(_UTTERANCES_FILE, "a") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+
+    def get_utterances(self, meeting_id: str) -> list:
+        if not _UTTERANCES_FILE.exists():
+            return []
+        rows = []
+        with self._lock:
+            with open(_UTTERANCES_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    if rec["meeting_id"] == meeting_id:
+                        rows.append(rec)
+        return sorted(rows, key=lambda r: r["utterance_idx"])
+
+    # ── Feedback corrections ─────────────────────────────────────────
+
+    def save_feedback(self, meeting_id: str, utterance_idx: int,
+                      action: str, original_label: int) -> dict:
+        corrected_label = 0 if action == "remove_boundary" else 1
+        record = {
+            "correction_id": f"{meeting_id}_{utterance_idx}_{int(time.time())}",
+            "meeting_id": meeting_id,
+            "utterance_idx": utterance_idx,
+            "original_label": original_label,
+            "corrected_label": corrected_label,
+            "action": action,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "used_in_retrain_version": None
+        }
+        with self._lock:
+            with open(_FEEDBACK_FILE, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        return record
+
+    def count_pending_corrections(self) -> int:
+        if not _FEEDBACK_FILE.exists():
+            return 0
+        count = 0
+        with self._lock:
+            with open(_FEEDBACK_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    if rec.get("used_in_retrain_version") is None:
+                        count += 1
+        return count
+
+    def get_all_feedback(self) -> list:
+        if not _FEEDBACK_FILE.exists():
+            return []
+        rows = []
+        with self._lock:
+            with open(_FEEDBACK_FILE) as f:
+                for line in f:
+                    rows.append(json.loads(line.strip()))
+        return rows
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════════════════
+
+BOUNDARY_THRESHOLD = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
+MODEL_PATH         = os.getenv("MODEL_PATH", "roberta-base")
+LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
+MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
+DEVICE             = "cuda"  # overridden per-actor in __init__
 
 
 def format_window_for_roberta(window: list) -> str:
@@ -28,77 +168,211 @@ def format_window_for_roberta(window: list) -> str:
     return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
 
 
-# ── Stage A: RoBERTa Segmenter ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# METRICS ENDPOINT — owns the Prometheus registry
+# Must be defined FIRST so other deployments don't touch prometheus objects
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="metrics", num_replicas=1)
+class MetricsDeployment:
+    def __init__(self):
+        from prometheus_client import (
+            Counter, Histogram, Gauge, Info,
+            CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+        )
+        self.registry = CollectorRegistry()
+        self.generate_latest = generate_latest
+        self.CONTENT_TYPE_LATEST = CONTENT_TYPE_LATEST
+
+        # All metrics live here — other deployments push data via /metrics/record
+        self.request_count = Counter(
+            'jitsi_requests_total', 'Total requests',
+            ['endpoint', 'status'], registry=self.registry
+        )
+        self.request_latency = Histogram(
+            'jitsi_request_latency_seconds', 'Latency',
+            ['endpoint'],
+            buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+            registry=self.registry
+        )
+        self.batch_size = Histogram(
+            'jitsi_batch_size', 'Batch sizes',
+            ['model'], buckets=[1, 2, 4, 8, 16], registry=self.registry
+        )
+        self.confidence = Histogram(
+            'jitsi_boundary_confidence', 'Confidence scores',
+            [], buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            registry=self.registry
+        )
+        self.segments_detected = Counter(
+            'jitsi_segments_detected_total', 'Boundaries detected',
+            registry=self.registry
+        )
+        self.summary_length = Histogram(
+            'jitsi_summary_length_chars', 'Summary length',
+            [], buckets=[50, 100, 200, 500, 1000, 2000, 5000],
+            registry=self.registry
+        )
+        self.gpu_mem_used = Gauge(
+            'jitsi_gpu_memory_used_mb', 'GPU mem used', registry=self.registry
+        )
+        self.gpu_mem_total = Gauge(
+            'jitsi_gpu_memory_total_mb', 'GPU mem total', registry=self.registry
+        )
+        self.cpu_util = Gauge(
+            'jitsi_cpu_utilization_percent', 'CPU %', registry=self.registry
+        )
+        self.ram_used = Gauge(
+            'jitsi_ram_used_mb', 'RAM used', registry=self.registry
+        )
+        self.model_loaded = Gauge(
+            'jitsi_model_loaded', 'Model loaded',
+            ['model_name'], registry=self.registry
+        )
+        self.sla_violations = Counter(
+            'jitsi_sla_violations_total', 'SLA violations',
+            ['endpoint', 'sla_type'], registry=self.registry
+        )
+        self.recap_duration = Histogram(
+            'jitsi_recap_duration_seconds', 'Recap duration',
+            [], buckets=[5, 10, 30, 60, 120, 180, 300, 600],
+            registry=self.registry
+        )
+        self.recap_segments = Histogram(
+            'jitsi_recap_segments_per_meeting', 'Segments per meeting',
+            [], buckets=[1, 2, 3, 5, 8, 10, 15, 20],
+            registry=self.registry
+        )
+        self.active_requests = Gauge(
+            'jitsi_active_requests', 'Active requests',
+            ['endpoint'], registry=self.registry
+        )
+
+    def _update_system(self):
+        try:
+            if torch.cuda.is_available():
+                mem_used = torch.cuda.memory_allocated(0) / 1024 / 1024
+                mem_total = torch.cuda.get_device_properties(0).total_mem / 1024 / 1024
+                self.gpu_mem_used.set(mem_used)
+                self.gpu_mem_total.set(mem_total)
+        except:
+            pass
+        self.cpu_util.set(psutil.cpu_percent())
+        self.ram_used.set(psutil.virtual_memory().used / 1024 / 1024)
+
+    def record(self, data: dict):
+        """Record metrics from other deployments."""
+        endpoint = data.get("endpoint", "")
+        status = data.get("status", "success")
+        latency = data.get("latency", 0)
+
+        self.request_count.labels(endpoint=endpoint, status=status).inc()
+        if latency > 0:
+            self.request_latency.labels(endpoint=endpoint).observe(latency)
+
+        if "batch_size" in data:
+            self.batch_size.labels(model="segmenter").observe(data["batch_size"])
+        if "confidence" in data:
+            self.confidence.observe(data["confidence"])
+        if data.get("is_boundary"):
+            self.segments_detected.inc()
+        if "summary_length" in data:
+            self.summary_length.observe(data["summary_length"])
+        if "sla_violation" in data:
+            self.sla_violations.labels(
+                endpoint=endpoint, sla_type=data["sla_violation"]
+            ).inc()
+        if "model_loaded" in data:
+            self.model_loaded.labels(model_name=data["model_name"]).set(
+                1 if data["model_loaded"] else 0
+            )
+        if "recap_duration" in data:
+            self.recap_duration.observe(data["recap_duration"])
+        if "recap_segments" in data:
+            self.recap_segments.observe(data["recap_segments"])
+
+    async def __call__(self, request: Request) -> Response:
+        self._update_system()
+        return Response(
+            content=self.generate_latest(self.registry),
+            media_type=self.CONTENT_TYPE_LATEST
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE A: RoBERTa SEGMENTER
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @serve.deployment(
     name="segmenter",
     num_replicas=1,
-    ray_actor_options={"num_gpus": 0.3},  # shares GPU with LLM
-    max_ongoing_requests=10,
+    ray_actor_options={"num_gpus": 0.3},
 )
 class SegmenterDeployment:
     def __init__(self):
-        model_path = os.getenv("MODEL_PATH", "roberta-base")
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.threshold = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
-
+        self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 
-        if os.path.exists(model_path):
-            self.model = RobertaForSequenceClassification.from_pretrained(model_path)
-            print(f"[segmenter] Loaded fine-tuned model from {model_path}")
+        if os.path.exists(MODEL_PATH):
+            self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
+            print(f"[segmenter] Loaded fine-tuned model from {MODEL_PATH}")
         else:
             self.model = RobertaForSequenceClassification.from_pretrained(
                 "roberta-base", num_labels=2
             )
-            print("[segmenter] Using base weights")
+            print(f"[segmenter] WARNING: No model at {MODEL_PATH}, using base weights")
 
         self.model.to(self.device)
         self.model.eval()
-        print(f"[segmenter] Ready on {self.device}")
+
+        # Report model loaded
+        self.metrics.record.remote({
+            "endpoint": "segment", "model_loaded": True,
+            "model_name": "roberta_segmenter"
+        })
+        print(f"[segmenter] Ready on {self.device}, threshold={self.threshold}")
 
     @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)
     async def batch_predict(self, requests: list) -> list:
-        """
-        Native Ray Serve batching — groups up to 8 concurrent requests
-        into a single GPU forward pass. Equivalent to Triton's dynamic
-        batching but without a separate inference server.
-        """
+        batch_size = len(requests)
+
         texts = []
         metadata = []
         for req in requests:
-            window_dicts = req["window"]
-            text = format_window_for_roberta(window_dicts)
-            texts.append(text)
+            texts.append(format_window_for_roberta(req["window"]))
+            ti = req["transition_index"]
             metadata.append({
                 "meeting_id": req["meeting_id"],
-                "transition_index": req["transition_index"],
+                "transition_index": ti,
                 "meeting_offset_seconds": req["meeting_offset_seconds"],
-                "t_boundary": req["window"][req["transition_index"]]["t_end"]
+                "t_boundary": req["window"][ti]["t_end"]
             })
 
-        # Batch tokenize
         inputs = self.tokenizer(
-            texts,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding="max_length"
+            texts, return_tensors="pt", truncation=True,
+            max_length=512, padding="max_length"
         ).to(self.device)
 
-        # Single batched forward pass
         with torch.no_grad():
             logits = self.model(**inputs).logits
             probs = torch.softmax(logits, dim=1)
             boundary_probs = probs[:, 1].cpu().tolist()
 
-        # Build responses
         results = []
         for prob, meta in zip(boundary_probs, metadata):
+            is_boundary = prob >= self.threshold
+            # Record metrics async (non-blocking)
+            self.metrics.record.remote({
+                "endpoint": "segment", "batch_size": batch_size,
+                "confidence": prob, "is_boundary": is_boundary
+            })
             results.append({
                 "meeting_id": meta["meeting_id"],
                 "transition_after_position": meta["transition_index"],
-                "boundary_probability": prob,
-                "is_boundary": prob >= self.threshold,
+                "boundary_probability": round(prob, 4),
+                "is_boundary": is_boundary,
                 "t_boundary": meta["t_boundary"],
                 "segment_so_far": {
                     "t_start": meta["meeting_offset_seconds"],
@@ -108,64 +382,85 @@ class SegmenterDeployment:
         return results
 
     async def predict_single(self, body: dict) -> dict:
-        """Single request — goes through batch_predict with batch size 1."""
-        results = await self.batch_predict(body)
-        return results
+        result = await self.batch_predict(body)
+        return result
 
+    
     async def __call__(self, request: Request) -> JSONResponse:
-        body = await request.json()
-        result = await self.predict_single(body)
-        return JSONResponse(content=result)
+        start = time.time()
+        try:
+            body = await request.json()
+            if "window" not in body:
+                self.metrics.record.remote({"endpoint": "segment", "status": "error"})
+                return JSONResponse({"error": "Missing 'window'"}, status_code=400)
+
+            result = await self.predict_single(body)
+            latency = time.time() - start
+            record = {"endpoint": "segment", "status": "success", "latency": latency}
+            if latency > 2.0:
+                record["sla_violation"] = "latency_2s"
+            self.metrics.record.remote(record)
+            return JSONResponse(content=result)
+        except Exception as e:
+            self.metrics.record.remote({"endpoint": "segment", "status": "error"})
+            return JSONResponse({"error": str(e)}, status_code=500)
 
 
-# ── Stage B: LLM Summarizer ────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE B: LLM SUMMARIZER
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @serve.deployment(
     name="summarizer",
     num_replicas=1,
-    ray_actor_options={"num_gpus": 0.7},  # LLM needs more GPU memory
-    max_ongoing_requests=3,  # LLM is slow, limit concurrency
+    ray_actor_options={"num_gpus": 0.7},
 )
 class SummarizerDeployment:
     def __init__(self):
-        llm_path = os.getenv("LLM_MODEL_PATH", "")
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         self.llm = None
-
-        if llm_path and os.path.exists(llm_path):
+        if LLM_MODEL_PATH and os.path.exists(LLM_MODEL_PATH):
             from llama_cpp import Llama
             self.llm = Llama(
-                model_path=llm_path,
+                model_path=LLM_MODEL_PATH,
                 n_gpu_layers=-1,
                 n_ctx=4096,
                 verbose=False
             )
-            print(f"[summarizer] LLM loaded from {llm_path}")
+            self.metrics.record.remote({
+                "endpoint": "summarize", "model_loaded": True,
+                "model_name": "mistral_summarizer"
+            })
+            print(f"[summarizer] LLM loaded from {LLM_MODEL_PATH}")
         else:
-            print("[summarizer] No LLM — will return draft status")
+            self.metrics.record.remote({
+                "endpoint": "summarize", "model_loaded": False,
+                "model_name": "mistral_summarizer"
+            })
+            print(f"[summarizer] No LLM at '{LLM_MODEL_PATH}' — draft mode")
 
-    async def __call__(self, request: Request) -> JSONResponse:
-        body = await request.json()
+    def _summarize(self, body: dict) -> dict:
+        meeting_id = body.get("meeting_id", "unknown")
+        segment_id = body.get("segment_id", 0)
+        t_start = body.get("t_start", 0)
+        t_end = body.get("t_end", 0)
 
         if self.llm is None:
-            return JSONResponse(content={
-                "meeting_id": body["meeting_id"],
-                "segment_id": body["segment_id"],
-                "t_start": body["t_start"],
-                "t_end": body["t_end"],
-                "topic_label": "",
-                "summary_bullets": [],
-                "status": "draft"
-            })
+            return {
+                "meeting_id": meeting_id, "segment_id": segment_id,
+                "t_start": t_start, "t_end": t_end,
+                "topic_label": "", "summary_bullets": [], "status": "draft"
+            }
 
         try:
-            utterances = body["utterances"][:200]
+            utterances = body.get("utterances", [])[:MAX_SEGMENT_UTTERANCES]
             transcript = "\n".join(
-                f"[SPEAKER_{u['speaker']}]: {u['text']}"
-                for u in utterances
+                f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in utterances
             )
-
+            seg_ctx = body.get("meeting_context", {})
             prompt = f"""Summarize this meeting segment. Respond with JSON only, no other text.
 
-Segment {body['meeting_context']['segment_index_in_meeting']} of {body['meeting_context']['total_segments']}.
+Segment {seg_ctx.get('segment_index_in_meeting', 1)} of {seg_ctx.get('total_segments', 1)}.
 
 Transcript:
 {transcript}
@@ -175,53 +470,74 @@ JSON format:
 
             response = self.llm(prompt, max_tokens=300, temperature=0.1, stop=["```"])
             text = response["choices"][0]["text"].strip()
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            parsed = json.loads(text[start:end])
+            start_idx = text.find("{")
+            end_idx = text.rfind("}") + 1
+            parsed = json.loads(text[start_idx:end_idx])
 
-            return JSONResponse(content={
-                "meeting_id": body["meeting_id"],
-                "segment_id": body["segment_id"],
-                "t_start": body["t_start"],
-                "t_end": body["t_end"],
+            return {
+                "meeting_id": meeting_id, "segment_id": segment_id,
+                "t_start": t_start, "t_end": t_end,
                 "topic_label": parsed["topic_label"],
                 "summary_bullets": parsed["summary_bullets"],
                 "status": "complete"
-            })
-
+            }
         except Exception as e:
-            print(f"[summarizer] Failed: {e}")
-            return JSONResponse(content={
-                "meeting_id": body["meeting_id"],
-                "segment_id": body["segment_id"],
-                "t_start": body["t_start"],
-                "t_end": body["t_end"],
-                "topic_label": "",
-                "summary_bullets": [],
-                "status": "draft"
-            })
+            print(f"[summarizer] Failed for segment {segment_id}: {e}")
+            return {
+                "meeting_id": meeting_id, "segment_id": segment_id,
+                "t_start": t_start, "t_end": t_end,
+                "topic_label": "", "summary_bullets": [], "status": "draft"
+            }
 
+    async def summarize_dict(self, body: dict) -> dict:
+        start = time.time()
+        result = self._summarize(body)
+        latency = time.time() - start
+        record = {"endpoint": "summarize", "status": "success", "latency": latency}
+        if result["status"] == "complete":
+            record["summary_length"] = len(
+                result.get("topic_label", "") +
+                " ".join(result.get("summary_bullets", []))
+            )
+        if latency > 30.0:
+            record["sla_violation"] = "latency_30s"
+        self.metrics.record.remote(record)
+        return result
 
-# Health endpoint 
-@serve.deployment(name="health", num_replicas=1)
-class HealthDeployment:
     async def __call__(self, request: Request) -> JSONResponse:
-        return JSONResponse(content={
-            "status": "ok",
-            "mode": "ray_serve",
-            "device": "cuda" if torch.cuda.is_available() else "cpu"
-        })
+        start = time.time()
+        try:
+            body = await request.json()
+            result = self._summarize(body)
+            latency = time.time() - start
+            record = {"endpoint": "summarize", "status": "success", "latency": latency}
+            if result["status"] == "complete":
+                record["summary_length"] = len(
+                    result.get("topic_label", "") +
+                    " ".join(result.get("summary_bullets", []))
+                )
+            if latency > 30.0:
+                record["sla_violation"] = "latency_30s"
+            self.metrics.record.remote(record)
+            return JSONResponse(content=result)
+        except Exception as e:
+            self.metrics.record.remote({"endpoint": "summarize", "status": "error"})
+            return JSONResponse({"error": str(e)}, status_code=500)
 
 
-# ── Full Pipeline: Recap endpoint
-@serve.deployment(
-    name="recap_pipeline",
-    num_replicas=1,
-)
+# ═══════════════════════════════════════════════════════════════════════════════
+# FULL PIPELINE: /recap
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="recap_pipeline", num_replicas=1)
 class RecapPipelineDeployment:
-    def __init__(self, segmenter, summarizer):
-        self.segmenter = segmenter
-        self.summarizer = summarizer
+    def __init__(self):
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
+        self.segmenter = serve.get_deployment_handle("segmenter", app_name="segmenter")
+        #self.summarizer = serve.get_deployment_handle("summarizer", app_name="summarizer")
+        #save recap + utterances inside the /recap pipeline after summaries are assembled
+        self.summarizer = serve.get_deployment_handle("summarizer", app_name="summarizer")
+        self.store = RecapStore()
 
     def _build_windows(self, utterances, window_size=7):
         windows = []
@@ -231,7 +547,10 @@ class RecapPipelineDeployment:
             end = min(len(utterances), i + half + 1)
             window = utterances[start:end]
             while len(window) < window_size:
-                window.append({"position": len(window), "speaker": "", "t_start": 0.0, "t_end": 0.0, "text": ""})
+                window.append({
+                    "position": len(window), "speaker": "",
+                    "t_start": 0.0, "t_end": 0.0, "text": ""
+                })
             window = [{**u, "position": j} for j, u in enumerate(window)]
             windows.append({
                 "transition_index": half,
@@ -240,31 +559,11 @@ class RecapPipelineDeployment:
             })
         return windows
 
-    async def __call__(self, request: Request) -> JSONResponse:
-        body = await request.json()
-        meeting_id = body["meeting_id"]
-        utterances = body["utterances"]
-        t0 = time.perf_counter()
-
-        # Stage A segmentation (all windows)
-        windows = self._build_windows(utterances)
-        decisions = []
-        for w in windows:
-            payload = {"meeting_id": meeting_id, **w}
-            # Call segmenter deployment directly via handle
-            from starlette.testclient import TestClient
-            import httpx
-            # Use internal Ray  handle for deployment-to-deployment calls
-            ref = await self.segmenter.predict_single.remote(payload)
-            decision = await ref
-            decisions.append(decision)
-
-        # Assemble segments
+    def _assemble_segments(self, utterances, decisions):
         segments = []
         current = []
         seg_id = 1
         seg_start = utterances[0]["t_start"] if utterances else 0.0
-
         for i, decision in enumerate(decisions):
             current.append(utterances[i])
             if decision["is_boundary"] or i == len(decisions) - 1:
@@ -278,66 +577,326 @@ class RecapPipelineDeployment:
                 seg_id += 1
                 seg_start = utterances[i]["t_end"]
                 current = []
+        return segments
+    
+    def _validate(self, meeting_id: str, utterances: list):
+        """Robustness: validate input and return (warnings, error_response)."""
+        if not utterances:
+            return None, JSONResponse(
+                {"error": "Empty transcript — no utterances provided"},
+                status_code=400
+            )
+        for i, u in enumerate(utterances):
+            for field in ["speaker", "text", "t_start", "t_end"]:
+                if field not in u:
+                    return None, JSONResponse(
+                        {"error": f"Utterance {i} missing required field '{field}'"},
+                        status_code=400
+                    )
+        warnings = []
+        if len(utterances) == 1:
+            # Single utterance — can't segment, treat as one segment
+            warnings.append("single_utterance: returning as one segment without segmentation")
+        speakers = set(u["speaker"] for u in utterances)
+        if len(speakers) == 1:
+            warnings.append(f"single_speaker: all utterances from speaker '{next(iter(speakers))}'")
+        duration = utterances[-1]["t_end"] - utterances[0]["t_start"]
+        if duration < 10:
+            warnings.append(f"very_short_meeting: duration {duration:.1f}s < 10s")
+        if len(utterances) > 2000:
+            warnings.append(f"very_long_meeting: {len(utterances)} utterances, truncating to 2000")
+            utterances[:] = utterances[:2000]
+        return warnings, None
 
-        # Stage B — summarization (per segment)
-        summaries = []
-        for seg in segments:
-            payload = {
-                "meeting_id": meeting_id,
-                "segment_id": seg["segment_id"],
-                "t_start": seg["t_start"],
-                "t_end": seg["t_end"],
-                "utterances": seg["utterances"],
-                "total_utterances": seg["total_utterances"],
-                "meeting_context": {
-                    "total_segments": len(segments),
-                    "segment_index_in_meeting": seg["segment_id"]
+    async def __call__(self, request: Request) -> JSONResponse:
+        start = time.time()
+        try:
+            body = await request.json()
+            meeting_id = body.get("meeting_id", "unknown")
+            utterances = body.get("utterances", [])
+
+            #if not utterances or len(utterances) < 2:
+            # Robustness: validate before doing any inference
+            warnings, err = self._validate(meeting_id, utterances)
+            if err:
+                self.metrics.record.remote({"endpoint": "recap", "status": "error"})
+            #    return JSONResponse({"error": "Need at least 2 utterances"}, status_code=400)
+                return err
+
+            # Single utterance edge case — skip segmentation entirely
+            if len(utterances) == 1:
+                sum_result = await self.summarizer.summarize_dict.remote({
+                    "meeting_id": meeting_id, "segment_id": 1,
+                    "t_start": utterances[0]["t_start"], "t_end": utterances[0]["t_end"],
+                    "utterances": utterances, "total_utterances": 1,
+                    "meeting_context": {"total_segments": 1, "segment_index_in_meeting": 1}
+                })
+                elapsed = time.time() - start
+                self.metrics.record.remote({
+                    "endpoint": "recap", "status": "success",
+                    "latency": elapsed, "recap_duration": elapsed, "recap_segments": 1
+                })
+                return JSONResponse(content={
+                    "meeting_id": meeting_id,
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "total_segments": 1, "processing_time_seconds": round(elapsed, 1),
+                    "warnings": warnings, "recap": [sum_result]
+                })
+
+            # Stage A — segmentation
+
+            windows = self._build_windows(utterances)
+            seg_refs = []
+            for w in windows:
+                payload = {"meeting_id": meeting_id, **w}
+                ref = self.segmenter.predict_single.remote(payload)
+                seg_refs.append(ref)
+
+            decisions = []
+            for ref in seg_refs:
+                result = await ref
+                decisions.append(result)
+
+            # Assemble
+            segments = self._assemble_segments(utterances, decisions)
+
+            # Stage B
+            summaries = []
+            for seg in segments:
+                sum_payload = {
+                    "meeting_id": meeting_id,
+                    "segment_id": seg["segment_id"],
+                    "t_start": seg["t_start"],
+                    "t_end": seg["t_end"],
+                    "utterances": seg["utterances"],
+                    "total_utterances": seg["total_utterances"],
+                    "meeting_context": {
+                        "total_segments": len(segments),
+                        "segment_index_in_meeting": seg["segment_id"]
+                    }
                 }
+                sum_result = await self.summarizer.summarize_dict.remote(sum_payload)
+                summaries.append(sum_result)
+
+            elapsed = time.time() - start
+            record = {
+                "endpoint": "recap", "status": "success", "latency": elapsed,
+                "recap_duration": elapsed, "recap_segments": len(segments)
             }
-            from starlette.requests import Request as StarletteRequest
-            # Build a mock request for the summarizer
-            import io
-            scope = {"type": "http", "method": "POST", "path": "/summarize"}
-            mock_req = Request(scope=scope)
-            mock_req._body = json.dumps(payload).encode()
-            ref = await self.summarizer.__call__.remote(mock_req)
-            result = await ref
-            summaries.append(json.loads(result.body))
+            if elapsed > 300.0:
+                record["sla_violation"] = "latency_300s"
+            self.metrics.record.remote(record)
 
-        elapsed = time.perf_counter() - t0
+            # Persist recap + utterances for UI and feedback loop
+            model_version = os.getenv("MODEL_VERSION", "base")
+            self.store.save_recap(meeting_id, model_version, summaries)
+            self.store.save_utterances(meeting_id, utterances, decisions)
 
-        recap = {
-            "meeting_id": meeting_id,
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "total_segments": len(summaries),
-            "processing_time_seconds": round(elapsed, 1),
-            "recap": summaries
-        }
+            return JSONResponse(content={
+                "meeting_id": meeting_id,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "total_segments": len(summaries),
+                "processing_time_seconds": round(elapsed, 1),
+                "warnings": warnings or [],
+                "recap": summaries
+            })
 
-        return JSONResponse(content=recap)
+        except Exception as e:
+            self.metrics.record.remote({"endpoint": "recap", "status": "error"})
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RECAP API — GET /api/recap/{meeting_id} + POST /api/feedback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="recap_api", num_replicas=1)
+class RecapAPIDeployment:
+    """
+    GET  /api/recap/{meeting_id}  → fetch stored recap + utterances
+    POST /api/feedback            → submit boundary correction
+    GET  /api/feedback/count      → pending corrections count (for retraining trigger)
+    GET  /api/feedback/all        → all corrections (for Aneesh's retraining pipeline)
+    """
+    def __init__(self):
+        self.store = RecapStore()
+
+    async def __call__(self, request: Request) -> JSONResponse:
+        path = request.url.path
+        method = request.method
+
+        # ── GET /api/recap/{meeting_id} ──────────────────────────
+        if method == "GET" and "/api/recap/" in path:
+            meeting_id = path.split("/api/recap/")[-1].strip("/")
+            if not meeting_id:
+                return JSONResponse({"error": "meeting_id required"}, status_code=400)
+
+            recap = self.store.get_recap(meeting_id)
+            if not recap:
+                return JSONResponse(
+                    {"error": f"No recap found for meeting_id '{meeting_id}'"},
+                    status_code=404
+                )
+            utterances = self.store.get_utterances(meeting_id)
+            return JSONResponse({
+                "recap_id": recap["recap_id"],
+                "meeting_id": meeting_id,
+                "model_version": recap["model_version"],
+                "created_at": recap["created_at"],
+                "segments": recap["segments_json"],
+                "utterances": utterances  # needed by UI to show boundary confidence
+            })
+
+        # ── POST /api/feedback ───────────────────────────────────
+        if method == "POST" and path.rstrip("/") == "/api/feedback":
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+            meeting_id   = body.get("meeting_id")
+            utterance_idx = body.get("utterance_idx")
+            action       = body.get("action")
+
+            # Validate
+            if not meeting_id:
+                return JSONResponse({"error": "meeting_id required"}, status_code=400)
+            if utterance_idx is None:
+                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
+            if action not in ("remove_boundary", "add_boundary"):
+                return JSONResponse(
+                    {"error": "action must be 'remove_boundary' or 'add_boundary'"},
+                    status_code=400
+                )
+
+            # Look up original label from stored utterances
+            utterances = self.store.get_utterances(meeting_id)
+            original_label = 0
+            for u in utterances:
+                if u["utterance_idx"] == utterance_idx:
+                    original_label = u["predicted_label"]
+                    break
+
+            correction = self.store.save_feedback(
+                meeting_id, utterance_idx, action, original_label
+            )
+            pending = self.store.count_pending_corrections()
+
+            return JSONResponse({
+                "status": "recorded",
+                "correction_id": correction["correction_id"],
+                "meeting_id": meeting_id,
+                "utterance_idx": utterance_idx,
+                "action": action,
+                "original_label": original_label,
+                "corrected_label": correction["corrected_label"],
+                "pending_corrections_total": pending,
+                "retrain_threshold": 500,
+                "retrain_triggered": pending >= 500
+            })
+
+        # ── GET /api/feedback/count ──────────────────────────────
+        if method == "GET" and path.rstrip("/") == "/api/feedback/count":
+            pending = self.store.count_pending_corrections()
+            return JSONResponse({
+                "pending_corrections": pending,
+                "retrain_threshold": 500,
+                "retrain_triggered": pending >= 500
+            })
+
+        # ── GET /api/feedback/all ────────────────────────────────
+        if method == "GET" and path.rstrip("/") == "/api/feedback/all":
+            corrections = self.store.get_all_feedback()
+            return JSONResponse({
+                "total": len(corrections),
+                "corrections": corrections
+            })
+
+        return JSONResponse({"error": "Not found"}, status_code=404)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# HEALTH CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
 
-segmenter = SegmenterDeployment.bind()
-summarizer = SummarizerDeployment.bind()
-health = HealthDeployment.bind()
-recap_pipeline = RecapPipelineDeployment.bind(segmenter, summarizer)
+@serve.deployment(name="health", num_replicas=1)
+class HealthDeployment:
+    async def __call__(self, request: Request) -> JSONResponse:
+        # Health actor has no num_gpus, so CUDA_VISIBLE_DEVICES="" in this process.
+        # Use Ray cluster resources to detect GPU presence, nvidia-smi for details.
+        cluster_gpus = ray.cluster_resources().get("GPU", 0)
+        gpu_available = cluster_gpus > 0
+        gpu_name = "none"
+        gpu_mem_gb = 0.0
+        if gpu_available:
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=name,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if r.returncode == 0:
+                    parts = r.stdout.strip().split(", ")
+                    gpu_name = parts[0]
+                    gpu_mem_gb = round(int(parts[1]) / 1024, 1) if len(parts) > 1 else 0.0
+            except Exception:
+                gpu_name = "unknown"
+        return JSONResponse(content={
+            "status": "ok",
+            "mode": "ray_serve",
+            "device": "cuda" if gpu_available else "cpu",
+            "gpu": gpu_name,
+            "gpu_memory_gb": gpu_mem_gb
+        })
 
-#  application with route mapping
-app = serve.run(
-    {
-        "/health": health,
-        "/segment": segmenter,
-        "/summarize": summarizer,
-        "/recap": recap_pipeline,
-    },
-    name="jitsi_recap",
-    route_prefix="/",
-)
 
-if __name__ == "__main__":
-    import ray
-    ray.init()
-    print("Ray Serve is running at http://localhost:8000")
-    print("Endpoints: /health, /segment, /summarize, /recap")
-    input("Press Enter to shut down...")
+# ═══════════════════════════════════════════════════════════════════════════════
+# BIND & RUN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ray.init(ignore_reinit_error=True, num_gpus=1, dashboard_host="0.0.0.0")
+
+# Each deployment looks up the shared metrics actor at runtime via
+# serve.get_deployment_handle("metrics", app_name="metrics"), so there
+# is exactly ONE MetricsDeployment actor that all apps write to.
+metrics    = MetricsDeployment.bind()
+segmenter  = SegmenterDeployment.bind()   # 0.3 GPU
+summarizer = SummarizerDeployment.bind()  # 0.7 GPU  (total = 1.0)
+health     = HealthDeployment.bind()
+recap      = RecapPipelineDeployment.bind()
+recap_api  = RecapAPIDeployment.bind() 
+
+#serve.start(http_options={"host": "0.0.0.0", "port": 8000})
+# HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.86.194:8000/recap'))
+#  Browsers block these "cross-origin" requests by default unless the server explicitly says "yes, other origins can talk to me." That's CORS — Cross-Origin Resource Sharing.
+
+
+serve.start(http_options={
+    "host": "0.0.0.0",
+    "port": 8000,
+    "middlewares": [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+        )
+    ]
+})
+
+# metrics MUST be deployed first — other actors look it up by name on init.
+serve.run(metrics,    name="metrics",    route_prefix="/metrics")
+serve.run(health,     name="health",     route_prefix="/health")
+serve.run(segmenter,  name="segmenter",  route_prefix="/segment")
+serve.run(summarizer, name="summarizer", route_prefix="/summarize")
+#serve.run(recap,      name="recap",      route_prefix="/recap")
+serve.run(recap,      name="recap",      route_prefix="/recap")
+serve.run(recap_api,  name="recap_api",  route_prefix="/api")
+
+print("=" * 60)
+print("Ray Serve running at http://0.0.0.0:8000")
+print("Endpoints: /health, /segment, /summarize, /recap, /metrics")
+print("=" * 60)
+
+import signal
+signal.pause()

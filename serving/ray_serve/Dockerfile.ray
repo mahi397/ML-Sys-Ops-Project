@@ -13,11 +13,18 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone &
 COPY requirements_ray.txt .
 RUN pip install --no-cache-dir -r requirements_ray.txt
 
-# install llama-cpp-python with CUDA support
-RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install llama-cpp-python==0.2.56
+# Pre-built CUDA wheel — no compilation needed
+RUN pip install --no-cache-dir llama-cpp-python==0.2.56 \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 
-COPY ray_serve/ ./ray_serve/
+COPY serve.py .
+COPY metrics_server.py .
+COPY benchmark_ray.py .
+COPY storage.py .
 
-EXPOSE 8000
+EXPOSE 8000 8265
 
-CMD ["python3", "ray_serve/serve.py"]
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=120s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD bash -c "python3 metrics_server.py & python3 serve.py"

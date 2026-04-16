@@ -1,116 +1,262 @@
 services:
 
-  # Baseline — PyTorch CPU (no GPU, no optimizations)
-  api_pytorch_cpu:
-    build: .
+  # ═══════════════════════════════════════════════════════════════
+  # PRIMARY SERVING — Ray Serve
+  #
+  # Why Ray Serve over FastAPI:
+  #   - Independent scaling: RoBERTa (0.3 GPU) + Mistral (0.7 GPU)
+  #   - Native request batching via @serve.batch
+  #   - Deployment composition for /recap pipeline
+  #   - Single container replaces FastAPI + Triton
+  # ═══════════════════════════════════════════════════════════════
+
+  ray-serve:
+    build:
+      context: ./ray_serve
+      dockerfile: Dockerfile.ray
+    container_name: jitsi-ray-serve
+    restart: unless-stopped
     ports:
-      - "8002:8000"
+      - "8000:8000"    # API: /health, /segment, /summarize, /recap, /metrics
+      - "8265:8265"    # Ray Dashboard
+      - "9091:9091"
+    #gpus: all  
     environment:
-      - SERVING_MODE=pytorch
-      - BOUNDARY_THRESHOLD=0.5
       - MODEL_PATH=/models/roberta-seg
       - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
-      - CUDA_VISIBLE_DEVICES=""
+      - BOUNDARY_THRESHOLD=0.5
+      - MAX_SEGMENT_UTTERANCES=200
+      - RAY_DEDUP_LOGS=0
+      - MODEL_VERSION=roberta-base-v0
+    #Ray uses shared memory (/dev/shm) as its object store to pass data between actors without copying. Docker gives containers only 64MB by default. With 64MB, Ray falls back to /tmp (disk), which is much slower hurts batch inference performance
+    #tell Docker to give the container 2GB of shared memory 
+    shm_size: '2gb'  
     volumes:
       - ./models:/models
+      - ray_tmp:/tmp/ray
+      - recap_data:/data # persist recaps and feedback corrections across container restarts (local JSON file storage, can swap with Postgres later)
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - jitsi-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ═══════════════════════════════════════════════════════════════
+  # MONITORING — Prometheus + Grafana + AlertManager
+  # ═══════════════════════════════════════════════════════════════
+
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: jitsi-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    networks:
+      - jitsi-net
+    depends_on:
+      - ray-serve
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: jitsi-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=jitsi2026
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/jitsi-serving.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - jitsi-net
+    depends_on:
+      - prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: jitsi-alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - jitsi-net
+
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: jitsi-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - jitsi-net
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+  ray_tmp:
+  recap_data:
+
+networks:
+  jitsi-net:
+    driver: bridge
+
+
+#################
+#services:
+
+  # Baseline — PyTorch CPU (no GPU, no optimizations)
+#  api_pytorch_cpu:
+#    build: .
+#    ports:
+#      - "8002:8000"
+#    environment:
+#      - SERVING_MODE=pytorch
+#      - BOUNDARY_THRESHOLD=0.5
+#      - MODEL_PATH=/models/roberta-seg
+#      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+#      - CUDA_VISIBLE_DEVICES=""
+#    volumes:
+#      - ./models:/models
 
   # Option A — PyTorch GPU baseline
-  api_pytorch_gpu:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - SERVING_MODE=pytorch
-      - BOUNDARY_THRESHOLD=0.5
-      - MODEL_PATH=/models/roberta-seg
-      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
-    volumes:
-      - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+#  api_pytorch_gpu:
+#    build: .
+#    ports:
+#      - "8000:8000"
+#    environment:
+#      - SERVING_MODE=pytorch
+#      - BOUNDARY_THRESHOLD=0.5
+#      - MODEL_PATH=/models/roberta-seg
+#      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+#    volumes:
+#      - ./models:/models
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
 
   # Option B — ONNX CPU
-  api_onnx_cpu:
-    build: .
-    ports:
-      - "8001:8000"
-    environment:
-      - SERVING_MODE=onnx_cpu
-      - BOUNDARY_THRESHOLD=0.5
-      - ONNX_MODEL_PATH=/models/roberta_seg.onnx
-      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
-    volumes:
-      - ./models:/models
+#  api_onnx_cpu:
+#    build: .
+#    ports:
+#      - "8001:8000"
+#    environment:
+#      - SERVING_MODE=onnx_cpu
+#      - BOUNDARY_THRESHOLD=0.5
+#      - ONNX_MODEL_PATH=/models/roberta_seg.onnx
+#      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+#    volumes:
+#      - ./models:/models
 
   # Option C — ONNX GPU via Triton
-  triton:
-    image: nvcr.io/nvidia/tritonserver:23.10-py3
-    ports:
-      - "8100:8000"
-      - "8101:8001"
-      - "8102:8002"
-    volumes:
-      - ./triton_models:/models
-    command: tritonserver --model-repository=/models
-    profiles:
-      - triton
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+#  triton:
+#    image: nvcr.io/nvidia/tritonserver:23.10-py3
+#    ports:
+#      - "8100:8000"
+#      - "8101:8001"
+#      - "8102:8002"
+#    volumes:
+#      - ./triton_models:/models
+#    command: tritonserver --model-repository=/models
+#    profiles:
+#      - triton
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
 
-  api_onnx_gpu:
-    build: .
-    ports:
-      - "8003:8000"
-    environment:
-      - SERVING_MODE=onnx_gpu
-      - BOUNDARY_THRESHOLD=0.5
+#  api_onnx_gpu:
+#    build: .
+#    ports:
+#      - "8003:8000"
+#    environment:
+#      - SERVING_MODE=onnx_gpu
+#      - BOUNDARY_THRESHOLD=0.5
       #- MODEL_PATH=/models 
-      - ONNX_MODEL_PATH=/models/roberta_seg.onnx
-    volumes:
-      - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+#      - ONNX_MODEL_PATH=/models/roberta_seg.onnx
+#    volumes:
+#      - ./models:/models
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - capabilities: [gpu]
 
   # async recap worker
-  worker:
-    build: .
-    command: python3 worker/recap_worker.py
-    environment:
-      - BOUNDARY_THRESHOLD=0.5
-      - MODEL_PATH=/models/roberta-seg
-      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
-    volumes:
-      - ./models:/models
-    depends_on:
-      - api_pytorch
+#  worker:
+#    build: .
+#    command: python3 worker/recap_worker.py
+#    environment:
+#      - BOUNDARY_THRESHOLD=0.5
+#      - MODEL_PATH=/models/roberta-seg
+#      - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+#    volumes:
+#      - ./models:/models
+#    depends_on:
+#      - api_pytorch
 
 #multiworker PyTorch with 4 workers (for better GPU utilization)
-  api_pytorch_multiworker:
-    build: .
-    ports:
-      - "8004:8000"
-    environment:
-      - SERVING_MODE=pytorch
-      - BOUNDARY_THRESHOLD=0.5
-      - MODEL_PATH=/models/roberta-seg
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-    volumes:
-      - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+#  api_pytorch_multiworker:
+#    build: .
+#    ports:
+#      - "8004:8000"
+#    environment:
+#      - SERVING_MODE=pytorch
+#      - BOUNDARY_THRESHOLD=0.5
+#      - MODEL_PATH=/models/roberta-seg
+#    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+#    volumes:
+#      - ./models:/models
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - capabilities: [gpu]
+##############################            
