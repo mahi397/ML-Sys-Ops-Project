@@ -3,6 +3,8 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY jitsi_transcript_receiver.py /app/jitsi_transcript_receiver.py
+COPY ingest_saved_jitsi_transcript.py /app/
+COPY feedback_common.py /app/
 
 RUN pip install --no-cache-dir fastapi uvicorn python-multipart
 
