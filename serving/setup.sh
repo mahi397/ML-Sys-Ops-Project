@@ -65,7 +65,8 @@ for f in ray_serve/serve.py ray_serve/Dockerfile.ray ray_serve/requirements_ray.
          monitoring/prometheus.yml monitoring/alerts.yml monitoring/alertmanager.yml \
          monitoring/grafana/provisioning/datasources/prometheus.yml \
          monitoring/grafana/provisioning/dashboards/dashboards.yml \
-         monitoring/grafana/dashboards/jitsi-serving.json \
+         monitoring/grafana/provisioning/dashboards/jitsi-serving.json \
+        # monitoring/grafana/dashboards/jitsi-serving.json \
          docker-compose.yml; do
     if [ ! -f "$f" ]; then
         echo -e "${RED}Missing: $f${NC}"

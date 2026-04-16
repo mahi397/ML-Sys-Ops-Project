@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir \
     tqdm==4.66.4 \
     accelerate==0.30.0 \
     nltk==3.8.1 \
-    "ray[train,default]==2.10.0"
+    "ray[train,default]==2.10.0" \
+    psycopg2-binary==2.9.9
 
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
 

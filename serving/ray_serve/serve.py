@@ -15,12 +15,142 @@ from ray import serve
 import torch
 import numpy as np
 import json
+import psutil
+import threading
+from pathlib import Path
 import os
 import time
 import psutil
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware import Middleware
+from transformers import RobertaTokenizer, RobertaForSequenceClassification
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOCAL STORAGE — JSONL file store (drop-in until Postgres is ready)
+# Swap: replace RecapStore methods with Postgres queries, API stays the same.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+_RECAPS_FILE     = _DATA_DIR / "recaps.jsonl"
+_UTTERANCES_FILE = _DATA_DIR / "meeting_utterances.jsonl"
+_FEEDBACK_FILE   = _DATA_DIR / "feedback_corrections.jsonl"
+
+
+class RecapStore:
+    """Thread-safe local JSONL store. One record per line."""
+    def __init__(self):
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    # ── Recaps ──────────────────────────────────────────────────────
+
+    def save_recap(self, meeting_id: str, model_version: str, segments_json: list):
+        record = {
+            "recap_id": f"{meeting_id}_{int(time.time())}",
+            "meeting_id": meeting_id,
+            "model_version": model_version,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "segments_json": segments_json
+        }
+        with self._lock:
+            with open(_RECAPS_FILE, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        return record["recap_id"]
+
+    def get_recap(self, meeting_id: str):
+        if not _RECAPS_FILE.exists():
+            return None
+        result = None
+        with self._lock:
+            with open(_RECAPS_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    if rec["meeting_id"] == meeting_id:
+                        result = rec
+        return result
+
+    # ── Utterances ──────────────────────────────────────────────────
+
+    def save_utterances(self, meeting_id: str, utterances: list, decisions: list):
+        rows = []
+        for i, u in enumerate(utterances):
+            if i < len(decisions):
+                predicted_label = 1 if decisions[i].get("is_boundary") else 0
+                boundary_confidence = decisions[i].get("boundary_probability", 0.0)
+            else:
+                predicted_label = 0
+                boundary_confidence = 0.0
+            rows.append({
+                "meeting_id": meeting_id,
+                "utterance_idx": i,
+                "speaker": u.get("speaker", ""),
+                "text": u.get("text", ""),
+                "t_start": u.get("t_start", 0),
+                "t_end": u.get("t_end", 0),
+                "predicted_label": predicted_label,
+                "boundary_confidence": boundary_confidence
+            })
+        with self._lock:
+            with open(_UTTERANCES_FILE, "a") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+
+    def get_utterances(self, meeting_id: str) -> list:
+        if not _UTTERANCES_FILE.exists():
+            return []
+        rows = []
+        with self._lock:
+            with open(_UTTERANCES_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    if rec["meeting_id"] == meeting_id:
+                        rows.append(rec)
+        return sorted(rows, key=lambda r: r["utterance_idx"])
+
+    # ── Feedback corrections ─────────────────────────────────────────
+
+    def save_feedback(self, meeting_id: str, utterance_idx: int,
+                      action: str, original_label: int) -> dict:
+        corrected_label = 0 if action == "remove_boundary" else 1
+        record = {
+            "correction_id": f"{meeting_id}_{utterance_idx}_{int(time.time())}",
+            "meeting_id": meeting_id,
+            "utterance_idx": utterance_idx,
+            "original_label": original_label,
+            "corrected_label": corrected_label,
+            "action": action,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "used_in_retrain_version": None
+        }
+        with self._lock:
+            with open(_FEEDBACK_FILE, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        return record
+
+    def count_pending_corrections(self) -> int:
+        if not _FEEDBACK_FILE.exists():
+            return 0
+        count = 0
+        with self._lock:
+            with open(_FEEDBACK_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    if rec.get("used_in_retrain_version") is None:
+                        count += 1
+        return count
+
+    def get_all_feedback(self) -> list:
+        if not _FEEDBACK_FILE.exists():
+            return []
+        rows = []
+        with self._lock:
+            with open(_FEEDBACK_FILE) as f:
+                for line in f:
+                    rows.append(json.loads(line.strip()))
+        return rows
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -255,6 +385,7 @@ class SegmenterDeployment:
         result = await self.batch_predict(body)
         return result
 
+    
     async def __call__(self, request: Request) -> JSONResponse:
         start = time.time()
         try:
@@ -403,7 +534,10 @@ class RecapPipelineDeployment:
     def __init__(self):
         self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         self.segmenter = serve.get_deployment_handle("segmenter", app_name="segmenter")
+        #self.summarizer = serve.get_deployment_handle("summarizer", app_name="summarizer")
+        #save recap + utterances inside the /recap pipeline after summaries are assembled
         self.summarizer = serve.get_deployment_handle("summarizer", app_name="summarizer")
+        self.store = RecapStore()
 
     def _build_windows(self, utterances, window_size=7):
         windows = []
@@ -444,6 +578,35 @@ class RecapPipelineDeployment:
                 seg_start = utterances[i]["t_end"]
                 current = []
         return segments
+    
+    def _validate(self, meeting_id: str, utterances: list):
+        """Robustness: validate input and return (warnings, error_response)."""
+        if not utterances:
+            return None, JSONResponse(
+                {"error": "Empty transcript — no utterances provided"},
+                status_code=400
+            )
+        for i, u in enumerate(utterances):
+            for field in ["speaker", "text", "t_start", "t_end"]:
+                if field not in u:
+                    return None, JSONResponse(
+                        {"error": f"Utterance {i} missing required field '{field}'"},
+                        status_code=400
+                    )
+        warnings = []
+        if len(utterances) == 1:
+            # Single utterance — can't segment, treat as one segment
+            warnings.append("single_utterance: returning as one segment without segmentation")
+        speakers = set(u["speaker"] for u in utterances)
+        if len(speakers) == 1:
+            warnings.append(f"single_speaker: all utterances from speaker '{next(iter(speakers))}'")
+        duration = utterances[-1]["t_end"] - utterances[0]["t_start"]
+        if duration < 10:
+            warnings.append(f"very_short_meeting: duration {duration:.1f}s < 10s")
+        if len(utterances) > 2000:
+            warnings.append(f"very_long_meeting: {len(utterances)} utterances, truncating to 2000")
+            utterances[:] = utterances[:2000]
+        return warnings, None
 
     async def __call__(self, request: Request) -> JSONResponse:
         start = time.time()
@@ -452,11 +615,36 @@ class RecapPipelineDeployment:
             meeting_id = body.get("meeting_id", "unknown")
             utterances = body.get("utterances", [])
 
-            if not utterances or len(utterances) < 2:
+            #if not utterances or len(utterances) < 2:
+            # Robustness: validate before doing any inference
+            warnings, err = self._validate(meeting_id, utterances)
+            if err:
                 self.metrics.record.remote({"endpoint": "recap", "status": "error"})
-                return JSONResponse({"error": "Need at least 2 utterances"}, status_code=400)
+            #    return JSONResponse({"error": "Need at least 2 utterances"}, status_code=400)
+                return err
 
-            # Stage A
+            # Single utterance edge case — skip segmentation entirely
+            if len(utterances) == 1:
+                sum_result = await self.summarizer.summarize_dict.remote({
+                    "meeting_id": meeting_id, "segment_id": 1,
+                    "t_start": utterances[0]["t_start"], "t_end": utterances[0]["t_end"],
+                    "utterances": utterances, "total_utterances": 1,
+                    "meeting_context": {"total_segments": 1, "segment_index_in_meeting": 1}
+                })
+                elapsed = time.time() - start
+                self.metrics.record.remote({
+                    "endpoint": "recap", "status": "success",
+                    "latency": elapsed, "recap_duration": elapsed, "recap_segments": 1
+                })
+                return JSONResponse(content={
+                    "meeting_id": meeting_id,
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "total_segments": 1, "processing_time_seconds": round(elapsed, 1),
+                    "warnings": warnings, "recap": [sum_result]
+                })
+
+            # Stage A — segmentation
+
             windows = self._build_windows(utterances)
             seg_refs = []
             for w in windows:
@@ -499,17 +687,131 @@ class RecapPipelineDeployment:
                 record["sla_violation"] = "latency_300s"
             self.metrics.record.remote(record)
 
+            # Persist recap + utterances for UI and feedback loop
+            model_version = os.getenv("MODEL_VERSION", "base")
+            self.store.save_recap(meeting_id, model_version, summaries)
+            self.store.save_utterances(meeting_id, utterances, decisions)
+
             return JSONResponse(content={
                 "meeting_id": meeting_id,
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "total_segments": len(summaries),
                 "processing_time_seconds": round(elapsed, 1),
+                "warnings": warnings or [],
                 "recap": summaries
             })
 
         except Exception as e:
             self.metrics.record.remote({"endpoint": "recap", "status": "error"})
             return JSONResponse({"error": str(e)}, status_code=500)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RECAP API — GET /api/recap/{meeting_id} + POST /api/feedback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="recap_api", num_replicas=1)
+class RecapAPIDeployment:
+    """
+    GET  /api/recap/{meeting_id}  → fetch stored recap + utterances
+    POST /api/feedback            → submit boundary correction
+    GET  /api/feedback/count      → pending corrections count (for retraining trigger)
+    GET  /api/feedback/all        → all corrections (for Aneesh's retraining pipeline)
+    """
+    def __init__(self):
+        self.store = RecapStore()
+
+    async def __call__(self, request: Request) -> JSONResponse:
+        path = request.url.path
+        method = request.method
+
+        # ── GET /api/recap/{meeting_id} ──────────────────────────
+        if method == "GET" and "/api/recap/" in path:
+            meeting_id = path.split("/api/recap/")[-1].strip("/")
+            if not meeting_id:
+                return JSONResponse({"error": "meeting_id required"}, status_code=400)
+
+            recap = self.store.get_recap(meeting_id)
+            if not recap:
+                return JSONResponse(
+                    {"error": f"No recap found for meeting_id '{meeting_id}'"},
+                    status_code=404
+                )
+            utterances = self.store.get_utterances(meeting_id)
+            return JSONResponse({
+                "recap_id": recap["recap_id"],
+                "meeting_id": meeting_id,
+                "model_version": recap["model_version"],
+                "created_at": recap["created_at"],
+                "segments": recap["segments_json"],
+                "utterances": utterances  # needed by UI to show boundary confidence
+            })
+
+        # ── POST /api/feedback ───────────────────────────────────
+        if method == "POST" and path.rstrip("/") == "/api/feedback":
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+            meeting_id   = body.get("meeting_id")
+            utterance_idx = body.get("utterance_idx")
+            action       = body.get("action")
+
+            # Validate
+            if not meeting_id:
+                return JSONResponse({"error": "meeting_id required"}, status_code=400)
+            if utterance_idx is None:
+                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
+            if action not in ("remove_boundary", "add_boundary"):
+                return JSONResponse(
+                    {"error": "action must be 'remove_boundary' or 'add_boundary'"},
+                    status_code=400
+                )
+
+            # Look up original label from stored utterances
+            utterances = self.store.get_utterances(meeting_id)
+            original_label = 0
+            for u in utterances:
+                if u["utterance_idx"] == utterance_idx:
+                    original_label = u["predicted_label"]
+                    break
+
+            correction = self.store.save_feedback(
+                meeting_id, utterance_idx, action, original_label
+            )
+            pending = self.store.count_pending_corrections()
+
+            return JSONResponse({
+                "status": "recorded",
+                "correction_id": correction["correction_id"],
+                "meeting_id": meeting_id,
+                "utterance_idx": utterance_idx,
+                "action": action,
+                "original_label": original_label,
+                "corrected_label": correction["corrected_label"],
+                "pending_corrections_total": pending,
+                "retrain_threshold": 500,
+                "retrain_triggered": pending >= 500
+            })
+
+        # ── GET /api/feedback/count ──────────────────────────────
+        if method == "GET" and path.rstrip("/") == "/api/feedback/count":
+            pending = self.store.count_pending_corrections()
+            return JSONResponse({
+                "pending_corrections": pending,
+                "retrain_threshold": 500,
+                "retrain_triggered": pending >= 500
+            })
+
+        # ── GET /api/feedback/all ────────────────────────────────
+        if method == "GET" and path.rstrip("/") == "/api/feedback/all":
+            corrections = self.store.get_all_feedback()
+            return JSONResponse({
+                "total": len(corrections),
+                "corrections": corrections
+            })
+
+        return JSONResponse({"error": "Not found"}, status_code=404)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -562,15 +864,34 @@ segmenter  = SegmenterDeployment.bind()   # 0.3 GPU
 summarizer = SummarizerDeployment.bind()  # 0.7 GPU  (total = 1.0)
 health     = HealthDeployment.bind()
 recap      = RecapPipelineDeployment.bind()
+recap_api  = RecapAPIDeployment.bind() 
 
-serve.start(http_options={"host": "0.0.0.0", "port": 8000})
+#serve.start(http_options={"host": "0.0.0.0", "port": 8000})
+# HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.86.194:8000/recap'))
+#  Browsers block these "cross-origin" requests by default unless the server explicitly says "yes, other origins can talk to me." That's CORS — Cross-Origin Resource Sharing.
+
+
+serve.start(http_options={
+    "host": "0.0.0.0",
+    "port": 8000,
+    "middlewares": [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+        )
+    ]
+})
 
 # metrics MUST be deployed first — other actors look it up by name on init.
 serve.run(metrics,    name="metrics",    route_prefix="/metrics")
 serve.run(health,     name="health",     route_prefix="/health")
 serve.run(segmenter,  name="segmenter",  route_prefix="/segment")
 serve.run(summarizer, name="summarizer", route_prefix="/summarize")
+#serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap,      name="recap",      route_prefix="/recap")
+serve.run(recap_api,  name="recap_api",  route_prefix="/api")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
