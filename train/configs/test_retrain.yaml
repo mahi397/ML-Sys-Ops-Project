@@ -1,0 +1,10 @@
+ray_num_workers: 1
+ray_use_gpu: true
+ray_storage_path: /tmp/ray_checkpoints
+epochs: 1
+warm_start_model_alias: null
+batch_size: 8
+max_seq_len: 128
+gate_min_f1: 0.0
+gate_max_pk: 1.0
+gate_max_windowdiff: 2.0
