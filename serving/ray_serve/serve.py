@@ -15,6 +15,9 @@ from ray import serve
 import torch
 import numpy as np
 import json
+import psutil
+import threading
+from pathlib import Path
 import os
 import time
 import psutil
@@ -22,6 +25,7 @@ from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware import Middleware
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -871,11 +875,12 @@ serve.start(http_options={
     "host": "0.0.0.0",
     "port": 8000,
     "middlewares": [
-        (CORSMiddleware, [], {
-            "allow_origins": ["*"],
-            "allow_methods": ["GET", "POST", "OPTIONS"],
-            "allow_headers": ["*"],
-        })
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+        )
     ]
 })
 
