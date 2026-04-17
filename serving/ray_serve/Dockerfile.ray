@@ -8,11 +8,7 @@ ENV TZ=UTC
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     apt-get update && \
-    apt-get install -y --no-install-recommends \
-        libcurl4 \
-        libcurl4-openssl-dev \
-        libssl-dev \
-        liberror-perl \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
         curl \
         git \
         build-essential && \
