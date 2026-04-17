@@ -39,6 +39,7 @@ services:
         condition: service_healthy
     environment:
       INGEST_TOKEN: ${INGEST_TOKEN:-}
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       JITSI_SAVE_DIR: /mnt/block/user-behaviour/received_transcripts
       JITSI_LOG_DIR: /mnt/block/ingest_logs/jitsi_transcript
       RCLONE_CONFIG: /config/rclone/rclone.conf
