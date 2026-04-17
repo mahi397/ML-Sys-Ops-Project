@@ -7,11 +7,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    conda install -y -c conda-forge git curl && \
     apt-get update && \
-    apt-get install -y --no-install-recommends --allow-change-held-packages \
-        curl \
-        git \
-        build-essential && \
+    apt-get install -y --no-install-recommends build-essential && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir cmake
     #apt-get install -y --no-install-recommends curl git build-essential cmake && \
