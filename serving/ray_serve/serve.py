@@ -846,13 +846,64 @@ class RecapAPIDeployment:
                     status_code=404
                 )
             utterances = self.store.get_utterances(meeting_id)
+            # ── Transform to UI-compatible format ───────────────────
+            # Reconstruct start_utt/end_utt from stored boundary labels
+            boundary_idxs = [u["utterance_idx"] for u in utterances
+                             if u.get("predicted_label") == 1]
+            summaries = recap["segments_json"]  # Mistral outputs, ordered by segment_id
+
+            ui_segments = []
+            start_utt = 0
+            for i, seg in enumerate(summaries):
+                end_utt = boundary_idxs[i] if i < len(boundary_idxs) else (
+                    utterances[-1]["utterance_idx"] if utterances else 0
+                )
+                # boundary_confidence from the utterance at end_utt
+                conf = next(
+                    (u.get("boundary_confidence") for u in utterances
+                     if u["utterance_idx"] == end_utt),
+                    None
+                )
+                ui_segments.append({
+                    "segment_idx":        i,
+                    "start_utt":          start_utt,
+                    "end_utt":            end_utt,
+                    "t_start":            seg.get("t_start", 0),
+                    "t_end":              seg.get("t_end", 0),
+                    "topic_label":        seg.get("topic_label", ""),
+                    # join bullets into a single string for the UI
+                    "summary":            ". ".join(seg.get("summary_bullets", []))
+                                          or seg.get("topic_label", "No summary"),
+                    "boundary_confidence": conf,
+                })
+                start_utt = end_utt + 1
+
+            # Compute meeting metadata from utterances
+            speakers = list({u.get("speaker", "") for u in utterances if u.get("speaker")})
+            t_values = [u.get("t_start", 0) for u in utterances if u.get("t_start") is not None]
+            duration_secs = int(max(t_values) - min(t_values)) if len(t_values) > 1 else 0
+            duration_str = f"{duration_secs // 60} min" if duration_secs else ""
+
+            ui_utterances = [
+                {
+                    "utterance_idx": u["utterance_idx"],
+                    "speaker":       u.get("speaker", "Speaker"),
+                    "text":          u.get("text", ""),
+                    "t_start":       u.get("t_start", 0),
+                }
+                for u in utterances
+            ]
+
             return JSONResponse({
-                "recap_id": recap["recap_id"],
-                "meeting_id": meeting_id,
-                "model_version": recap["model_version"],
-                "created_at": recap["created_at"],
-                "segments": recap["segments_json"],
-                "utterances": utterances  # needed by UI to show boundary confidence
+                "recap_id":        recap["recap_id"],
+                "meeting_id":      meeting_id,
+                "meeting_title":   meeting_id,          # no title stored; use id
+                "meeting_duration": duration_str,
+                "participant_count": len(speakers),
+                "model_version":   recap["model_version"],
+                "created_at":      recap["created_at"],
+                "segments":        ui_segments,
+                "utterances":      ui_utterances,
             })
 
         # ── POST /api/feedback ───────────────────────────────────
@@ -872,6 +923,8 @@ class RecapAPIDeployment:
             if utterance_idx is None:
                 return JSONResponse({"error": "utterance_idx required"}, status_code=400)
             if action not in ("remove_boundary", "add_boundary"):
+                if isinstance(action, str) and action.startswith("overall_"):
+                    return JSONResponse({"status": "recorded", "action": action})
                 return JSONResponse(
                     {"error": "action must be 'remove_boundary' or 'add_boundary'"},
                     status_code=400
