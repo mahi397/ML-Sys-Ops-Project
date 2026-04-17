@@ -340,36 +340,35 @@ class SegmenterDeployment:
         self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 
-        if os.path.exists(MODEL_PATH):
-            # ── Load model: MLflow registry → local path → base weights ──
-            self.model = None
-            self.model_version = "base"
+                # ── Load model: MLflow registry → local path → base weights ──
+        self.model = None
+        self.model_version = "base"
 
-            # 1. Try MLflow registry first
-            if MLFLOW_TRACKING_URI:
-                try:
-                    import mlflow.pytorch
-                    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-                    mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
-                    self.model = mlflow.pytorch.load_model(mlflow_uri)
-                    self.model_version = f"mlflow@{MODEL_ALIAS}"
-                    print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
-                except Exception as e:
-                    print(f"[segmenter] MLflow load failed ({e}), falling back to local path")
+        # 1. Try MLflow registry first (Mahima's trained model)
+        if MLFLOW_TRACKING_URI:
+            try:
+                import mlflow.pytorch
+                mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+                mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
+                self.model = mlflow.pytorch.load_model(mlflow_uri)
+                self.model_version = f"mlflow@{MODEL_ALIAS}"
+                print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
+            except Exception as e:
+                print(f"[segmenter] MLflow load failed ({e}), falling back to local path")
 
-            # 2. Fall back to local fine-tuned weights
-            if self.model is None and os.path.exists(MODEL_PATH):
-                self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
-                self.model_version = "local-fine-tuned"
-                print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
+        # 2. Fall back to local fine-tuned weights
+        if self.model is None and os.path.exists(MODEL_PATH):
+            self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
+            self.model_version = "local-fine-tuned"
+            print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
 
         # 3. Last resort — base weights (no fine-tuning)
-            if self.model is None:
-                self.model = RobertaForSequenceClassification.from_pretrained(
-                  "roberta-base", num_labels=2
+        if self.model is None:
+            self.model = RobertaForSequenceClassification.from_pretrained(
+                "roberta-base", num_labels=2
             )
-                self.model_version = "base"
-                print(f"[segmenter] WARNING: Using base roberta weights (no fine-tuning)")
+            self.model_version = "base"
+            print(f"[segmenter] WARNING: Using base roberta weights (no fine-tuning)")
 
         self.model.to(self.device)
         self.model.eval()
