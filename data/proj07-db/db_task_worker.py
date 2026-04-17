@@ -30,6 +30,8 @@ from workflow_task_common import (  # noqa: E402
 APP_NAME = "db_task_worker"
 STAGE1_BUILD_QUEUE = "stage1_build"
 STAGE1_FORWARD_QUEUE = "stage1_forward"
+STAGE2_BUILD_QUEUE = "stage2_build"
+STAGE2_FORWARD_QUEUE = "stage2_forward"
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class DispatcherConfig:
     stage1_version: int = env_int("STAGE1_ARTIFACT_VERSION", 1)
     stage1_build_max_attempts: int = env_int("STAGE1_BUILD_MAX_ATTEMPTS", 8)
     stage1_forward_max_attempts: int = env_int("STAGE1_FORWARD_MAX_ATTEMPTS", 8)
+    stage2_build_max_attempts: int = env_int("STAGE2_BUILD_MAX_ATTEMPTS", 8)
+    stage2_forward_max_attempts: int = env_int("STAGE2_FORWARD_MAX_ATTEMPTS", 8)
     stale_after_seconds: int = env_int("WORKFLOW_TASK_STALE_AFTER_SECONDS", 600)
     stage1_build_dispatch_enabled: bool = env_flag(
         "DB_TASK_STAGE1_BUILD_ENABLED",
@@ -55,6 +59,14 @@ class DispatcherConfig:
     stage1_forward_dispatch_enabled: bool = env_flag(
         "DB_TASK_STAGE1_FORWARD_ENABLED",
         env_flag("STAGE1_FORWARD_ENABLED", True),
+    )
+    stage2_build_dispatch_enabled: bool = env_flag(
+        "DB_TASK_STAGE2_BUILD_ENABLED",
+        True,
+    )
+    stage2_forward_dispatch_enabled: bool = env_flag(
+        "DB_TASK_STAGE2_FORWARD_ENABLED",
+        True,
     )
 
 
@@ -225,12 +237,164 @@ class Stage1ForwardDispatchTask:
         return [row["meeting_id"] for row in rows]
 
 
+@dataclass
+class Stage2BuildDispatchTask:
+    config: DispatcherConfig
+    logger: object
+    name: str = "stage2_build_dispatch"
+
+    def run_cycle(self, *, full_scan: bool) -> int:
+        conn = get_conn()
+        try:
+            meeting_ids = self.fetch_candidate_meeting_ids(conn, full_scan=full_scan)
+            dispatched = 0
+            for meeting_id in meeting_ids:
+                payload = {
+                    "task_name": STAGE2_BUILD_QUEUE,
+                    "meeting_id": meeting_id,
+                    "artifact_version": self.config.stage1_version,
+                    "phase": "stage2_build_pending",
+                    "enqueued_at": utcnow_iso(),
+                }
+                upsert_workflow_task(
+                    conn,
+                    task_type=STAGE2_BUILD_QUEUE,
+                    meeting_id=meeting_id,
+                    artifact_version=self.config.stage1_version,
+                    payload_json=payload,
+                    max_attempts=self.config.stage2_build_max_attempts,
+                    commit=False,
+                )
+                dispatched += 1
+            conn.commit()
+        finally:
+            conn.close()
+        return dispatched
+
+    def fetch_candidate_meeting_ids(self, conn, *, full_scan: bool) -> list[str]:
+        sql = """
+            SELECT resp.meeting_id
+            FROM meeting_artifacts resp
+            JOIN meetings m
+              ON m.meeting_id = resp.meeting_id
+            LEFT JOIN meeting_artifacts inp_jsonl
+              ON inp_jsonl.meeting_id = resp.meeting_id
+             AND inp_jsonl.artifact_type = 'stage2_inputs_jsonl'
+             AND inp_jsonl.artifact_version = %s
+            LEFT JOIN meeting_artifacts inp_json
+              ON inp_json.meeting_id = resp.meeting_id
+             AND inp_json.artifact_type = 'stage2_inputs_json'
+             AND inp_json.artifact_version = %s
+            LEFT JOIN meeting_artifacts seg
+              ON seg.meeting_id = resp.meeting_id
+             AND seg.artifact_type = 'reconstructed_segments_json'
+             AND seg.artifact_version = %s
+            WHERE resp.artifact_type = 'stage1_responses_jsonl'
+              AND m.source_type = 'jitsi'
+              AND resp.artifact_version = %s
+              AND (
+                    inp_jsonl.artifact_id IS NULL
+                    OR inp_json.artifact_id IS NULL
+                    OR seg.artifact_id IS NULL
+               )
+            ORDER BY resp.created_at DESC, resp.meeting_id DESC
+        """
+        params: list[object] = [
+            self.config.stage1_version,
+            self.config.stage1_version,
+            self.config.stage1_version,
+            self.config.stage1_version,
+        ]
+        if full_scan and self.config.full_scan_limit > 0:
+            sql += " LIMIT %s"
+            params.append(self.config.full_scan_limit)
+        elif not full_scan:
+            sql += " LIMIT %s"
+            params.append(self.config.batch_size)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [row["meeting_id"] for row in rows]
+
+
+@dataclass
+class Stage2ForwardDispatchTask:
+    config: DispatcherConfig
+    logger: object
+    name: str = "stage2_forward_dispatch"
+
+    def run_cycle(self, *, full_scan: bool) -> int:
+        conn = get_conn()
+        try:
+            meeting_ids = self.fetch_candidate_meeting_ids(conn, full_scan=full_scan)
+            dispatched = 0
+            for meeting_id in meeting_ids:
+                payload = {
+                    "task_name": STAGE2_FORWARD_QUEUE,
+                    "meeting_id": meeting_id,
+                    "artifact_version": self.config.stage1_version,
+                    "phase": "summarize_pending",
+                    "enqueued_at": utcnow_iso(),
+                }
+                upsert_workflow_task(
+                    conn,
+                    task_type=STAGE2_FORWARD_QUEUE,
+                    meeting_id=meeting_id,
+                    artifact_version=self.config.stage1_version,
+                    payload_json=payload,
+                    max_attempts=self.config.stage2_forward_max_attempts,
+                    commit=False,
+                )
+                dispatched += 1
+            conn.commit()
+        finally:
+            conn.close()
+        return dispatched
+
+    def fetch_candidate_meeting_ids(self, conn, *, full_scan: bool) -> list[str]:
+        sql = """
+            SELECT req.meeting_id
+            FROM meeting_artifacts req
+            JOIN meetings m
+              ON m.meeting_id = req.meeting_id
+            LEFT JOIN meeting_artifacts resp
+              ON resp.meeting_id = req.meeting_id
+             AND resp.artifact_type = 'stage2_responses_json'
+             AND resp.artifact_version = %s
+            WHERE req.artifact_type = 'stage2_inputs_json'
+              AND m.source_type = 'jitsi'
+              AND req.artifact_version = %s
+              AND resp.artifact_id IS NULL
+            ORDER BY req.created_at DESC, req.meeting_id DESC
+        """
+        params: list[object] = [
+            self.config.stage1_version,
+            self.config.stage1_version,
+        ]
+        if full_scan and self.config.full_scan_limit > 0:
+            sql += " LIMIT %s"
+            params.append(self.config.full_scan_limit)
+        elif not full_scan:
+            sql += " LIMIT %s"
+            params.append(self.config.batch_size)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [row["meeting_id"] for row in rows]
+
+
 def build_dispatch_tasks(config: DispatcherConfig, logger) -> list[DispatchTask]:
     tasks: list[DispatchTask] = []
     if config.stage1_build_dispatch_enabled:
         tasks.append(Stage1BuildDispatchTask(config=config, logger=logger))
     if config.stage1_forward_dispatch_enabled:
         tasks.append(Stage1ForwardDispatchTask(config=config, logger=logger))
+    if config.stage2_build_dispatch_enabled:
+        tasks.append(Stage2BuildDispatchTask(config=config, logger=logger))
+    if config.stage2_forward_dispatch_enabled:
+        tasks.append(Stage2ForwardDispatchTask(config=config, logger=logger))
     return tasks
 
 
@@ -245,6 +409,10 @@ def validate_config(config: DispatcherConfig) -> None:
         raise ValueError("STAGE1_BUILD_MAX_ATTEMPTS must be > 0")
     if config.stage1_forward_max_attempts <= 0:
         raise ValueError("STAGE1_FORWARD_MAX_ATTEMPTS must be > 0")
+    if config.stage2_build_max_attempts <= 0:
+        raise ValueError("STAGE2_BUILD_MAX_ATTEMPTS must be > 0")
+    if config.stage2_forward_max_attempts <= 0:
+        raise ValueError("STAGE2_FORWARD_MAX_ATTEMPTS must be > 0")
     if config.stale_after_seconds <= 0:
         raise ValueError("WORKFLOW_TASK_STALE_AFTER_SECONDS must be > 0")
 
@@ -278,6 +446,14 @@ def main() -> None:
         "Dispatch tasks | stage1_build=%s stage1_forward=%s",
         config.stage1_build_dispatch_enabled,
         config.stage1_forward_dispatch_enabled,
+    )
+    logger.info(
+        "Dispatch tasks | stage2_build=%s",
+        config.stage2_build_dispatch_enabled,
+    )
+    logger.info(
+        "Dispatch tasks | stage2_forward=%s",
+        config.stage2_forward_dispatch_enabled,
     )
 
     next_full_scan_at = time.monotonic()

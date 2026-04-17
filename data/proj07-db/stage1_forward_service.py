@@ -37,6 +37,7 @@ from workflow_task_common import (  # noqa: E402
 
 APP_NAME = "stage1_forward_service"
 STAGE1_FORWARD_TASK = "stage1_forward"
+STAGE2_BUILD_TASK = "stage2_build"
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class ForwardServiceConfig:
         "WORKFLOW_TASK_BACKOFF_MAX_SECONDS",
         900.0,
     )
+    stage2_build_max_attempts: int = env_int("STAGE2_BUILD_MAX_ATTEMPTS", 8)
 
 
 def load_jsonl_rows(path: Path) -> list[dict]:
@@ -237,17 +239,23 @@ class Stage1ForwardService:
                 interval_seconds=self.config.heartbeat_interval_seconds,
                 logger=self.logger,
             ):
-                self.forward_stage1_artifact(
+                stage2_ready = self.forward_stage1_artifact(
                     conn,
                     lease.meeting_id,
                     lease.artifact_version,
                     reason=reason,
                 )
 
+            downstream_tasks = (
+                [self.make_stage2_build_task(lease.meeting_id, lease.artifact_version)]
+                if stage2_ready
+                else None
+            )
             mark_task_succeeded(
                 conn,
                 lease=lease,
                 worker_id=self.worker_id,
+                downstream_tasks=downstream_tasks,
             )
             return True
         except Exception as exc:
@@ -284,6 +292,23 @@ class Stage1ForwardService:
             )
             row = cur.fetchone()
         return None if row is None else row["source_type"]
+
+    def make_stage2_build_task(self, meeting_id: str, version: int) -> dict:
+        return {
+            "task_type": STAGE2_BUILD_TASK,
+            "meeting_id": meeting_id,
+            "artifact_version": version,
+            "payload_json": {
+                "task_name": STAGE2_BUILD_TASK,
+                "meeting_id": meeting_id,
+                "artifact_version": version,
+                "phase": "stage2_build_pending",
+                "enqueued_by": APP_NAME,
+                "source_task": STAGE1_FORWARD_TASK,
+            },
+            "max_attempts": self.config.stage2_build_max_attempts,
+            "revive_succeeded": False,
+        }
 
     def should_process(
         self,
@@ -328,7 +353,7 @@ class Stage1ForwardService:
         version: int,
         *,
         reason: str,
-    ) -> None:
+    ) -> bool:
         response_paths = stage1_response_paths(self.config.response_root, meeting_id, version)
         ensure_dir(response_paths["stage1_responses_json"].parent)
 
@@ -349,7 +374,7 @@ class Stage1ForwardService:
                 response_json_path=response_paths["stage1_responses_json"],
                 response_jsonl_path=response_jsonl_path,
             )
-            return
+            return response_jsonl_path is not None
 
         request_paths = stage1_local_artifact_paths(
             self.config.request_root,
@@ -391,7 +416,7 @@ class Stage1ForwardService:
                 "Skipped Stage 1 forward because requests are empty | meeting_id=%s",
                 meeting_id,
             )
-            return
+            return False
 
         request_json_payload = self.build_request_json_payload(
             meeting_id=meeting_id,
@@ -447,6 +472,7 @@ class Stage1ForwardService:
             response_json_path=response_paths["stage1_responses_json"],
             response_jsonl_path=response_jsonl_path,
         )
+        return response_jsonl_path is not None
 
     def build_request_json_payload(
         self,
@@ -547,6 +573,8 @@ def validate_config(config: ForwardServiceConfig) -> None:
         raise ValueError(
             "WORKFLOW_TASK_BACKOFF_MAX_SECONDS must be >= WORKFLOW_TASK_BACKOFF_BASE_SECONDS"
         )
+    if config.stage2_build_max_attempts <= 0:
+        raise ValueError("STAGE2_BUILD_MAX_ATTEMPTS must be > 0")
 
 
 def main() -> None:

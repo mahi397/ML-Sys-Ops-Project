@@ -31,6 +31,11 @@ STAGE1_ARTIFACT_FILES = {
     "stage1_manifest_json": "manifest.json",
 }
 
+STAGE2_INPUT_ARTIFACT_FILES = {
+    "stage2_inputs_jsonl": "stage2_inputs.jsonl",
+    "stage2_inputs_json": "stage2_inputs.json",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -288,6 +293,30 @@ def stage1_local_artifact_paths(
     }
 
 
+def stage2_input_output_dir(output_root: Path, meeting_id: str, version: int) -> Path:
+    return output_root / meeting_id / f"v{version}"
+
+
+def stage2_local_artifact_paths(
+    output_root: Path,
+    meeting_id: str,
+    version: int,
+) -> dict[str, Path]:
+    out_root = stage2_input_output_dir(output_root, meeting_id, version)
+    return {
+        artifact_type: out_root / file_name
+        for artifact_type, file_name in STAGE2_INPUT_ARTIFACT_FILES.items()
+    }
+
+
+def reconstructed_segments_local_path(
+    segments_root: Path,
+    meeting_id: str,
+    version: int,
+) -> Path:
+    return segments_root / meeting_id / f"v{version}.json"
+
+
 def build_stage2_inputs(
     meeting_id: str,
     utterances: list[dict],
@@ -347,11 +376,33 @@ def build_stage2_inputs(
                 "metadata": {
                     "start_model_index": segment_utts[0]["model_index"],
                     "end_model_index": segment_utts[-1]["model_index"],
+                    "start_source_utterance_index": segment_utts[0]["source_utterance_index"],
+                    "end_source_utterance_index": segment_utts[-1]["source_utterance_index"],
                 },
             }
         )
 
     return rows
+
+
+def build_reconstructed_segments(stage2_inputs: list[dict]) -> dict:
+    return {
+        "meeting_id": stage2_inputs[0]["meeting_id"] if stage2_inputs else None,
+        "segment_count": len(stage2_inputs),
+        "segments": [
+            {
+                "segment_id": segment["segment_id"],
+                "t_start": segment["t_start"],
+                "t_end": segment["t_end"],
+                "total_utterances": segment["total_utterances"],
+                "start_model_index": segment["metadata"]["start_model_index"],
+                "end_model_index": segment["metadata"]["end_model_index"],
+                "start_source_utterance_index": segment["metadata"]["start_source_utterance_index"],
+                "end_source_utterance_index": segment["metadata"]["end_source_utterance_index"],
+            }
+            for segment in stage2_inputs
+        ],
+    }
 
 
 def fetch_meeting_source_type(conn, meeting_id: str) -> str | None:

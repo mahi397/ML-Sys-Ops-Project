@@ -1,6 +1,6 @@
 # proj07-db
 
-This folder contains the Jitsi transcript ingest service, the Stage 1 payload builder, and the async workers that build and forward Stage 1 inference artifacts.
+This folder contains the Jitsi transcript ingest service plus the async workers that build Stage 1 requests, forward Stage 1 inference, and derive Stage 2 segment inputs.
 
 ## Current flow
 
@@ -12,6 +12,10 @@ This folder contains the Jitsi transcript ingest service, the Stage 1 payload bu
 6. The builder writes `stage1_requests.jsonl`, `stage1_requests.json`, `model_utterances.json`, and `manifest.json`, optionally uploads them, and upserts their references into `meeting_artifacts`.
 7. `db_task_worker.py` or the builder success path upserts a `stage1_forward` task.
 8. `stage1_forward_service.py` claims that task from Postgres, posts the Stage 1 payload to the configured HTTP endpoint, saves the response locally, optionally uploads it, and upserts response artifact rows into `meeting_artifacts`.
+9. `stage1_forward_service.py` enqueues `stage2_build` when row-wise Stage 1 responses are available.
+10. `stage2_input_service.py` loads `model_utterances.json` plus `stage1_responses.jsonl`, reconstructs predicted segments, writes Stage 2 input artifacts, and upserts their references into `meeting_artifacts`.
+11. `stage2_input_service.py` enqueues `stage2_forward`.
+12. `stage2_forward_service.py` posts `stage2_inputs.json` to `POST /summarize`, saves the Stage 2 response locally, optionally uploads it, and upserts response artifact rows into `meeting_artifacts`.
 
 The key split is:
 - `meeting_artifacts` describes durable data outputs
@@ -109,6 +113,8 @@ Uniqueness:
 Current task types:
 - `stage1_build`
 - `stage1_forward`
+- `stage2_build`
+- `stage2_forward`
 
 ### `workflow_task_attempts`
 
@@ -265,11 +271,33 @@ Purpose:
 Purpose:
 - find meetings that have `stage1_requests_jsonl` but do not yet have `stage1_responses_json`
 
+#### Stage 2 build dispatch
+- `meeting_artifacts.meeting_id`
+- `meeting_artifacts.artifact_id`
+- `meeting_artifacts.artifact_type`
+- `meeting_artifacts.artifact_version`
+- `meeting_artifacts.created_at`
+
+Purpose:
+- find meetings that have `stage1_responses_jsonl` but are missing one or more Stage 2 segmentation artifacts
+
+#### Stage 2 forward dispatch
+- `meeting_artifacts.meeting_id`
+- `meeting_artifacts.artifact_id`
+- `meeting_artifacts.artifact_type`
+- `meeting_artifacts.artifact_version`
+- `meeting_artifacts.created_at`
+
+Purpose:
+- find meetings that have `stage2_inputs_json` but do not yet have `stage2_responses_json`
+
 DB writes:
 
 #### `workflow_tasks`
 - upserts `stage1_build`
 - upserts `stage1_forward`
+- upserts `stage2_build`
+- upserts `stage2_forward`
 - may move stale tasks from `running` to `retry_scheduled` or `failed_permanent`
 
 Written or updated columns:
@@ -415,6 +443,68 @@ Important behavior:
 - it writes a skipped local response and records `stage1_responses_json`
 - if upload is enabled, it may temporarily store `stage1_responses_json` as `local://...` until object-storage upload succeeds
 - it does not currently write predictions back into `utterance_transitions`
+- when row-wise response JSONL exists, it enqueues downstream `stage2_build`
+
+### `stage2_input_service.py`
+
+Role:
+- claims `stage2_build` rows from `workflow_tasks`
+- loads Stage 1 model utterances and Stage 1 response JSONL from local disk
+- reconstructs predicted topic segments from Stage 1 boundary decisions
+- writes Stage 2 input artifacts plus `reconstructed_segments.json`
+- optionally uploads those artifacts to object storage
+- upserts Stage 2 artifact references in Postgres
+- enqueues downstream `stage2_forward`
+
+DB reads:
+- `workflow_tasks`
+- `meeting_artifacts`
+
+DB writes:
+
+#### `workflow_tasks`
+- claims one `stage2_build` task by moving it to `running`
+- updates `attempt_count`, `locked_by`, `locked_at`, `heartbeat_at`
+- marks it `succeeded`, `retry_scheduled`, or `failed_permanent`
+
+#### `workflow_task_attempts`
+- inserts one attempt row per claimed task
+- fills `finished_at`, `outcome`, `error_summary`, `stderr_tail`, `duration_ms`
+
+#### `meeting_artifacts`
+- upserts `stage2_inputs_jsonl`
+- upserts `stage2_inputs_json`
+- upserts `reconstructed_segments_json`
+
+### `stage2_forward_service.py`
+
+Role:
+- claims `stage2_forward` rows from `workflow_tasks`
+- loads `stage2_inputs.json` from local disk
+- by default posts each segment object individually to the configured Stage 2 endpoint, typically `POST /summarize`
+- uses its own `STAGE2_FORWARD_URL`; it does not derive the endpoint from Stage 1 settings
+- saves response artifacts locally
+- optionally uploads response artifacts to object storage
+- upserts Stage 2 response artifact references in Postgres
+
+DB reads:
+- `workflow_tasks`
+- `meeting_artifacts`
+
+DB writes:
+
+#### `workflow_tasks`
+- claims one `stage2_forward` task by moving it to `running`
+- updates `attempt_count`, `locked_by`, `locked_at`, `heartbeat_at`
+- marks it `succeeded`, `retry_scheduled`, or `failed_permanent`
+
+#### `workflow_task_attempts`
+- inserts one attempt row per claimed task
+- fills `finished_at`, `outcome`, `error_summary`, `stderr_tail`, `duration_ms`
+
+#### `meeting_artifacts`
+- upserts `stage2_responses_json`
+- upserts `stage2_responses_jsonl` when the endpoint response can be represented as row-wise JSONL
 
 ## Workflow task lifecycle
 

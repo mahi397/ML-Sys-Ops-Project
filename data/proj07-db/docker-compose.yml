@@ -82,9 +82,13 @@ services:
       DB_TASK_FULL_SCAN_LIMIT: ${DB_TASK_FULL_SCAN_LIMIT:-0}
       DB_TASK_STAGE1_BUILD_ENABLED: ${DB_TASK_STAGE1_BUILD_ENABLED:-true}
       DB_TASK_STAGE1_FORWARD_ENABLED: ${DB_TASK_STAGE1_FORWARD_ENABLED:-true}
+      DB_TASK_STAGE2_BUILD_ENABLED: ${DB_TASK_STAGE2_BUILD_ENABLED:-true}
+      DB_TASK_STAGE2_FORWARD_ENABLED: ${DB_TASK_STAGE2_FORWARD_ENABLED:-true}
       STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
       STAGE1_BUILD_MAX_ATTEMPTS: ${STAGE1_BUILD_MAX_ATTEMPTS:-8}
       STAGE1_FORWARD_MAX_ATTEMPTS: ${STAGE1_FORWARD_MAX_ATTEMPTS:-8}
+      STAGE2_BUILD_MAX_ATTEMPTS: ${STAGE2_BUILD_MAX_ATTEMPTS:-8}
+      STAGE2_FORWARD_MAX_ATTEMPTS: ${STAGE2_FORWARD_MAX_ATTEMPTS:-8}
       WORKFLOW_TASK_STALE_AFTER_SECONDS: ${WORKFLOW_TASK_STALE_AFTER_SECONDS:-600}
     command: ["python", "/app/db_task_worker.py"]
     volumes:
@@ -148,6 +152,7 @@ services:
       STAGE1_FORWARD_TIMEOUT_SECONDS: ${STAGE1_FORWARD_TIMEOUT_SECONDS:-300}
       STAGE1_RESPONSE_PREFIX: ${STAGE1_RESPONSE_PREFIX:-production/inference_responses/stage1}
       STAGE1_FORWARD_UPLOAD_ARTIFACTS: ${STAGE1_FORWARD_UPLOAD_ARTIFACTS:-true}
+      STAGE2_BUILD_MAX_ATTEMPTS: ${STAGE2_BUILD_MAX_ATTEMPTS:-8}
       WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
       WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
@@ -159,4 +164,78 @@ services:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
       - /mnt/block/user-behaviour/inference_responses/stage1:/mnt/block/user-behaviour/inference_responses/stage1
       - /mnt/block/ingest_logs/stage1_forward_service:/mnt/block/ingest_logs/stage1_forward_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+
+  stage2_input_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stage2_input_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      STAGE2_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_input_service
+      STAGE2_BUILD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE2_BUILD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      STAGE1_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage1
+      STAGE2_INPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage2
+      SEGMENTS_ROOT: /mnt/block/user-behaviour/reconstructed_segments
+      STAGE2_BOUNDARY_THRESHOLD: ${STAGE2_BOUNDARY_THRESHOLD:-0.5}
+      STAGE2_UPLOAD_ARTIFACTS: ${STAGE2_UPLOAD_ARTIFACTS:-true}
+      STAGE2_OBJECT_PREFIX: ${STAGE2_OBJECT_PREFIX:-production/inference_requests/stage2}
+      SEGMENTS_PREFIX: ${SEGMENTS_PREFIX:-production/reconstructed_segments}
+      STAGE2_FORWARD_MAX_ATTEMPTS: ${STAGE2_FORWARD_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "/app/stage2_input_service.py"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/user-behaviour/inference_responses/stage1:/mnt/block/user-behaviour/inference_responses/stage1
+      - /mnt/block/user-behaviour/inference_requests/stage2:/mnt/block/user-behaviour/inference_requests/stage2
+      - /mnt/block/user-behaviour/reconstructed_segments:/mnt/block/user-behaviour/reconstructed_segments
+      - /mnt/block/ingest_logs/stage2_input_service:/mnt/block/ingest_logs/stage2_input_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+
+  stage2_forward_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stage2_forward_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      STAGE2_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_forward_service
+      STAGE2_FORWARD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE2_FORWARD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE2_INPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage2
+      STAGE2_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage2
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE2_FORWARD_URL: ${STAGE2_FORWARD_URL}
+      STAGE2_FORWARD_PAYLOAD_FORMAT: ${STAGE2_FORWARD_PAYLOAD_FORMAT:-segment_json}
+      STAGE2_FORWARD_TIMEOUT_SECONDS: ${STAGE2_FORWARD_TIMEOUT_SECONDS:-300}
+      STAGE2_RESPONSE_PREFIX: ${STAGE2_RESPONSE_PREFIX:-production/inference_responses/stage2}
+      STAGE2_MODEL_NAME: ${STAGE2_MODEL_NAME:-stage2-summarizer}
+      STAGE2_MODEL_VERSION: ${STAGE2_MODEL_VERSION:-}
+      STAGE2_PROMPT_VERSION: ${STAGE2_PROMPT_VERSION:-}
+      STAGE2_FORWARD_UPLOAD_ARTIFACTS: ${STAGE2_FORWARD_UPLOAD_ARTIFACTS:-true}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "/app/stage2_forward_service.py"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage2:/mnt/block/user-behaviour/inference_requests/stage2
+      - /mnt/block/user-behaviour/inference_responses/stage2:/mnt/block/user-behaviour/inference_responses/stage2
+      - /mnt/block/ingest_logs/stage2_forward_service:/mnt/block/ingest_logs/stage2_forward_service
       - ${HOME}/.config/rclone:/config/rclone:ro
