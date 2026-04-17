@@ -121,6 +121,7 @@ class Stage1BuildDispatchTask:
               ON a_manifest.meeting_id = m.meeting_id
              AND a_manifest.artifact_type = 'stage1_manifest_json'
              AND a_manifest.artifact_version = %s
+            WHERE m.source_type = 'jitsi'
             GROUP BY
                 m.meeting_id,
                 m.started_at,
@@ -195,11 +196,14 @@ class Stage1ForwardDispatchTask:
         sql = """
             SELECT req.meeting_id
             FROM meeting_artifacts req
+            JOIN meetings m
+              ON m.meeting_id = req.meeting_id
             LEFT JOIN meeting_artifacts resp
               ON resp.meeting_id = req.meeting_id
              AND resp.artifact_type = 'stage1_responses_json'
              AND resp.artifact_version = %s
             WHERE req.artifact_type = 'stage1_requests_jsonl'
+              AND m.source_type = 'jitsi'
               AND req.artifact_version = %s
               AND resp.artifact_id IS NULL
             ORDER BY req.created_at DESC, req.meeting_id DESC

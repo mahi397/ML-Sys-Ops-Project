@@ -377,6 +377,42 @@ def mark_task_succeeded(
         raise
 
 
+def mark_task_cancelled(
+    conn,
+    *,
+    lease: WorkflowTaskLease,
+    worker_id: str,
+    error_summary: str | None = None,
+) -> None:
+    try:
+        _finish_attempt(
+            conn,
+            attempt_id=lease.attempt_id,
+            outcome=TASK_STATUS_CANCELLED,
+            error_summary=error_summary,
+            stderr_tail=None,
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE workflow_tasks
+                SET status = 'cancelled',
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    heartbeat_at = NULL,
+                    last_error = %s,
+                    updated_at = NOW()
+                WHERE task_id = %s
+                  AND locked_by = %s
+                """,
+                (error_summary, lease.task_id, worker_id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def compute_retry_delay_seconds(
     *,
     attempt_count: int,

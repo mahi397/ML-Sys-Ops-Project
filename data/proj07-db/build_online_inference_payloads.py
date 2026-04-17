@@ -354,6 +354,20 @@ def build_stage2_inputs(
     return rows
 
 
+def fetch_meeting_source_type(conn, meeting_id: str) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT source_type
+            FROM meetings
+            WHERE meeting_id = %s
+            """,
+            (meeting_id,),
+        )
+        row = cur.fetchone()
+    return None if row is None else row["source_type"]
+
+
 def main() -> None:
     args = parse_args()
     if not (0 <= args.transition_index < args.window_size):
@@ -362,6 +376,13 @@ def main() -> None:
     logger = setup_logger(args.log_file)
     conn = get_conn()
     try:
+        source_type = fetch_meeting_source_type(conn, args.meeting_id)
+        if source_type != "jitsi":
+            raise RuntimeError(
+                f"build_online_inference_payloads only supports jitsi meetings; "
+                f"meeting_id={args.meeting_id} source_type={source_type}"
+            )
+
         source_rows = fetch_source_utterances(conn, [args.meeting_id])
         if not source_rows:
             raise RuntimeError(f"No utterances found for meeting {args.meeting_id}")

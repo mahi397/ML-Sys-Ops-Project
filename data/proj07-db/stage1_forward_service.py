@@ -29,6 +29,7 @@ from workflow_task_common import (  # noqa: E402
     claim_next_workflow_task,
     ensure_workflow_schema,
     make_worker_id,
+    mark_task_cancelled,
     mark_task_retry,
     mark_task_succeeded,
 )
@@ -190,6 +191,21 @@ class Stage1ForwardService:
             if lease is None:
                 return False
 
+            source_type = self.fetch_meeting_source_type(conn, lease.meeting_id)
+            if source_type != "jitsi":
+                self.logger.info(
+                    "Cancelling non-Jitsi Stage 1 forward task | meeting_id=%s | source_type=%s",
+                    lease.meeting_id,
+                    source_type,
+                )
+                mark_task_cancelled(
+                    conn,
+                    lease=lease,
+                    worker_id=self.worker_id,
+                    error_summary=f"stage1_forward is only enabled for jitsi meetings (source_type={source_type})",
+                )
+                return True
+
             should_process, reason = self.should_process(
                 conn,
                 lease.meeting_id,
@@ -255,6 +271,19 @@ class Stage1ForwardService:
             return False
         finally:
             conn.close()
+
+    def fetch_meeting_source_type(self, conn, meeting_id: str) -> str | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source_type
+                FROM meetings
+                WHERE meeting_id = %s
+                """,
+                (meeting_id,),
+            )
+            row = cur.fetchone()
+        return None if row is None else row["source_type"]
 
     def should_process(
         self,
