@@ -258,11 +258,7 @@ function confirmSplit(btn, meetingId, uttIdx) {
 }
 
 function overallFeedback(meetingId, type, btn) {
-  fetch(`${API_BASE}/api/feedback`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ meeting_id: meetingId, utterance_idx: null, action: `overall_${type}` })
-  }).catch(() => {});
+  submitFeedback(meetingId, null, `overall_${type}`);
   btn.textContent = type === 'positive' ? 'Thanks!' : 'Noted — thanks';
   btn.disabled = true;
   btn.parentElement.querySelectorAll('button').forEach(b => b.disabled = true);
