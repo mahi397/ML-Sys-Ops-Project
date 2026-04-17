@@ -912,18 +912,16 @@ class RecapAPIDeployment:
             except Exception:
                 return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-            meeting_id   = body.get("meeting_id")
+            meeting_id    = body.get("meeting_id")
             utterance_idx = body.get("utterance_idx")
-            action       = body.get("action")
+            action        = body.get("action")
 
-            # Validate
             if not meeting_id:
                 return JSONResponse({"error": "meeting_id required"}, status_code=400)
             if not action:
                 return JSONResponse({"error": "action required"}, status_code=400)
 
-            # ── Overall meeting-level feedback (no utterance_idx needed) ──────
-            # Sent by "Looks good" / "Needs work" buttons in the UI
+            # Overall meeting-level feedback — no utterance_idx needed
             if isinstance(action, str) and action.startswith("overall_"):
                 correction = self.store.save_feedback(meeting_id, -1, action, -1)
                 return JSONResponse({
@@ -931,6 +929,15 @@ class RecapAPIDeployment:
                     "action": action,
                     "correction_id": correction["correction_id"]
                 })
+
+            # Boundary-level feedback — utterance_idx required
+            if utterance_idx is None:
+                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
+            if action not in ("remove_boundary", "add_boundary"):
+                return JSONResponse(
+                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
+                    status_code=400
+                )
 
             # ── Boundary-level feedback (utterance_idx required) ──────────────
             if utterance_idx is None:
