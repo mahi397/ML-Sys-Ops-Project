@@ -8,8 +8,11 @@ ENV TZ=UTC
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     apt-get update && \
-    apt-get install -y --no-install-recommends curl git build-essential cmake && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends curl git build-essential && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir cmake
+    #apt-get install -y --no-install-recommends curl git build-essential cmake && \
+    #rm -rf /var/lib/apt/lists/*
 
 COPY requirements_ray.txt .
 RUN pip install --no-cache-dir -r requirements_ray.txt
