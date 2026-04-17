@@ -13,7 +13,8 @@ COPY requirements_ray.txt .
 # torch==2.1.0 is already installed — skip reinstalling it
 RUN pip install --no-cache-dir $(grep -v '^torch==' requirements_ray.txt)
 
-RUN CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
+# Compile llama-cpp-python with CUDA support
+RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on" FORCE_CMAKE=1 \
     pip install --no-cache-dir llama-cpp-python==0.2.56 --no-binary llama-cpp-python
 
 COPY serve.py .
