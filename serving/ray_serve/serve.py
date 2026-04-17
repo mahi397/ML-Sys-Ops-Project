@@ -156,11 +156,17 @@ class RecapStore:
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BOUNDARY_THRESHOLD = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
-MODEL_PATH         = os.getenv("MODEL_PATH", "roberta-base")
-LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
+BOUNDARY_THRESHOLD    = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
+MODEL_PATH            = os.getenv("MODEL_PATH", "roberta-base")
+LLM_MODEL_PATH        = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
 DEVICE             = "cuda"  # overridden per-actor in __init__
+
+# MLflow model registry 
+MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://129.114.25.185:8000")
+MODEL_ALIAS           = os.getenv("MODEL_ALIAS", "prod1")   # switch to "fallback" to rollback
+MLFLOW_MODEL_NAME     = "jitsi-topic-segmenter"
+
 
 def _normalize_utterance(u: dict) -> dict:
     """Normalize null/None values frompipeline"""
@@ -335,15 +341,35 @@ class SegmenterDeployment:
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 
         if os.path.exists(MODEL_PATH):
-            self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
-            self.model_version = "fine-tuned"
-            print(f"[segmenter] Loaded fine-tuned model from {MODEL_PATH}")
-        else:
+            # ── Load model: MLflow registry → local path → base weights ──
+            self.model = None
+            self.model_version = "base"
+
+            # 1. Try MLflow registry first
+            if MLFLOW_TRACKING_URI:
+                try:
+                    import mlflow.pytorch
+                    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+                    mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
+                    self.model = mlflow.pytorch.load_model(mlflow_uri)
+                    self.model_version = f"mlflow@{MODEL_ALIAS}"
+                    print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
+                except Exception as e:
+                    print(f"[segmenter] MLflow load failed ({e}), falling back to local path")
+
+            # 2. Fall back to local fine-tuned weights
+            if self.model is None and os.path.exists(MODEL_PATH):
+                self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
+            self.model_version = "local-fine-tuned"
+            print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
+
+        # 3. Last resort — base weights (no fine-tuning)
+        if self.model is None:
             self.model = RobertaForSequenceClassification.from_pretrained(
                 "roberta-base", num_labels=2
             )
             self.model_version = "base"
-            print(f"[segmenter] WARNING: No model at {MODEL_PATH}, using base weights")
+            print(f"[segmenter] WARNING: Using base roberta weights (no fine-tuning)")
 
         self.model.to(self.device)
         self.model.eval()
@@ -354,7 +380,8 @@ class SegmenterDeployment:
              "model_name": "roberta_segmenter",
             "model_version": self.model_version
         })
-        print(f"[segmenter] Ready on {self.device}, threshold={self.threshold}")
+        print(f"[segmenter] Ready on {self.device}, version={self.model_version}, threshold={self.threshold}")
+
 
     @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)
     async def batch_predict(self, requests: list) -> list:
