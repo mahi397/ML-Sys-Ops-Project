@@ -101,14 +101,14 @@ class RecapStore:
     def get_utterances(self, meeting_id: str) -> list:
         if not _UTTERANCES_FILE.exists():
             return []
-        rows = []
+        seen = {}  # deduplicate by utterance_idx — last write wins
         with self._lock:
             with open(_UTTERANCES_FILE) as f:
                 for line in f:
                     rec = json.loads(line.strip())
                     if rec["meeting_id"] == meeting_id:
-                        rows.append(rec)
-        return sorted(rows, key=lambda r: r["utterance_idx"])
+                        seen[rec["utterance_idx"]] = rec
+        return sorted(seen.values(), key=lambda r: r["utterance_idx"])
 
     # ── Feedback corrections ─────────────────────────────────────────
 
@@ -360,16 +360,16 @@ class SegmenterDeployment:
             # 2. Fall back to local fine-tuned weights
             if self.model is None and os.path.exists(MODEL_PATH):
                 self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
-            self.model_version = "local-fine-tuned"
-            print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
+                self.model_version = "local-fine-tuned"
+                print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
 
         # 3. Last resort — base weights (no fine-tuning)
-        if self.model is None:
-            self.model = RobertaForSequenceClassification.from_pretrained(
-                "roberta-base", num_labels=2
+            if self.model is None:
+                self.model = RobertaForSequenceClassification.from_pretrained(
+                  "roberta-base", num_labels=2
             )
-            self.model_version = "base"
-            print(f"[segmenter] WARNING: Using base roberta weights (no fine-tuning)")
+                self.model_version = "base"
+                print(f"[segmenter] WARNING: Using base roberta weights (no fine-tuning)")
 
         self.model.to(self.device)
         self.model.eval()
@@ -977,6 +977,24 @@ class RecapAPIDeployment:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# RECAP UI — serves recap_ui.html at /ui?meeting_id=<id>
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="recap_ui", num_replicas=1)
+class RecapUIDeployment:
+    def __init__(self):
+        ui_path = Path(__file__).parent / "recap_ui.html"
+        if ui_path.exists():
+            self._html = ui_path.read_text()
+            print(f"[recap_ui] Loaded UI from {ui_path}")
+        else:
+            self._html = "<h1>recap_ui.html not found</h1>"
+            print(f"[recap_ui] WARNING: {ui_path} not found")
+
+    async def __call__(self, request: Request) -> Response:
+        return Response(content=self._html, media_type="text/html")
+    
+# ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1026,7 +1044,8 @@ segmenter  = SegmenterDeployment.bind()   # 0.3 GPU
 summarizer = SummarizerDeployment.bind()  # 0.7 GPU  (total = 1.0)
 health     = HealthDeployment.bind()
 recap      = RecapPipelineDeployment.bind()
-recap_api  = RecapAPIDeployment.bind() 
+recap_api  = RecapAPIDeployment.bind()
+recap_ui   = RecapUIDeployment.bind()
 
 #serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 # HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.86.194:8000/recap'))
@@ -1054,6 +1073,7 @@ serve.run(summarizer, name="summarizer", route_prefix="/summarize")
 #serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap_api,  name="recap_api",  route_prefix="/api")
+serve.run(recap_ui,   name="recap_ui",   route_prefix="/ui")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
