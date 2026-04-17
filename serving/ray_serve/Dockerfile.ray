@@ -21,6 +21,7 @@ COPY serve.py .
 COPY metrics_server.py .
 COPY benchmark_ray.py .
 COPY storage.py .
+COPY recap_ui.html .        
 
 EXPOSE 8000 8265
 
