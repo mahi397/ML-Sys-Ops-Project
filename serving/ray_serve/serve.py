@@ -425,6 +425,9 @@ class SegmenterDeployment:
                 # Attach request_id back to each result
                 for i, res in enumerate(results):
                     res["request_id"] = reqs[i].get("request_id", f"t{i}")
+                    meta = reqs[i].get("metadata", {})
+                    res["left_model_index"]  = meta.get("left_model_index")
+                    res["right_model_index"] = meta.get("right_model_index")
                 self.metrics.record.remote({
                     "endpoint": "segment", "status": "success",
                     "latency": latency, "batch_size": len(reqs)
