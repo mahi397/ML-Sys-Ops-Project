@@ -48,8 +48,14 @@ STAGE1_OUTPUT_ROOT = Path(
 )
 STAGE1_WINDOW_SIZE = int(os.getenv("JITSI_STAGE1_WINDOW_SIZE", "7"))
 STAGE1_TRANSITION_INDEX = int(os.getenv("JITSI_STAGE1_TRANSITION_INDEX", "3"))
-STAGE1_MIN_UTTERANCE_CHARS = int(os.getenv("JITSI_STAGE1_MIN_UTTERANCE_CHARS", "1"))
+STAGE1_MIN_UTTERANCE_CHARS = int(os.getenv("JITSI_STAGE1_MIN_UTTERANCE_CHARS", "20"))
 STAGE1_MAX_WORDS_PER_UTTERANCE = int(os.getenv("JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE", "50"))
+STAGE1_MIN_INFERENCE_UTTERANCES = int(
+    os.getenv("JITSI_STAGE1_MIN_INFERENCE_UTTERANCES", "2")
+)
+STAGE1_SHORT_MEETING_MAX_UTTERANCES = int(
+    os.getenv("JITSI_STAGE1_SHORT_MEETING_MAX_UTTERANCES", "6")
+)
 UPLOAD_STAGE1_ARTIFACTS = env_flag("JITSI_UPLOAD_STAGE1_ARTIFACTS", True)
 STAGE1_OBJECT_PREFIX = os.getenv(
     "JITSI_STAGE1_OBJECT_PREFIX",
@@ -152,6 +158,10 @@ def run_ingester(
                 str(STAGE1_MIN_UTTERANCE_CHARS),
                 "--stage1-max-words-per-utterance",
                 str(STAGE1_MAX_WORDS_PER_UTTERANCE),
+                "--stage1-min-inference-utterances",
+                str(STAGE1_MIN_INFERENCE_UTTERANCES),
+                "--stage1-short-meeting-max-utterances",
+                str(STAGE1_SHORT_MEETING_MAX_UTTERANCES),
             ]
         )
         if UPLOAD_STAGE1_ARTIFACTS:
@@ -197,6 +207,11 @@ async def startup_event() -> None:
             STAGE1_MAX_WORDS_PER_UTTERANCE,
             UPLOAD_STAGE1_ARTIFACTS,
             STAGE1_OBJECT_PREFIX,
+        )
+        logger.info(
+            "Stage 1 gating | min_inference_utterances=%s short_meeting_max_utterances=%s",
+            STAGE1_MIN_INFERENCE_UTTERANCES,
+            STAGE1_SHORT_MEETING_MAX_UTTERANCES,
         )
 
     if not INGEST_SCRIPT.exists():

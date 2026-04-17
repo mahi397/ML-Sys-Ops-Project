@@ -90,8 +90,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stage1-window-size", type=int, default=7)
     parser.add_argument("--stage1-transition-index", type=int, default=3)
-    parser.add_argument("--stage1-min-utterance-chars", type=int, default=1)
+    parser.add_argument("--stage1-min-utterance-chars", type=int, default=20)
     parser.add_argument("--stage1-max-words-per-utterance", type=int, default=50)
+    parser.add_argument("--stage1-min-inference-utterances", type=int, default=2)
+    parser.add_argument("--stage1-short-meeting-max-utterances", type=int, default=6)
     parser.add_argument(
         "--upload-stage1-artifacts",
         action="store_true",
@@ -783,6 +785,10 @@ def run_stage1_payload_builder(
         str(args.stage1_min_utterance_chars),
         "--max-words-per-utterance",
         str(args.stage1_max_words_per_utterance),
+        "--min-inference-utterances",
+        str(args.stage1_min_inference_utterances),
+        "--short-meeting-max-utterances",
+        str(args.stage1_short_meeting_max_utterances),
         "--output-root",
         str(args.stage1_output_root),
         "--version",

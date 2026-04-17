@@ -46,8 +46,10 @@ services:
       JITSI_STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
       JITSI_STAGE1_WINDOW_SIZE: ${JITSI_STAGE1_WINDOW_SIZE:-7}
       JITSI_STAGE1_TRANSITION_INDEX: ${JITSI_STAGE1_TRANSITION_INDEX:-3}
-      JITSI_STAGE1_MIN_UTTERANCE_CHARS: ${JITSI_STAGE1_MIN_UTTERANCE_CHARS:-1}
+      JITSI_STAGE1_MIN_UTTERANCE_CHARS: ${JITSI_STAGE1_MIN_UTTERANCE_CHARS:-20}
       JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE: ${JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE:-50}
+      JITSI_STAGE1_MIN_INFERENCE_UTTERANCES: ${JITSI_STAGE1_MIN_INFERENCE_UTTERANCES:-2}
+      JITSI_STAGE1_SHORT_MEETING_MAX_UTTERANCES: ${JITSI_STAGE1_SHORT_MEETING_MAX_UTTERANCES:-6}
       JITSI_UPLOAD_STAGE1_ARTIFACTS: ${JITSI_UPLOAD_STAGE1_ARTIFACTS:-true}
       JITSI_STAGE1_OBJECT_PREFIX: ${JITSI_STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
       RCLONE_CONFIG: /config/rclone/rclone.conf
@@ -78,22 +80,83 @@ services:
       DB_TASK_FULL_SCAN_INTERVAL_SECONDS: ${DB_TASK_FULL_SCAN_INTERVAL_SECONDS:-300}
       DB_TASK_BATCH_SIZE: ${DB_TASK_BATCH_SIZE:-25}
       DB_TASK_FULL_SCAN_LIMIT: ${DB_TASK_FULL_SCAN_LIMIT:-0}
-      DB_TASK_FAILURE_COOLDOWN_SECONDS: ${DB_TASK_FAILURE_COOLDOWN_SECONDS:-60}
-      DB_TASK_STAGE1_ENABLED: ${DB_TASK_STAGE1_ENABLED:-true}
+      DB_TASK_STAGE1_BUILD_ENABLED: ${DB_TASK_STAGE1_BUILD_ENABLED:-true}
+      DB_TASK_STAGE1_FORWARD_ENABLED: ${DB_TASK_STAGE1_FORWARD_ENABLED:-true}
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE1_BUILD_MAX_ATTEMPTS: ${STAGE1_BUILD_MAX_ATTEMPTS:-8}
+      STAGE1_FORWARD_MAX_ATTEMPTS: ${STAGE1_FORWARD_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_STALE_AFTER_SECONDS: ${WORKFLOW_TASK_STALE_AFTER_SECONDS:-600}
+    command: ["python", "/app/db_task_worker.py"]
+    volumes:
+      - /mnt/block/ingest_logs/db_task_worker:/mnt/block/ingest_logs/db_task_worker
+
+  stage1_payload_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stage1_payload_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      STAGE1_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_payload_service
+      STAGE1_BUILD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE1_BUILD_WORKER_POLL_INTERVAL_SECONDS:-5}
       STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
       STAGE1_WINDOW_SIZE: ${STAGE1_WINDOW_SIZE:-7}
       STAGE1_TRANSITION_INDEX: ${STAGE1_TRANSITION_INDEX:-3}
-      STAGE1_MIN_UTTERANCE_CHARS: ${STAGE1_MIN_UTTERANCE_CHARS:-1}
+      STAGE1_MIN_UTTERANCE_CHARS: ${STAGE1_MIN_UTTERANCE_CHARS:-20}
       STAGE1_MAX_WORDS_PER_UTTERANCE: ${STAGE1_MAX_WORDS_PER_UTTERANCE:-50}
+      STAGE1_MIN_INFERENCE_UTTERANCES: ${STAGE1_MIN_INFERENCE_UTTERANCES:-2}
+      STAGE1_SHORT_MEETING_MAX_UTTERANCES: ${STAGE1_SHORT_MEETING_MAX_UTTERANCES:-6}
       STAGE1_UPLOAD_ARTIFACTS: ${STAGE1_UPLOAD_ARTIFACTS:-true}
       STAGE1_OBJECT_PREFIX: ${STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
       STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
       STAGE1_BUILD_TIMEOUT_SECONDS: ${STAGE1_BUILD_TIMEOUT_SECONDS:-300}
+      STAGE1_FORWARD_MAX_ATTEMPTS: ${STAGE1_FORWARD_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
       BUCKET: ${BUCKET:-objstore-proj07}
-    command: ["python", "/app/db_task_worker.py"]
+    command: ["python", "/app/stage1_payload_service.py"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
-      - /mnt/block/ingest_logs/db_task_worker:/mnt/block/ingest_logs/db_task_worker
+      - /mnt/block/ingest_logs/stage1_payload_service:/mnt/block/ingest_logs/stage1_payload_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+
+  stage1_forward_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stage1_forward_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      STAGE1_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_forward_service
+      STAGE1_FORWARD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE1_FORWARD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      STAGE1_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage1
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE1_FORWARD_URL: ${STAGE1_FORWARD_URL:-http://192.5.86.194:8000/segment}
+      STAGE1_FORWARD_PAYLOAD_FORMAT: ${STAGE1_FORWARD_PAYLOAD_FORMAT:-requests_json}
+      STAGE1_FORWARD_TIMEOUT_SECONDS: ${STAGE1_FORWARD_TIMEOUT_SECONDS:-300}
+      STAGE1_RESPONSE_PREFIX: ${STAGE1_RESPONSE_PREFIX:-production/inference_responses/stage1}
+      STAGE1_FORWARD_UPLOAD_ARTIFACTS: ${STAGE1_FORWARD_UPLOAD_ARTIFACTS:-true}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "/app/stage1_forward_service.py"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/user-behaviour/inference_responses/stage1:/mnt/block/user-behaviour/inference_responses/stage1
+      - /mnt/block/ingest_logs/stage1_forward_service:/mnt/block/ingest_logs/stage1_forward_service
       - ${HOME}/.config/rclone:/config/rclone:ro
