@@ -8,7 +8,14 @@ ENV TZ=UTC
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     apt-get update && \
-    apt-get install -y --no-install-recommends curl git build-essential && \
+    apt-get install -y --no-install-recommends \
+        libcurl4 \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        liberror-perl \
+        curl \
+        git \
+        build-essential && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir cmake
     #apt-get install -y --no-install-recommends curl git build-essential cmake && \

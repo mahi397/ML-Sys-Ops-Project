@@ -162,10 +162,27 @@ LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
 DEVICE             = "cuda"  # overridden per-actor in __init__
 
+def _normalize_utterance(u: dict) -> dict:
+    """Normalize null/None values frompipeline"""
+    return {
+        "position": u.get("position", 0),
+        "speaker":  u.get("speaker") or "",
+        "t_start":  u.get("t_start") or 0.0,
+        "t_end":    u.get("t_end")   or 0.0,
+        "text":     u.get("text")    or "",
+    }
 
 def format_window_for_roberta(window: list) -> str:
-    sorted_window = sorted(window, key=lambda u: u["position"])
-    return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
+    """skip empty text utterances"""
+    parts = []
+    for u in sorted(window, key=lambda u: u["position"]):
+        text = (u.get("text") or "").strip()
+        speaker = u.get("speaker") or ""
+        if text:  # skip padding/empty utterances — matches training code
+            parts.append(f"[SPEAKER_{speaker}]: {text}")
+    return " ".join(parts)
+    #sorted_window = sorted(window, key=lambda u: u["position"])
+    #return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -341,13 +358,16 @@ class SegmenterDeployment:
         texts = []
         metadata = []
         for req in requests:
-            texts.append(format_window_for_roberta(req["window"]))
+            # Normalize null values from pipeline
+            window = [_normalize_utterance(u) for u in req["window"]]
+            texts.append(format_window_for_roberta(window))
+            #texts.append(format_window_for_roberta(req["window"]))
             ti = req["transition_index"]
             metadata.append({
                 "meeting_id": req["meeting_id"],
                 "transition_index": ti,
                 "meeting_offset_seconds": req["meeting_offset_seconds"],
-                "t_boundary": req["window"][ti]["t_end"]
+                "t_boundary": window[ti]["t_end"]
             })
 
         inputs = self.tokenizer(
@@ -580,26 +600,50 @@ class RecapPipelineDeployment:
         return segments
     
     def _validate(self, meeting_id: str, utterances: list):
-        """Robustness: validate input and return (warnings, error_response)."""
+        """Validate input matching training assumptions exactly
+
+        Rules (from training_assumptions.pdf):
+          - 0 utterances OR all under 20 chars → reject 400
+          - < 2 utterances → reject 400 "meeting too short for inference"
+          - 2–6 utterances → allow, flag "short meeting, low confidence"
+          - 7+ utterances → fully valid, no flag
+        """
         if not utterances:
             return None, JSONResponse(
                 {"error": "Empty transcript — no utterances provided"},
                 status_code=400
             )
-        for i, u in enumerate(utterances):
-            for field in ["speaker", "text", "t_start", "t_end"]:
-                if field not in u:
-                    return None, JSONResponse(
-                        {"error": f"Utterance {i} missing required field '{field}'"},
-                        status_code=400
-                    )
+        # Filter out utterances under 20 chars after cleaning (matches training MIN_CHARS=20)
+        import re
+        FILLER_RE = re.compile(r"\b(uh+|um+|i mean|you know|like)\b", re.IGNORECASE)
+        def clean_text(t):
+            t = (t or "").lower()
+            t = FILLER_RE.sub("", t)
+            return re.sub(r"\s+", " ", t).strip()
+
+        valid = [u for u in utterances if len(clean_text(u.get("text", ""))) >= 20]
+
+        if len(valid) == 0:
+            return None, JSONResponse(
+                {"error": f"All utterances under 20 chars after cleaning - skipping inference for {meeting_id}"},
+                status_code=400
+            )
+
+        if len(valid) < 2:
+            return None, JSONResponse(
+                {"error": f"meeting too short for inference - need at least 2 valid utterances, got {len(valid)}"},
+                status_code=400
+            )
+
+        # Replace utterances list in-place with cleaned valid ones
+        utterances[:] = valid
         warnings = []
-        if len(utterances) == 1:
-            # Single utterance — can't segment, treat as one segment
-            warnings.append("single_utterance: returning as one segment without segmentation")
-        speakers = set(u["speaker"] for u in utterances)
+        if len(utterances) < 7:
+            warnings.append(f"short_meeting_low_confidence: only {len(utterances)} utterances, segmentation may be unreliable")
+
+        speakers = set(u.get("speaker") or "" for u in utterances)
         if len(speakers) == 1:
-            warnings.append(f"single_speaker: all utterances from speaker '{next(iter(speakers))}'")
+            warnings.append(f"single_speaker: all utterances from one speaker, boundaries based on content only")
         duration = utterances[-1]["t_end"] - utterances[0]["t_start"]
         if duration < 10:
             warnings.append(f"very_short_meeting: duration {duration:.1f}s < 10s")
