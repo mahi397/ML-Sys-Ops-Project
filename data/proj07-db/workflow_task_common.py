@@ -31,6 +31,8 @@ TASK_RETRYABLE_STATUSES = (
     TASK_STATUS_RETRY_SCHEDULED,
 )
 
+WORKFLOW_SCHEMA_LOCK_ID = 4_187_224_031_091_337_221
+
 
 WORKFLOW_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS workflow_tasks (
@@ -111,9 +113,21 @@ class WorkflowTaskLease:
 
 
 def ensure_workflow_schema(conn) -> None:
-    with conn.cursor() as cur:
-        cur.execute(WORKFLOW_SCHEMA_SQL)
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (WORKFLOW_SCHEMA_LOCK_ID,))
+            cur.execute(WORKFLOW_SCHEMA_SQL)
+            cur.execute("SELECT pg_advisory_unlock(%s)", (WORKFLOW_SCHEMA_LOCK_ID,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (WORKFLOW_SCHEMA_LOCK_ID,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        raise
 
 
 def make_worker_id(app_name: str) -> str:
