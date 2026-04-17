@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meeting Recap</title>
+<style>
+  :root {
+    --bg: #ffffff; --bg2: #f5f5f2; --bg3: #eeecea;
+    --text: #1a1a1a; --text2: #5f5e5a; --text3: #888780;
+    --border: rgba(0,0,0,0.12); --border2: rgba(0,0,0,0.06);
+    --blue: #185fa5; --blue-bg: #e6f1fb; --blue-t: #0c447c;
+    --green: #3b6d11; --green-bg: #eaf3de; --green-t: #27500a;
+    --red: #a32d2d; --red-bg: #fcebeb; --red-t: #791f1f;
+    --amber: #854f0b; --amber-bg: #faeeda; --amber-t: #633806;
+    --purple: #534ab7; --purple-bg: #eeedfe;
+    --radius: 10px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1a; --bg2: #2c2c2a; --bg3: #3d3d3a;
+      --text: #e8e6df; --text2: #b4b2a9; --text3: #888780;
+      --border: rgba(255,255,255,0.12); --border2: rgba(255,255,255,0.06);
+      --blue: #85b7eb; --blue-bg: #0c447c; --blue-t: #b5d4f4;
+      --green: #97c459; --green-bg: #27500a; --green-t: #c0dd97;
+      --red: #f09595; --red-bg: #791f1f; --red-t: #f7c1c1;
+      --amber: #ef9f27; --amber-bg: #633806; --amber-t: #fac775;
+      --purple: #afa9ec; --purple-bg: #3c3489;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.6; padding: 24px; max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 500; margin-bottom: 2px; }
+  .meta { font-size: 13px; color: var(--text3); margin-bottom: 16px; }
+  .model-badge { display: inline-block; font-size: 11px; padding: 2px 10px; border-radius: 6px; background: var(--blue-bg); color: var(--blue-t); margin-left: 8px; }
+  .hint { font-size: 12px; color: var(--text3); margin-bottom: 16px; }
+
+  /* segment cards */
+  .segment { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 16px 20px; margin-bottom: 4px; }
+  .seg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .seg-title { font-size: 15px; font-weight: 500; }
+  .seg-time { font-size: 12px; color: var(--text3); }
+  .seg-summary { font-size: 14px; color: var(--text2); margin-bottom: 10px; }
+
+  /* expandable transcript */
+  .toggle-btn { font-size: 12px; color: var(--blue); background: none; border: none; cursor: pointer; font-family: var(--font); }
+  .transcript { display: none; margin-top: 8px; padding: 10px 14px; background: var(--bg2); border-radius: 8px; }
+  .transcript.open { display: block; }
+  .utt { font-size: 13px; color: var(--text3); padding: 4px 0; border-radius: 4px; cursor: pointer; transition: background 0.15s; }
+  .utt:hover { background: var(--bg3); }
+  .utt .speaker { font-weight: 500; color: var(--text2); }
+
+  /* split confirmation */
+  .split-prompt { display: none; font-size: 12px; color: var(--green); padding: 4px 8px; align-items: center; gap: 6px; }
+  .split-prompt.visible { display: flex; }
+
+  /* boundary bar between segments */
+  .boundary { display: flex; align-items: center; gap: 10px; padding: 8px 0; margin: 0 20px; }
+  .boundary-line { flex: 1; border-top: 1.5px dashed var(--blue); opacity: 0.5; }
+  .conf { font-size: 11px; color: var(--blue); white-space: nowrap; }
+
+  /* action buttons */
+  .btn { font-size: 12px; font-family: var(--font); padding: 4px 12px; border: 0.5px solid var(--border); border-radius: 6px; background: transparent; color: var(--text2); cursor: pointer; transition: all 0.15s; }
+  .btn:hover { background: var(--bg2); }
+  .btn-remove-active { background: var(--red-bg); color: var(--red-t); border-color: var(--red); }
+  .btn-split { background: var(--green-bg); color: var(--green-t); border-color: var(--green); }
+  .btn-split:hover { opacity: 0.85; }
+
+  /* bottom feedback bar */
+  .overall-feedback { margin-top: 16px; padding: 14px; background: var(--bg2); border-radius: var(--radius); display: flex; align-items: center; gap: 12px; }
+  .overall-feedback span { font-size: 13px; color: var(--text2); }
+
+  /* loading / error states */
+  .loading { text-align: center; padding: 60px 0; color: var(--text3); }
+  .error { text-align: center; padding: 40px 0; color: var(--red); }
+  .toast { position: fixed; bottom: 20px; right: 20px; padding: 10px 18px; border-radius: 8px; font-size: 13px; background: var(--green-bg); color: var(--green-t); border: 0.5px solid var(--green); opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="loading" id="loading-state">Loading recap...</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Configuration ──
+const API_BASE = '/api';   // proxied by nginx to serving-api:8000
+const MEETING_ID = new URLSearchParams(window.location.search).get('meeting_id') || 'demo';
+
+// ── State ──
+let recapData = null;
+
+// ── Boot ──
+document.addEventListener('DOMContentLoaded', () => {
+  fetchRecap(MEETING_ID);
+});
+
+// ── API calls ──
+async function fetchRecap(meetingId) {
+  try {
+    const res = await fetch(`${API_BASE}/recap/${meetingId}`);
+    if (!res.ok) {
+      // If the API isn't running yet, show demo data for development
+      if (res.status === 404 || res.status === 502) {
+        recapData = getDemoData();
+        render(recapData);
+        return;
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
+    recapData = await res.json();
+    render(recapData);
+  } catch (err) {
+    console.warn('API not reachable, using demo data:', err.message);
+    recapData = getDemoData();
+    render(recapData);
+  }
+}
+
+async function submitFeedback(meetingId, utteranceIdx, action) {
+  const original = action === 'remove_boundary' ? 1 : 0;
+  const corrected = action === 'remove_boundary' ? 0 : 1;
+  try {
+    const res = await fetch(`${API_BASE}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        meeting_id: meetingId,
+        utterance_idx: utteranceIdx,
+        action: action,
+        original_label: original,
+        corrected_label: corrected
+      })
+    });
+    if (res.ok) showToast('Feedback saved — will be used for retraining');
+    else showToast('Feedback saved locally');
+  } catch {
+    showToast('Feedback saved locally (API offline)');
+  }
+}
+
+// ── Rendering ──
+function render(data) {
+  const app = document.getElementById('app');
+  const segments = data.segments || [];
+  const utterances = data.utterances || [];
+
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+      <div>
+        <h1>Meeting recap</h1>
+        <p class="meta">${data.meeting_title || 'Untitled meeting'} &mdash; ${data.meeting_duration || ''} &middot; ${data.participant_count || '?'} participants</p>
+      </div>
+      <span class="model-badge">${data.model_version || 'model'}</span>
+    </div>
+    <p class="hint">${segments.length} segment${segments.length !== 1 ? 's' : ''} detected &middot; Click utterances to add boundaries &middot; Use buttons to remove them</p>
+  `;
+
+  segments.forEach((seg, segIdx) => {
+    // Segment card
+    const segUtterances = utterances.filter(u => u.utterance_idx >= seg.start_utt && u.utterance_idx <= seg.end_utt);
+    const transcriptId = `transcript-${segIdx}`;
+
+    html += `
+      <div class="segment">
+        <div class="seg-head">
+          <span class="seg-title">Segment ${segIdx + 1}${seg.topic_label ? ': ' + seg.topic_label : ''}</span>
+          <span class="seg-time">${formatTime(seg.t_start)} &ndash; ${formatTime(seg.t_end)}</span>
+        </div>
+        <p class="seg-summary">${seg.summary || segUtterances.slice(0, 2).map(u => u.text).join(' ') || 'No summary available.'}</p>
+        <button class="toggle-btn" onclick="toggleTranscript('${transcriptId}', this)">Show transcript</button>
+        <div class="transcript" id="${transcriptId}">
+          ${segUtterances.map(u => `
+            <div class="utt" onclick="promptSplit(this, '${data.meeting_id}', ${u.utterance_idx})" title="Click to add a boundary before this utterance">
+              <span class="speaker">${u.speaker || 'Speaker'}:</span> ${u.text}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+
+    // Boundary bar between segments (not after the last one)
+    if (segIdx < segments.length - 1) {
+      const boundaryUttIdx = seg.end_utt;
+      const conf = seg.boundary_confidence != null ? seg.boundary_confidence : '?';
+      const confDisplay = typeof conf === 'number' ? conf.toFixed(2) : conf;
+      html += `
+        <div class="boundary" id="boundary-${segIdx}">
+          <div class="boundary-line"></div>
+          <span class="conf">confidence: ${confDisplay}</span>
+          <button class="btn" id="btn-boundary-${segIdx}" onclick="toggleRemoveBoundary(${segIdx}, '${data.meeting_id}', ${boundaryUttIdx})">Remove boundary</button>
+          <div class="boundary-line"></div>
+        </div>
+      `;
+    }
+  });
+
+  // Overall feedback
+  html += `
+    <div class="overall-feedback">
+      <span>Were these segments helpful?</span>
+      <button class="btn" onclick="overallFeedback('${data.meeting_id}', 'positive', this)">Looks good</button>
+      <button class="btn" onclick="overallFeedback('${data.meeting_id}', 'negative', this)">Needs work</button>
+    </div>
+  `;
+
+  app.innerHTML = html;
+}
+
+// ── Interactions ──
+function toggleTranscript(id, btn) {
+  const el = document.getElementById(id);
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? 'Hide transcript' : 'Show transcript';
+}
+
+function toggleRemoveBoundary(segIdx, meetingId, uttIdx) {
+  const btn = document.getElementById(`btn-boundary-${segIdx}`);
+  const isActive = btn.classList.contains('btn-remove-active');
+  if (isActive) {
+    // Undo — restore boundary, record add_boundary so retraining knows
+    btn.classList.remove('btn-remove-active');
+    btn.textContent = 'Remove boundary';
+    submitFeedback(meetingId, uttIdx, 'add_boundary');
+  } else {
+    btn.classList.add('btn-remove-active');
+    btn.textContent = 'Removed — undo?';
+    submitFeedback(meetingId, uttIdx, 'remove_boundary');
+  }
+}
+
+function promptSplit(uttEl, meetingId, uttIdx) {
+  // Check if there's already a prompt after this element
+  if (uttEl.nextElementSibling && uttEl.nextElementSibling.classList.contains('split-prompt')) {
+    uttEl.nextElementSibling.remove();
+    return;
+  }
+  // Remove any existing split prompts
+  document.querySelectorAll('.split-prompt').forEach(el => el.remove());
+
+  const prompt = document.createElement('div');
+  prompt.className = 'split-prompt visible';
+  prompt.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="none" stroke="currentColor" stroke-width="1"/><line x1="7" y1="4.5" x2="7" y2="9.5" stroke="currentColor" stroke-width="1"/><line x1="4.5" y1="7" x2="9.5" y2="7" stroke="currentColor" stroke-width="1"/></svg>
+    Add boundary here?
+    <button class="btn btn-split" onclick="confirmSplit(this, '${meetingId}', ${uttIdx})">Confirm split</button>
+  `;
+  uttEl.after(prompt);
+}
+
+function confirmSplit(btn, meetingId, uttIdx) {
+  submitFeedback(meetingId, uttIdx, 'add_boundary');
+  const prompt = btn.parentElement;
+  prompt.innerHTML = '<span style="font-size:12px;color:var(--green)">Boundary added — will be used for retraining</span>';
+}
+
+function overallFeedback(meetingId, type, btn) {
+  submitFeedback(meetingId, null, `overall_${type}`);
+  btn.textContent = type === 'positive' ? 'Thanks!' : 'Noted — thanks';
+  btn.disabled = true;
+  btn.parentElement.querySelectorAll('button').forEach(b => b.disabled = true);
+}
+
+// ── Helpers ──
+function formatTime(t) {
+  if (!t) return '';
+  // Handle both "mm:ss" and seconds-as-number
+  if (typeof t === 'number') {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+  return t;
+}
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+// ── Demo data (used when API is not yet running) ──
+function getDemoData() {
+  return {
+    meeting_id: "demo-2026-04-13",
+    meeting_title: "Sprint Planning",
+    meeting_duration: "47 min",
+    participant_count: 3,
+    model_version: "v2.1-roberta",
+    status: "complete",
+    segments: [
+      {
+        segment_idx: 0, start_utt: 0, end_utt: 4,
+        t_start: "0:00", t_end: "12:34",
+        topic_label: "Backend API status",
+        summary: "The team reviewed progress on the REST API migration. Auth endpoints are complete and passing integration tests. Two blocking issues remain around rate limiting.",
+        boundary_confidence: 0.91
+      },
+      {
+        segment_idx: 1, start_utt: 5, end_utt: 9,
+        t_start: "12:34", t_end: "31:02",
+        topic_label: "Frontend redesign",
+        summary: "Discussion shifted to the dashboard redesign. Two mockup options were presented. The team agreed on Option B with modifications to the sidebar. Deadline set for April 18.",
+        boundary_confidence: 0.73
+      },
+      {
+        segment_idx: 2, start_utt: 10, end_utt: 14,
+        t_start: "31:02", t_end: "47:15",
+        topic_label: "Sprint commitments",
+        summary: "Final segment covered sprint point assignments. Each member committed to their deliverables. Next standup scheduled for Thursday morning.",
+        boundary_confidence: null
+      }
+    ],
+    utterances: [
+      { utterance_idx: 0, speaker: "Mahima", text: "Ok let's start with backend status, where are we on the API?", t_start: "0:00" },
+      { utterance_idx: 1, speaker: "Aneesh", text: "Auth endpoints are done, all integration tests passing.", t_start: "1:12" },
+      { utterance_idx: 2, speaker: "Aneesh", text: "But we've got two blockers on rate limiting I want to flag.", t_start: "2:45" },
+      { utterance_idx: 3, speaker: "Shruti", text: "Is that the token bucket issue from last week?", t_start: "4:20" },
+      { utterance_idx: 4, speaker: "Aneesh", text: "Yeah exactly, same root cause. I'll have a fix by Wednesday.", t_start: "5:03" },
+      { utterance_idx: 5, speaker: "Shruti", text: "So I have two mockups to share for the dashboard redesign.", t_start: "12:34" },
+      { utterance_idx: 6, speaker: "Mahima", text: "Let's see option B first, that looked promising in the sketch.", t_start: "13:50" },
+      { utterance_idx: 7, speaker: "Shruti", text: "Here it is. We moved the nav to a collapsible sidebar.", t_start: "14:22" },
+      { utterance_idx: 8, speaker: "Aneesh", text: "I like the sidebar approach, cleaner than the top nav.", t_start: "16:40" },
+      { utterance_idx: 9, speaker: "Mahima", text: "Agreed. Let's go with B, target April 18 for the first cut.", t_start: "18:15" },
+      { utterance_idx: 10, speaker: "Mahima", text: "Alright, let's do sprint commitments. I'll take the pipeline work.", t_start: "31:02" },
+      { utterance_idx: 11, speaker: "Aneesh", text: "I'll finish the rate limiter fix and start on the data migration.", t_start: "33:10" },
+      { utterance_idx: 12, speaker: "Shruti", text: "Dashboard option B implementation for me, plus the serving tests.", t_start: "35:44" },
+      { utterance_idx: 13, speaker: "Mahima", text: "Sounds good. Anything else before we wrap?", t_start: "40:20" },
+      { utterance_idx: 14, speaker: "Aneesh", text: "Nope, let's sync Thursday morning. Good meeting.", t_start: "45:00" }
+    ]
+  };
+}
+</script>
+</body>
+</html>

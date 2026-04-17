@@ -101,14 +101,14 @@ class RecapStore:
     def get_utterances(self, meeting_id: str) -> list:
         if not _UTTERANCES_FILE.exists():
             return []
-        rows = []
+        seen = {}  # deduplicate by utterance_idx — last write wins
         with self._lock:
             with open(_UTTERANCES_FILE) as f:
                 for line in f:
                     rec = json.loads(line.strip())
                     if rec["meeting_id"] == meeting_id:
-                        rows.append(rec)
-        return sorted(rows, key=lambda r: r["utterance_idx"])
+                        seen[rec["utterance_idx"]] = rec
+        return sorted(seen.values(), key=lambda r: r["utterance_idx"])
 
     # ── Feedback corrections ─────────────────────────────────────────
 
@@ -156,16 +156,39 @@ class RecapStore:
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BOUNDARY_THRESHOLD = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
-MODEL_PATH         = os.getenv("MODEL_PATH", "roberta-base")
-LLM_MODEL_PATH     = os.getenv("LLM_MODEL_PATH", "")
+BOUNDARY_THRESHOLD    = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
+MODEL_PATH            = os.getenv("MODEL_PATH", "roberta-base")
+LLM_MODEL_PATH        = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
 DEVICE             = "cuda"  # overridden per-actor in __init__
 
+# MLflow model registry 
+MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://129.114.25.185:8000")
+MODEL_ALIAS           = os.getenv("MODEL_ALIAS", "prod1")   # switch to "fallback" to rollback
+MLFLOW_MODEL_NAME     = "jitsi-topic-segmenter"
+
+
+def _normalize_utterance(u: dict) -> dict:
+    """Normalize null/None values frompipeline"""
+    return {
+        "position": u.get("position", 0),
+        "speaker":  u.get("speaker") or "",
+        "t_start":  u.get("t_start") or 0.0,
+        "t_end":    u.get("t_end")   or 0.0,
+        "text":     u.get("text")    or "",
+    }
 
 def format_window_for_roberta(window: list) -> str:
-    sorted_window = sorted(window, key=lambda u: u["position"])
-    return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
+    """skip empty text utterances"""
+    parts = []
+    for u in sorted(window, key=lambda u: u["position"]):
+        text = (u.get("text") or "").strip()
+        speaker = u.get("speaker") or ""
+        if text:  # skip padding/empty utterances — matches training code
+            parts.append(f"[SPEAKER_{speaker}]: {text}")
+    return " ".join(parts)
+    #sorted_window = sorted(window, key=lambda u: u["position"])
+    #return " ".join(f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in sorted_window)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -227,7 +250,7 @@ class MetricsDeployment:
         )
         self.model_loaded = Gauge(
             'jitsi_model_loaded', 'Model loaded',
-            ['model_name'], registry=self.registry
+            ['model_name', 'model_version'], registry=self.registry
         )
         self.sla_violations = Counter(
             'jitsi_sla_violations_total', 'SLA violations',
@@ -283,9 +306,11 @@ class MetricsDeployment:
                 endpoint=endpoint, sla_type=data["sla_violation"]
             ).inc()
         if "model_loaded" in data:
-            self.model_loaded.labels(model_name=data["model_name"]).set(
-                1 if data["model_loaded"] else 0
-            )
+            self.model_loaded.labels(
+                model_name=data["model_name"],
+                model_version=data.get("model_version", "unknown")
+            ).set(1 if data["model_loaded"] else 0)
+
         if "recap_duration" in data:
             self.recap_duration.observe(data["recap_duration"])
         if "recap_segments" in data:
@@ -315,14 +340,35 @@ class SegmenterDeployment:
         self.threshold = BOUNDARY_THRESHOLD
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 
-        if os.path.exists(MODEL_PATH):
+                # ── Load model: MLflow registry → local path → base weights ──
+        self.model = None
+        self.model_version = "base"
+
+        # 1. Try MLflow registry first (Mahima's trained model)
+        if MLFLOW_TRACKING_URI:
+            try:
+                import mlflow.pytorch
+                mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+                mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
+                self.model = mlflow.pytorch.load_model(mlflow_uri)
+                self.model_version = f"mlflow@{MODEL_ALIAS}"
+                print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
+            except Exception as e:
+                print(f"[segmenter] MLflow load failed ({e}), falling back to local path")
+
+        # 2. Fall back to local fine-tuned weights
+        if self.model is None and os.path.exists(MODEL_PATH):
             self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
-            print(f"[segmenter] Loaded fine-tuned model from {MODEL_PATH}")
-        else:
+            self.model_version = "local-fine-tuned"
+            print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
+
+        # 3. Last resort — base weights (no fine-tuning)
+        if self.model is None:
             self.model = RobertaForSequenceClassification.from_pretrained(
                 "roberta-base", num_labels=2
             )
-            print(f"[segmenter] WARNING: No model at {MODEL_PATH}, using base weights")
+            self.model_version = "base"
+            print(f"[segmenter] WARNING: Using base roberta weights (no fine-tuning)")
 
         self.model.to(self.device)
         self.model.eval()
@@ -330,9 +376,11 @@ class SegmenterDeployment:
         # Report model loaded
         self.metrics.record.remote({
             "endpoint": "segment", "model_loaded": True,
-            "model_name": "roberta_segmenter"
+             "model_name": "roberta_segmenter",
+            "model_version": self.model_version
         })
-        print(f"[segmenter] Ready on {self.device}, threshold={self.threshold}")
+        print(f"[segmenter] Ready on {self.device}, version={self.model_version}, threshold={self.threshold}")
+
 
     @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)
     async def batch_predict(self, requests: list) -> list:
@@ -341,13 +389,16 @@ class SegmenterDeployment:
         texts = []
         metadata = []
         for req in requests:
-            texts.append(format_window_for_roberta(req["window"]))
+            # Normalize null values from pipeline
+            window = [_normalize_utterance(u) for u in req["window"]]
+            texts.append(format_window_for_roberta(window))
+            #texts.append(format_window_for_roberta(req["window"]))
             ti = req["transition_index"]
             metadata.append({
                 "meeting_id": req["meeting_id"],
                 "transition_index": ti,
                 "meeting_offset_seconds": req["meeting_offset_seconds"],
-                "t_boundary": req["window"][ti]["t_end"]
+                "t_boundary": window[ti]["t_end"]
             })
 
         inputs = self.tokenizer(
@@ -385,14 +436,44 @@ class SegmenterDeployment:
         result = await self.batch_predict(body)
         return result
 
+    async def predict_batch(self, bodies: list) -> list:
+        """Run predict_single concurrently for a list of window bodies"""
+        import asyncio
+        tasks = [self.batch_predict(b) for b in bodies]
+        return await asyncio.gather(*tasks)
     
     async def __call__(self, request: Request) -> JSONResponse:
         start = time.time()
         try:
             body = await request.json()
+            # ── Batch format: {"meeting_id":..., "requests": [...]} ──
+            if "requests" in body:
+                reqs = body["requests"]
+                if not reqs:
+                    return JSONResponse({"error": "Empty requests list"}, status_code=400)
+                results = await self.predict_batch(reqs)
+                latency = time.time() - start
+                # Attach request_id back to each result
+                for i, res in enumerate(results):
+                    res["request_id"] = reqs[i].get("request_id", f"t{i}")
+                    meta = reqs[i].get("metadata", {})
+                    res["left_model_index"]  = meta.get("left_model_index")
+                    res["right_model_index"] = meta.get("right_model_index")
+                self.metrics.record.remote({
+                    "endpoint": "segment", "status": "success",
+                    "latency": latency, "batch_size": len(reqs)
+                })
+                return JSONResponse(content={
+                    "meeting_id": body.get("meeting_id"),
+                    "request_count": len(results),
+                    "results": results
+                })
+
+            # ── Single window format: {"window": [...]} ──
             if "window" not in body:
                 self.metrics.record.remote({"endpoint": "segment", "status": "error"})
-                return JSONResponse({"error": "Missing 'window'"}, status_code=400)
+                return JSONResponse({"error": "Missing 'window' or 'requests'"}, status_code=400)
+                #return JSONResponse({"error": "Missing 'window'"}, status_code=400)
 
             result = await self.predict_single(body)
             latency = time.time() - start
@@ -427,15 +508,18 @@ class SummarizerDeployment:
                 n_ctx=4096,
                 verbose=False
             )
+            llm_version = os.path.basename(LLM_MODEL_PATH).replace(".gguf", "").split(".")[-1] or "gguf"
             self.metrics.record.remote({
                 "endpoint": "summarize", "model_loaded": True,
-                "model_name": "mistral_summarizer"
+                "model_name": "mistral_summarizer",
+                "model_version": llm_version
             })
             print(f"[summarizer] LLM loaded from {LLM_MODEL_PATH}")
         else:
             self.metrics.record.remote({
                 "endpoint": "summarize", "model_loaded": False,
-                "model_name": "mistral_summarizer"
+                "model_name": "mistral_summarizer",
+                "model_version": "none"
             })
             print(f"[summarizer] No LLM at '{LLM_MODEL_PATH}' — draft mode")
 
@@ -580,26 +664,50 @@ class RecapPipelineDeployment:
         return segments
     
     def _validate(self, meeting_id: str, utterances: list):
-        """Robustness: validate input and return (warnings, error_response)."""
+        """Validate input matching training assumptions exactly
+
+        Rules (from training_assumptions.pdf):
+          - 0 utterances OR all under 20 chars → reject 400
+          - < 2 utterances → reject 400 "meeting too short for inference"
+          - 2–6 utterances → allow, flag "short meeting, low confidence"
+          - 7+ utterances → fully valid, no flag
+        """
         if not utterances:
             return None, JSONResponse(
                 {"error": "Empty transcript — no utterances provided"},
                 status_code=400
             )
-        for i, u in enumerate(utterances):
-            for field in ["speaker", "text", "t_start", "t_end"]:
-                if field not in u:
-                    return None, JSONResponse(
-                        {"error": f"Utterance {i} missing required field '{field}'"},
-                        status_code=400
-                    )
+        # Filter out utterances under 20 chars after cleaning (matches training MIN_CHARS=20)
+        import re
+        FILLER_RE = re.compile(r"\b(uh+|um+|i mean|you know|like)\b", re.IGNORECASE)
+        def clean_text(t):
+            t = (t or "").lower()
+            t = FILLER_RE.sub("", t)
+            return re.sub(r"\s+", " ", t).strip()
+
+        valid = [u for u in utterances if len(clean_text(u.get("text", ""))) >= 20]
+
+        if len(valid) == 0:
+            return None, JSONResponse(
+                {"error": f"All utterances under 20 chars after cleaning - skipping inference for {meeting_id}"},
+                status_code=400
+            )
+
+        if len(valid) < 2:
+            return None, JSONResponse(
+                {"error": f"meeting too short for inference - need at least 2 valid utterances, got {len(valid)}"},
+                status_code=400
+            )
+
+        # Replace utterances list in-place with cleaned valid ones
+        utterances[:] = valid
         warnings = []
-        if len(utterances) == 1:
-            # Single utterance — can't segment, treat as one segment
-            warnings.append("single_utterance: returning as one segment without segmentation")
-        speakers = set(u["speaker"] for u in utterances)
+        if len(utterances) < 7:
+            warnings.append(f"short_meeting_low_confidence: only {len(utterances)} utterances, segmentation may be unreliable")
+
+        speakers = set(u.get("speaker") or "" for u in utterances)
         if len(speakers) == 1:
-            warnings.append(f"single_speaker: all utterances from speaker '{next(iter(speakers))}'")
+            warnings.append(f"single_speaker: all utterances from one speaker, boundaries based on content only")
         duration = utterances[-1]["t_end"] - utterances[0]["t_start"]
         if duration < 10:
             warnings.append(f"very_short_meeting: duration {duration:.1f}s < 10s")
@@ -737,13 +845,64 @@ class RecapAPIDeployment:
                     status_code=404
                 )
             utterances = self.store.get_utterances(meeting_id)
+            # ── Transform to UI-compatible format ───────────────────
+            # Reconstruct start_utt/end_utt from stored boundary labels
+            boundary_idxs = [u["utterance_idx"] for u in utterances
+                             if u.get("predicted_label") == 1]
+            summaries = recap["segments_json"]  # Mistral outputs, ordered by segment_id
+
+            ui_segments = []
+            start_utt = 0
+            for i, seg in enumerate(summaries):
+                end_utt = boundary_idxs[i] if i < len(boundary_idxs) else (
+                    utterances[-1]["utterance_idx"] if utterances else 0
+                )
+                # boundary_confidence from the utterance at end_utt
+                conf = next(
+                    (u.get("boundary_confidence") for u in utterances
+                     if u["utterance_idx"] == end_utt),
+                    None
+                )
+                ui_segments.append({
+                    "segment_idx":        i,
+                    "start_utt":          start_utt,
+                    "end_utt":            end_utt,
+                    "t_start":            seg.get("t_start", 0),
+                    "t_end":              seg.get("t_end", 0),
+                    "topic_label":        seg.get("topic_label", ""),
+                    # join bullets into a single string for the UI
+                    "summary":            ". ".join(seg.get("summary_bullets", []))
+                                          or seg.get("topic_label", "No summary"),
+                    "boundary_confidence": conf,
+                })
+                start_utt = end_utt + 1
+
+            # Compute meeting metadata from utterances
+            speakers = list({u.get("speaker", "") for u in utterances if u.get("speaker")})
+            t_values = [u.get("t_start", 0) for u in utterances if u.get("t_start") is not None]
+            duration_secs = int(max(t_values) - min(t_values)) if len(t_values) > 1 else 0
+            duration_str = f"{duration_secs // 60} min" if duration_secs else ""
+
+            ui_utterances = [
+                {
+                    "utterance_idx": u["utterance_idx"],
+                    "speaker":       u.get("speaker", "Speaker"),
+                    "text":          u.get("text", ""),
+                    "t_start":       u.get("t_start", 0),
+                }
+                for u in utterances
+            ]
+
             return JSONResponse({
-                "recap_id": recap["recap_id"],
-                "meeting_id": meeting_id,
-                "model_version": recap["model_version"],
-                "created_at": recap["created_at"],
-                "segments": recap["segments_json"],
-                "utterances": utterances  # needed by UI to show boundary confidence
+                "recap_id":        recap["recap_id"],
+                "meeting_id":      meeting_id,
+                "meeting_title":   meeting_id,          # no title stored; use id
+                "meeting_duration": duration_str,
+                "participant_count": len(speakers),
+                "model_version":   recap["model_version"],
+                "created_at":      recap["created_at"],
+                "segments":        ui_segments,
+                "utterances":      ui_utterances,
             })
 
         # ── POST /api/feedback ───────────────────────────────────
@@ -753,18 +912,40 @@ class RecapAPIDeployment:
             except Exception:
                 return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-            meeting_id   = body.get("meeting_id")
+            meeting_id    = body.get("meeting_id")
             utterance_idx = body.get("utterance_idx")
-            action       = body.get("action")
+            action        = body.get("action")
 
-            # Validate
             if not meeting_id:
                 return JSONResponse({"error": "meeting_id required"}, status_code=400)
+            if not action:
+                return JSONResponse({"error": "action required"}, status_code=400)
+
+            # Overall meeting-level feedback — no utterance_idx needed
+            if isinstance(action, str) and action.startswith("overall_"):
+                correction = self.store.save_feedback(meeting_id, -1, action, -1)
+                return JSONResponse({
+                    "status": "recorded",
+                    "action": action,
+                    "correction_id": correction["correction_id"]
+                })
+
+            # Boundary-level feedback — utterance_idx required
             if utterance_idx is None:
                 return JSONResponse({"error": "utterance_idx required"}, status_code=400)
             if action not in ("remove_boundary", "add_boundary"):
                 return JSONResponse(
-                    {"error": "action must be 'remove_boundary' or 'add_boundary'"},
+                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
+                    status_code=400
+                )
+
+            # ── Boundary-level feedback (utterance_idx required) ──────────────
+            if utterance_idx is None:
+                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
+            if action not in ("remove_boundary", "add_boundary"):
+                return JSONResponse(
+                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
+
                     status_code=400
                 )
 
@@ -815,6 +996,24 @@ class RecapAPIDeployment:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# RECAP UI — serves recap_ui.html at /ui?meeting_id=<id>
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="recap_ui", num_replicas=1)
+class RecapUIDeployment:
+    def __init__(self):
+        ui_path = Path(__file__).parent / "recap_ui.html"
+        if ui_path.exists():
+            self._html = ui_path.read_text()
+            print(f"[recap_ui] Loaded UI from {ui_path}")
+        else:
+            self._html = "<h1>recap_ui.html not found</h1>"
+            print(f"[recap_ui] WARNING: {ui_path} not found")
+
+    async def __call__(self, request: Request) -> Response:
+        return Response(content=self._html, media_type="text/html")
+    
+# ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -864,7 +1063,8 @@ segmenter  = SegmenterDeployment.bind()   # 0.3 GPU
 summarizer = SummarizerDeployment.bind()  # 0.7 GPU  (total = 1.0)
 health     = HealthDeployment.bind()
 recap      = RecapPipelineDeployment.bind()
-recap_api  = RecapAPIDeployment.bind() 
+recap_api  = RecapAPIDeployment.bind()
+recap_ui   = RecapUIDeployment.bind()
 
 #serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 # HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.86.194:8000/recap'))
@@ -892,6 +1092,7 @@ serve.run(summarizer, name="summarizer", route_prefix="/summarize")
 #serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap_api,  name="recap_api",  route_prefix="/api")
+serve.run(recap_ui,   name="recap_ui",   route_prefix="/ui")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
