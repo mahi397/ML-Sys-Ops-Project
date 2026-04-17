@@ -20,7 +20,7 @@ groups:
           summary: "Summarization p95 > 30s"
 
       - alert: RecapLatencyHigh
-        expr: histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[5m])) > 300.0
+        expr: histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[10m])) > 300.0
         for: 2m
         labels:
           severity: critical
@@ -31,7 +31,10 @@ groups:
   - name: error_rate
     rules:
       - alert: HighErrorRate
-        expr: (rate(jitsi_requests_total{status="error"}[5m]) / rate(jitsi_requests_total[5m])) > 0.05
+        expr: >
+          (rate(jitsi_requests_total{status="error"}[5m])
+            / rate(jitsi_requests_total[5m]) > 0.05)
+          and rate(jitsi_requests_total[5m]) > 0
         for: 3m
         labels:
           severity: critical
@@ -40,7 +43,9 @@ groups:
           summary: "Error rate > 5% — trigger rollback"
 
       - alert: ServiceDown
-        expr: rate(jitsi_requests_total{status="success"}[2m]) == 0
+        expr: >
+          absent(rate(jitsi_requests_total{status="success"}[2m]))
+          or rate(jitsi_requests_total{status="success"}[2m]) == 0
         for: 2m
         labels:
           severity: critical
@@ -50,12 +55,13 @@ groups:
   - name: resources
     rules:
       - alert: GPUMemoryHigh
+        # 21504 MB = 87.5% of 24576 MB (RTX 6000 Ada 24GB)
         expr: jitsi_gpu_memory_used_mb > 21504
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "GPU memory > 90% of RTX 6000 (24GB)"
+          summary: "GPU memory > 87.5% of RTX 6000 (24GB)"
 
       - alert: CPUHigh
         expr: jitsi_cpu_utilization_percent > 85
@@ -77,9 +83,18 @@ groups:
 
       - alert: LowConfidenceScores
         expr: histogram_quantile(0.5, rate(jitsi_boundary_confidence_bucket[10m])) < 0.3
-        for: 10m
+        for: 3m
         labels:
           severity: warning
           action: investigate
         annotations:
           summary: "Median boundary confidence < 0.3 — possible data drift"
+
+      - alert: RetrainingThresholdReached
+        expr: jitsi_pending_corrections >= 500
+        for: 5m
+        labels:
+          severity: warning
+          action: retrain
+        annotations:
+          summary: "500 corrections accumulated — trigger retraining"

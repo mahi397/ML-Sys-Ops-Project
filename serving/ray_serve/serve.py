@@ -244,7 +244,7 @@ class MetricsDeployment:
         )
         self.model_loaded = Gauge(
             'jitsi_model_loaded', 'Model loaded',
-            ['model_name'], registry=self.registry
+            ['model_name', 'model_version'], registry=self.registry
         )
         self.sla_violations = Counter(
             'jitsi_sla_violations_total', 'SLA violations',
@@ -300,9 +300,11 @@ class MetricsDeployment:
                 endpoint=endpoint, sla_type=data["sla_violation"]
             ).inc()
         if "model_loaded" in data:
-            self.model_loaded.labels(model_name=data["model_name"]).set(
-                1 if data["model_loaded"] else 0
-            )
+            self.model_loaded.labels(
+                model_name=data["model_name"],
+                model_version=data.get("model_version", "unknown")
+            ).set(1 if data["model_loaded"] else 0)
+
         if "recap_duration" in data:
             self.recap_duration.observe(data["recap_duration"])
         if "recap_segments" in data:
@@ -334,11 +336,13 @@ class SegmenterDeployment:
 
         if os.path.exists(MODEL_PATH):
             self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
+            self.model_version = "fine-tuned"
             print(f"[segmenter] Loaded fine-tuned model from {MODEL_PATH}")
         else:
             self.model = RobertaForSequenceClassification.from_pretrained(
                 "roberta-base", num_labels=2
             )
+            self.model_version = "base"
             print(f"[segmenter] WARNING: No model at {MODEL_PATH}, using base weights")
 
         self.model.to(self.device)
@@ -347,7 +351,8 @@ class SegmenterDeployment:
         # Report model loaded
         self.metrics.record.remote({
             "endpoint": "segment", "model_loaded": True,
-            "model_name": "roberta_segmenter"
+             "model_name": "roberta_segmenter",
+            "model_version": self.model_version
         })
         print(f"[segmenter] Ready on {self.device}, threshold={self.threshold}")
 
@@ -477,15 +482,18 @@ class SummarizerDeployment:
                 n_ctx=4096,
                 verbose=False
             )
+            llm_version = os.path.basename(LLM_MODEL_PATH).replace(".gguf", "").split(".")[-1] or "gguf"
             self.metrics.record.remote({
                 "endpoint": "summarize", "model_loaded": True,
-                "model_name": "mistral_summarizer"
+                "model_name": "mistral_summarizer",
+                "model_version": llm_version
             })
             print(f"[summarizer] LLM loaded from {LLM_MODEL_PATH}")
         else:
             self.metrics.record.remote({
                 "endpoint": "summarize", "model_loaded": False,
-                "model_name": "mistral_summarizer"
+                "model_name": "mistral_summarizer",
+                "model_version": "none"
             })
             print(f"[summarizer] No LLM at '{LLM_MODEL_PATH}' — draft mode")
 
