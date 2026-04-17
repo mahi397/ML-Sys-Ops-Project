@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import string
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -20,8 +21,10 @@ sys.path.append(str(SCRIPT_DIR))
 # Optional project helper. If not available, fallback to DATABASE_URL.
 try:
     from feedback_common import get_conn as project_get_conn  # type: ignore
+    from feedback_common import upload_file as project_upload_file  # type: ignore
 except Exception:
     project_get_conn = None
+    project_upload_file = None
 
 
 APP_NAME = "ingest_saved_jitsi_transcript"
@@ -61,6 +64,14 @@ def parse_args() -> argparse.Namespace:
         "--local-output-root",
         type=Path,
         default=Path("/mnt/block/user-behaviour/parsed_transcripts"),
+    )
+    parser.add_argument(
+        "--raw-object-prefix",
+        default="production/jitsi/raw_transcripts",
+    )
+    parser.add_argument(
+        "--parsed-object-prefix",
+        default="production/jitsi/parsed_transcripts",
     )
     parser.add_argument(
         "--replace-existing",
@@ -110,6 +121,13 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def require_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
 def get_db_conn():
     if project_get_conn is not None:
         return project_get_conn()
@@ -133,6 +151,27 @@ def get_db_conn():
             raise RuntimeError(
                 "Failed to connect to Postgres using DATABASE_URL."
             ) from exc
+
+
+def upload_artifact(local_path: Path, object_key: str, logger: logging.Logger) -> None:
+    if project_upload_file is not None:
+        project_upload_file(local_path, object_key, logger)
+        return
+
+    remote = require_env("RCLONE_REMOTE")
+    bucket = require_env("BUCKET")
+    cmd = ["rclone", "copyto", str(local_path), f"{remote}:{bucket}/{object_key}", "-P"]
+
+    logger.info("START | upload file %s", local_path.name)
+    logger.info("CMD   | %s", " ".join(cmd))
+    result = subprocess.run(cmd, text=True, capture_output=True)
+    if result.returncode != 0:
+        if result.stdout:
+            logger.error("STDOUT:\n%s", result.stdout)
+        if result.stderr:
+            logger.error("STDERR:\n%s", result.stderr)
+        raise RuntimeError(f"Failed to upload artifact: {local_path.name}")
+    logger.info("DONE  | upload file %s", local_path.name)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -328,10 +367,12 @@ def parse_transcript(path: Path, tz_name: str) -> dict[str, Any]:
 def build_parsed_payload(
     *,
     meeting_id: str,
-    transcript_path: Path,
     original_filename: str,
     host_external_key: str,
     parsed: dict[str, Any],
+    raw_folder_prefix: str,
+    raw_object_key: str,
+    parsed_object_key: str,
     version: int,
 ) -> dict[str, Any]:
     utterances: list[ParsedUtterance] = parsed["utterances"]
@@ -390,7 +431,7 @@ def build_parsed_payload(
             "source_name": parsed["meeting_room"],
             "started_at": start_dt.isoformat(),
             "ended_at": end_dt.isoformat(),
-            "raw_folder_prefix": str(transcript_path.parent),
+            "raw_folder_prefix": raw_folder_prefix,
         },
         "host": {
             "user_id": host_external_key,
@@ -420,14 +461,14 @@ def build_parsed_payload(
             {
                 "meeting_id": meeting_id,
                 "artifact_type": "raw_transcript",
-                "object_key": f"local://{transcript_path.resolve()}",
+                "object_key": raw_object_key,
                 "content_type": "text/plain",
                 "artifact_version": version,
             },
             {
                 "meeting_id": meeting_id,
                 "artifact_type": "parsed_transcript",
-                "object_key": "",  # filled later after parsed JSON is written
+                "object_key": parsed_object_key,
                 "content_type": "application/json",
                 "artifact_version": version,
             },
@@ -437,6 +478,7 @@ def build_parsed_payload(
             "meeting_participants currently includes only the host uploader identity.",
             "meeting_speakers contains transcript-level spoken identities only.",
             "meeting_speakers.user_id is left NULL for now.",
+            "Raw and parsed transcript artifacts are uploaded to object storage.",
             "Utterance end time is assumed to be just before the next utterance start time.",
         ],
         "participants_in_transcript": parsed["participants_in_transcript"],
@@ -663,6 +705,8 @@ def update_metadata_sidecar(
     metadata_path: Path | None,
     meeting_id: str,
     parsed_json_path: Path,
+    raw_object_key: str,
+    parsed_object_key: str,
     ingest_status: str,
     logger: logging.Logger,
 ) -> None:
@@ -676,6 +720,8 @@ def update_metadata_sidecar(
 
         payload["meeting_id"] = meeting_id
         payload["parsed_json_path"] = str(parsed_json_path)
+        payload["raw_object_key"] = raw_object_key
+        payload["parsed_object_key"] = parsed_object_key
         payload["ingest_status"] = ingest_status
 
         metadata_path.write_text(
@@ -707,14 +753,22 @@ def main() -> None:
         original_filename,
     )
 
+    raw_folder_prefix = f"{args.raw_object_prefix.strip('/')}/{meeting_id}/"
+    raw_object_key = f"{raw_folder_prefix}v{args.version}_{original_filename}"
+    parsed_object_key = (
+        f"{args.parsed_object_prefix.strip('/')}/{meeting_id}/v{args.version}.json"
+    )
+
     parsed = parse_transcript(transcript_path, args.timezone)
 
     payload = build_parsed_payload(
         meeting_id=meeting_id,
-        transcript_path=transcript_path,
         original_filename=original_filename,
         host_external_key=host_external_key,
         parsed=parsed,
+        raw_folder_prefix=raw_folder_prefix,
+        raw_object_key=raw_object_key,
+        parsed_object_key=parsed_object_key,
         version=args.version,
     )
 
@@ -722,10 +776,13 @@ def main() -> None:
     ensure_dir(local_root)
     parsed_path = local_root / "parsed_transcript.json"
 
-    # Fill parsed artifact local URI now that we know the parsed file path.
-    payload["meeting_artifacts"][1]["object_key"] = f"local://{parsed_path.resolve()}"
-
     write_json(parsed_path, payload)
+
+    require_env("RCLONE_REMOTE")
+    require_env("BUCKET")
+
+    upload_artifact(transcript_path, raw_object_key, logger)
+    upload_artifact(parsed_path, parsed_object_key, logger)
 
     conn = get_db_conn()
     try:
@@ -752,6 +809,8 @@ def main() -> None:
         metadata_path=args.metadata_path,
         meeting_id=meeting_id,
         parsed_json_path=parsed_path,
+        raw_object_key=raw_object_key,
+        parsed_object_key=parsed_object_key,
         ingest_status=ingest_status,
         logger=logger,
     )
