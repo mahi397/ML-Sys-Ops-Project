@@ -221,9 +221,10 @@ function toggleRemoveBoundary(segIdx, meetingId, uttIdx) {
   const btn = document.getElementById(`btn-boundary-${segIdx}`);
   const isActive = btn.classList.contains('btn-remove-active');
   if (isActive) {
+    // Undo — restore boundary, record add_boundary so retraining knows
     btn.classList.remove('btn-remove-active');
     btn.textContent = 'Remove boundary';
-    // Undo not sent to backend — user changed their mind before it mattered
+    submitFeedback(meetingId, uttIdx, 'add_boundary');
   } else {
     btn.classList.add('btn-remove-active');
     btn.textContent = 'Removed — undo?';
@@ -257,13 +258,14 @@ function confirmSplit(btn, meetingId, uttIdx) {
 }
 
 function overallFeedback(meetingId, type, btn) {
-  fetch(`${API_BASE}/feedback`, {
+  fetch(`${API_BASE}/api/feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ meeting_id: meetingId, action: 'overall_' + type })
+    body: JSON.stringify({ meeting_id: meetingId, utterance_idx: null, action: `overall_${type}` })
   }).catch(() => {});
   btn.textContent = type === 'positive' ? 'Thanks!' : 'Noted — thanks';
   btn.disabled = true;
+  btn.parentElement.querySelectorAll('button').forEach(b => b.disabled = true);
 }
 
 // ── Helpers ──
