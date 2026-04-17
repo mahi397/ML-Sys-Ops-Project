@@ -405,14 +405,41 @@ class SegmenterDeployment:
         result = await self.batch_predict(body)
         return result
 
+    async def predict_batch(self, bodies: list) -> list:
+        """Run predict_single concurrently for a list of window bodies"""
+        import asyncio
+        tasks = [self.batch_predict(b) for b in bodies]
+        return await asyncio.gather(*tasks)
     
     async def __call__(self, request: Request) -> JSONResponse:
         start = time.time()
         try:
             body = await request.json()
+            # ── Batch format: {"meeting_id":..., "requests": [...]} ──
+            if "requests" in body:
+                reqs = body["requests"]
+                if not reqs:
+                    return JSONResponse({"error": "Empty requests list"}, status_code=400)
+                results = await self.predict_batch(reqs)
+                latency = time.time() - start
+                # Attach request_id back to each result
+                for i, res in enumerate(results):
+                    res["request_id"] = reqs[i].get("request_id", f"t{i}")
+                self.metrics.record.remote({
+                    "endpoint": "segment", "status": "success",
+                    "latency": latency, "batch_size": len(reqs)
+                })
+                return JSONResponse(content={
+                    "meeting_id": body.get("meeting_id"),
+                    "request_count": len(results),
+                    "results": results
+                })
+
+            # ── Single window format: {"window": [...]} ──
             if "window" not in body:
                 self.metrics.record.remote({"endpoint": "segment", "status": "error"})
-                return JSONResponse({"error": "Missing 'window'"}, status_code=400)
+                return JSONResponse({"error": "Missing 'window' or 'requests'"}, status_code=400)
+                #return JSONResponse({"error": "Missing 'window'"}, status_code=400)
 
             result = await self.predict_single(body)
             latency = time.time() - start
