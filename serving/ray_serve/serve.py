@@ -919,13 +919,26 @@ class RecapAPIDeployment:
             # Validate
             if not meeting_id:
                 return JSONResponse({"error": "meeting_id required"}, status_code=400)
+            if not action:
+                return JSONResponse({"error": "action required"}, status_code=400)
+
+            # ── Overall meeting-level feedback (no utterance_idx needed) ──────
+            # Sent by "Looks good" / "Needs work" buttons in the UI
+            if isinstance(action, str) and action.startswith("overall_"):
+                correction = self.store.save_feedback(meeting_id, -1, action, -1)
+                return JSONResponse({
+                    "status": "recorded",
+                    "action": action,
+                    "correction_id": correction["correction_id"]
+                })
+
+            # ── Boundary-level feedback (utterance_idx required) ──────────────
             if utterance_idx is None:
                 return JSONResponse({"error": "utterance_idx required"}, status_code=400)
             if action not in ("remove_boundary", "add_boundary"):
-                if isinstance(action, str) and action.startswith("overall_"):
-                    return JSONResponse({"status": "recorded", "action": action})
                 return JSONResponse(
-                    {"error": "action must be 'remove_boundary' or 'add_boundary'"},
+                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
+
                     status_code=400
                 )
 
