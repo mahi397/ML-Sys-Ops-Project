@@ -1,4 +1,35 @@
-#FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM nvcr.io/nvidia/pytorch:23.10-py3
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# curl, git, build-essential are already present in NGC image
+# Just install cmake via pip
+RUN pip install --no-cache-dir cmake
+
+COPY requirements_ray.txt .
+# torch==2.1.0 is already installed — skip reinstalling it
+RUN pip install --no-cache-dir $(grep -v '^torch==' requirements_ray.txt)
+
+RUN CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
+    pip install --no-cache-dir llama-cpp-python==0.2.56 --no-binary llama-cpp-python
+
+COPY serve.py .
+COPY metrics_server.py .
+COPY benchmark_ray.py .
+COPY storage.py .
+
+EXPOSE 8000 8265
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=120s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD bash -c "python3 metrics_server.py & python3 serve.py"
+
+
+'''#FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel
 
 WORKDIR /app
@@ -38,4 +69,4 @@ EXPOSE 8000 8265
 HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=120s \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD bash -c "python3 metrics_server.py & python3 serve.py"
+CMD bash -c "python3 metrics_server.py & python3 serve.py"''''
