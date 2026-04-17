@@ -14,8 +14,10 @@ COPY requirements_ray.txt .
 RUN pip install --no-cache-dir -r requirements_ray.txt
 
 # Pre-built CUDA wheel — no compilation needed
-RUN pip install --no-cache-dir llama-cpp-python==0.2.56 \
-    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+#RUN pip install --no-cache-dir llama-cpp-python==0.2.56 \
+   # --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+RUN CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
+    pip install --no-cache-dir llama-cpp-python==0.2.56 --no-binary llama-cpp-python   
 
 COPY serve.py .
 COPY metrics_server.py .
