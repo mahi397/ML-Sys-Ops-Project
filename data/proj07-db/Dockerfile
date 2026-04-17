@@ -7,10 +7,8 @@ COPY ingest_saved_jitsi_transcript.py /app/
 COPY feedback_common.py /app/
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bash ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates rclone \
  && rm -rf /var/lib/apt/lists/*
-
-RUN curl https://rclone.org/install.sh | bash
 
 RUN pip install --no-cache-dir fastapi uvicorn python-multipart "psycopg[binary]==3.2.1"
 
