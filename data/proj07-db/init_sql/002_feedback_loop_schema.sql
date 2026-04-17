@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     event_source TEXT NOT NULL CHECK (event_source IN ('emulated', 'user')),
     before_payload JSONB,
     after_payload JSONB,
-    created_by_user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+    created_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

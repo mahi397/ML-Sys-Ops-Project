@@ -6,6 +6,12 @@ BEGIN;
 -- Stage 1 topic-boundary detection inputs/outputs
 -- Stage 2 topic-segmented LLM summarization inputs/outputs
 
+CREATE TABLE users (
+    user_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    email TEXT UNIQUE
+);
+
 CREATE TABLE meetings (
     meeting_id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL CHECK (source_type IN ('ami', 'jitsi')),
@@ -20,16 +26,23 @@ CREATE TABLE meetings (
     )
 );
 
-CREATE TABLE users (
-    user_id BIGSERIAL PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    email TEXT UNIQUE
+CREATE TABLE meeting_participants (
+    meeting_participant_id BIGSERIAL PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('host', 'participant')),
+    can_view_summary BOOLEAN NOT NULL DEFAULT TRUE,
+    can_edit_summary BOOLEAN NOT NULL DEFAULT FALSE,
+    joined_at TIMESTAMPTZ,
+    left_at TIMESTAMPTZ,
+    UNIQUE (meeting_id, user_id),
+    CHECK (can_view_summary OR NOT can_edit_summary)
 );
 
 CREATE TABLE meeting_speakers (
     meeting_speaker_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+    user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
     speaker_label TEXT NOT NULL,
     display_name TEXT NOT NULL,
     role TEXT,
@@ -39,19 +52,20 @@ CREATE TABLE meeting_speakers (
 CREATE TABLE meeting_artifacts (
     artifact_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    artifact_type TEXT NOT NULL CHECK (
+    artifact_type TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    content_type TEXT,
+    artifact_version INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (meeting_id, artifact_type, artifact_version),
+    CONSTRAINT meeting_artifacts_artifact_type_check CHECK (
         artifact_type IN (
             'raw_transcript',
             'parsed_transcript',
             'summary_json',
             'other'
         )
-    ),
-    object_key TEXT NOT NULL,
-    content_type TEXT,
-    artifact_version INTEGER NOT NULL DEFAULT 1,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (meeting_id, artifact_type, artifact_version)
+    )
 );
 
 CREATE TABLE utterances (
@@ -86,7 +100,7 @@ CREATE TABLE utterance_transitions (
 CREATE TABLE topic_segments (
     topic_segment_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    segment_type TEXT NOT NULL CHECK (segment_type IN ('gold', 'predicted')),
+    segment_type TEXT NOT NULL,
     segment_index INTEGER NOT NULL,
     start_utterance_id BIGINT NOT NULL REFERENCES utterances(utterance_id) ON DELETE RESTRICT,
     end_utterance_id BIGINT NOT NULL REFERENCES utterances(utterance_id) ON DELETE RESTRICT,
@@ -94,19 +108,30 @@ CREATE TABLE topic_segments (
     end_time_sec DOUBLE PRECISION NOT NULL,
     topic_label TEXT,
     UNIQUE (meeting_id, segment_type, segment_index),
-    CHECK (end_time_sec >= start_time_sec)
+    CHECK (end_time_sec >= start_time_sec),
+    CONSTRAINT topic_segments_segment_type_check CHECK (
+        segment_type IN ('gold', 'predicted')
+    )
 );
 
 CREATE TABLE summaries (
     summary_id BIGSERIAL PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
-    summary_type TEXT NOT NULL CHECK (summary_type IN ('ami_gold', 'llm_generated', 'user_edited')),
+    summary_type TEXT NOT NULL CHECK (
+        summary_type IN ('ami_gold', 'llm_generated', 'user_edited')
+    ),
     summary_object_key TEXT NOT NULL,
-    created_by_user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+    created_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (meeting_id, summary_type, version)
 );
+
+CREATE INDEX idx_meeting_participants_meeting_id
+    ON meeting_participants (meeting_id);
+
+CREATE INDEX idx_meeting_participants_user_id
+    ON meeting_participants (user_id);
 
 CREATE INDEX idx_meeting_speakers_meeting_id
     ON meeting_speakers (meeting_id);
