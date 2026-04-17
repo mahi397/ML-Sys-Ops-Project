@@ -4,6 +4,8 @@ WORKDIR /app
 
 COPY jitsi_transcript_receiver.py /app/jitsi_transcript_receiver.py
 COPY ingest_saved_jitsi_transcript.py /app/
+COPY build_online_inference_payloads.py /app/
+COPY db_task_worker.py /app/
 COPY feedback_common.py /app/
 
 RUN apt-get update \

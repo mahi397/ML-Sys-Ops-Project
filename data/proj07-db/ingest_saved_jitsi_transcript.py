@@ -79,6 +79,29 @@ def parse_args() -> argparse.Namespace:
         help="Delete existing rows for the same meeting_id before inserting.",
     )
     parser.add_argument(
+        "--build-stage1-after-ingest",
+        action="store_true",
+        help="After DB ingest, also create Stage 1 online inference request artifacts for this meeting.",
+    )
+    parser.add_argument(
+        "--stage1-output-root",
+        type=Path,
+        default=Path("/mnt/block/user-behaviour/inference_requests/stage1"),
+    )
+    parser.add_argument("--stage1-window-size", type=int, default=7)
+    parser.add_argument("--stage1-transition-index", type=int, default=3)
+    parser.add_argument("--stage1-min-utterance-chars", type=int, default=1)
+    parser.add_argument("--stage1-max-words-per-utterance", type=int, default=50)
+    parser.add_argument(
+        "--upload-stage1-artifacts",
+        action="store_true",
+        help="Upload generated Stage 1 request artifacts to object storage.",
+    )
+    parser.add_argument(
+        "--stage1-object-prefix",
+        default="production/inference_requests/stage1",
+    )
+    parser.add_argument(
         "--log-file",
         type=Path,
         default=None,
@@ -708,6 +731,10 @@ def update_metadata_sidecar(
     raw_object_key: str,
     parsed_object_key: str,
     ingest_status: str,
+    stage1_build_status: str,
+    stage1_build_error: str | None,
+    stage1_output_root: Path | None,
+    version: int,
     logger: logging.Logger,
 ) -> None:
     if metadata_path is None:
@@ -723,6 +750,11 @@ def update_metadata_sidecar(
         payload["raw_object_key"] = raw_object_key
         payload["parsed_object_key"] = parsed_object_key
         payload["ingest_status"] = ingest_status
+        payload["stage1_build_status"] = stage1_build_status
+        payload["stage1_build_error"] = stage1_build_error
+        if stage1_output_root is not None:
+            payload["stage1_output_root"] = str(stage1_output_root)
+            payload["stage1_output_dir"] = str(stage1_output_root / meeting_id / f"v{version}")
 
         metadata_path.write_text(
             json.dumps(payload, indent=2) + "\n",
@@ -730,6 +762,59 @@ def update_metadata_sidecar(
         )
     except Exception:
         logger.exception("Failed updating metadata sidecar: %s", metadata_path)
+
+
+def run_stage1_payload_builder(
+    *,
+    meeting_id: str,
+    args: argparse.Namespace,
+    logger: logging.Logger,
+) -> tuple[str, str | None]:
+    cmd = [
+        sys.executable,
+        str(SCRIPT_DIR / "build_online_inference_payloads.py"),
+        "--meeting-id",
+        meeting_id,
+        "--window-size",
+        str(args.stage1_window_size),
+        "--transition-index",
+        str(args.stage1_transition_index),
+        "--min-utterance-chars",
+        str(args.stage1_min_utterance_chars),
+        "--max-words-per-utterance",
+        str(args.stage1_max_words_per_utterance),
+        "--output-root",
+        str(args.stage1_output_root),
+        "--version",
+        str(args.version),
+    ]
+    if args.upload_stage1_artifacts:
+        cmd.extend(["--upload-artifacts", "--stage1-object-prefix", args.stage1_object_prefix])
+
+    logger.info("Running Stage 1 payload builder: %s", " ".join(cmd))
+    try:
+        result = subprocess.run(cmd, text=True, capture_output=True)
+    except Exception as exc:
+        logger.exception("Failed launching Stage 1 payload builder")
+        return "failed", str(exc)
+
+    if result.returncode != 0:
+        if result.stdout:
+            logger.error("Stage 1 builder stdout:\n%s", result.stdout.strip())
+        if result.stderr:
+            logger.error("Stage 1 builder stderr:\n%s", result.stderr.strip())
+        error_message = "Stage 1 payload build failed after transcript ingest"
+        if result.stderr and result.stderr.strip():
+            error_message = result.stderr.strip().splitlines()[-1]
+        elif result.stdout and result.stdout.strip():
+            error_message = result.stdout.strip().splitlines()[-1]
+        return "failed", error_message
+
+    if result.stdout:
+        logger.info("Stage 1 builder stdout:\n%s", result.stdout.strip())
+    if result.stderr:
+        logger.info("Stage 1 builder stderr:\n%s", result.stderr.strip())
+    return "built", None
 
 
 def main() -> None:
@@ -785,6 +870,8 @@ def main() -> None:
     upload_artifact(parsed_path, parsed_object_key, logger)
 
     conn = get_db_conn()
+    stage1_build_status = "not_requested"
+    stage1_build_error: str | None = None
     try:
         ingest_status = insert_rows(
             conn=conn,
@@ -805,6 +892,19 @@ def main() -> None:
         except Exception:
             pass
 
+    if args.build_stage1_after_ingest:
+        stage1_build_status, stage1_build_error = run_stage1_payload_builder(
+            meeting_id=meeting_id,
+            args=args,
+            logger=logger,
+        )
+        if stage1_build_status != "built":
+            logger.warning(
+                "Meeting ingest succeeded but Stage 1 payload build failed | meeting_id=%s | error=%s",
+                meeting_id,
+                stage1_build_error,
+            )
+
     update_metadata_sidecar(
         metadata_path=args.metadata_path,
         meeting_id=meeting_id,
@@ -812,13 +912,18 @@ def main() -> None:
         raw_object_key=raw_object_key,
         parsed_object_key=parsed_object_key,
         ingest_status=ingest_status,
+        stage1_build_status=stage1_build_status,
+        stage1_build_error=stage1_build_error,
+        stage1_output_root=args.stage1_output_root if args.build_stage1_after_ingest else None,
+        version=args.version,
         logger=logger,
     )
 
     logger.info(
-        "Finished Jitsi ingest | meeting_id=%s | status=%s | utterances=%d | transitions=%d",
+        "Finished Jitsi ingest | meeting_id=%s | status=%s | stage1=%s | utterances=%d | transitions=%d",
         meeting_id,
         ingest_status,
+        stage1_build_status,
         len(payload["utterances"]),
         len(payload["transition_placeholders"]),
     )
@@ -828,6 +933,8 @@ def main() -> None:
             {
                 "meeting_id": meeting_id,
                 "status": ingest_status,
+                "stage1_build_status": stage1_build_status,
+                "stage1_build_error": stage1_build_error,
                 "parsed_json_path": str(parsed_path),
                 "utterances": len(payload["utterances"]),
                 "transitions": len(payload["transition_placeholders"]),

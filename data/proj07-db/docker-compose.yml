@@ -42,6 +42,14 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       JITSI_SAVE_DIR: /mnt/block/user-behaviour/received_transcripts
       JITSI_LOG_DIR: /mnt/block/ingest_logs/jitsi_transcript
+      JITSI_BUILD_STAGE1_AFTER_INGEST: ${JITSI_BUILD_STAGE1_AFTER_INGEST:-false}
+      JITSI_STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      JITSI_STAGE1_WINDOW_SIZE: ${JITSI_STAGE1_WINDOW_SIZE:-7}
+      JITSI_STAGE1_TRANSITION_INDEX: ${JITSI_STAGE1_TRANSITION_INDEX:-3}
+      JITSI_STAGE1_MIN_UTTERANCE_CHARS: ${JITSI_STAGE1_MIN_UTTERANCE_CHARS:-1}
+      JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE: ${JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE:-50}
+      JITSI_UPLOAD_STAGE1_ARTIFACTS: ${JITSI_UPLOAD_STAGE1_ARTIFACTS:-true}
+      JITSI_STAGE1_OBJECT_PREFIX: ${JITSI_STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
       BUCKET: ${BUCKET:-objstore-proj07}
@@ -50,5 +58,42 @@ services:
     volumes:
       - /mnt/block/user-behaviour/received_transcripts:/mnt/block/user-behaviour/received_transcripts
       - /mnt/block/user-behaviour/parsed_transcripts:/mnt/block/user-behaviour/parsed_transcripts
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
       - /mnt/block/ingest_logs/jitsi_transcript:/mnt/block/ingest_logs/jitsi_transcript
+      - ${HOME}/.config/rclone:/config/rclone:ro
+
+  db_task_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: db_task_worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      DB_TASK_LOG_DIR: /mnt/block/ingest_logs/db_task_worker
+      DB_TASK_POLL_INTERVAL_SECONDS: ${DB_TASK_POLL_INTERVAL_SECONDS:-5}
+      DB_TASK_FULL_SCAN_INTERVAL_SECONDS: ${DB_TASK_FULL_SCAN_INTERVAL_SECONDS:-300}
+      DB_TASK_BATCH_SIZE: ${DB_TASK_BATCH_SIZE:-25}
+      DB_TASK_FULL_SCAN_LIMIT: ${DB_TASK_FULL_SCAN_LIMIT:-0}
+      DB_TASK_FAILURE_COOLDOWN_SECONDS: ${DB_TASK_FAILURE_COOLDOWN_SECONDS:-60}
+      DB_TASK_STAGE1_ENABLED: ${DB_TASK_STAGE1_ENABLED:-true}
+      STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      STAGE1_WINDOW_SIZE: ${STAGE1_WINDOW_SIZE:-7}
+      STAGE1_TRANSITION_INDEX: ${STAGE1_TRANSITION_INDEX:-3}
+      STAGE1_MIN_UTTERANCE_CHARS: ${STAGE1_MIN_UTTERANCE_CHARS:-1}
+      STAGE1_MAX_WORDS_PER_UTTERANCE: ${STAGE1_MAX_WORDS_PER_UTTERANCE:-50}
+      STAGE1_UPLOAD_ARTIFACTS: ${STAGE1_UPLOAD_ARTIFACTS:-true}
+      STAGE1_OBJECT_PREFIX: ${STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE1_BUILD_TIMEOUT_SECONDS: ${STAGE1_BUILD_TIMEOUT_SECONDS:-300}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "/app/db_task_worker.py"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/ingest_logs/db_task_worker:/mnt/block/ingest_logs/db_task_worker
       - ${HOME}/.config/rclone:/config/rclone:ro

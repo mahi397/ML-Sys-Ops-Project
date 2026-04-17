@@ -34,8 +34,32 @@ INGEST_SCRIPT = Path(
 )
 INGEST_TIMEOUT_SECONDS = int(os.getenv("JITSI_INGEST_TIMEOUT_SECONDS", "300"))
 
+
+def env_flag(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+BUILD_STAGE1_AFTER_INGEST = env_flag("JITSI_BUILD_STAGE1_AFTER_INGEST", False)
+STAGE1_OUTPUT_ROOT = Path(
+    os.getenv("JITSI_STAGE1_OUTPUT_ROOT", "/mnt/block/user-behaviour/inference_requests/stage1")
+)
+STAGE1_WINDOW_SIZE = int(os.getenv("JITSI_STAGE1_WINDOW_SIZE", "7"))
+STAGE1_TRANSITION_INDEX = int(os.getenv("JITSI_STAGE1_TRANSITION_INDEX", "3"))
+STAGE1_MIN_UTTERANCE_CHARS = int(os.getenv("JITSI_STAGE1_MIN_UTTERANCE_CHARS", "1"))
+STAGE1_MAX_WORDS_PER_UTTERANCE = int(os.getenv("JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE", "50"))
+UPLOAD_STAGE1_ARTIFACTS = env_flag("JITSI_UPLOAD_STAGE1_ARTIFACTS", True)
+STAGE1_OBJECT_PREFIX = os.getenv(
+    "JITSI_STAGE1_OBJECT_PREFIX",
+    "production/inference_requests/stage1",
+).strip()
+
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+if BUILD_STAGE1_AFTER_INGEST:
+    STAGE1_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def build_logger() -> logging.Logger:
@@ -79,6 +103,20 @@ def sanitize_host_key(value: str) -> str:
     return cleaned
 
 
+def parse_ingester_summary(stdout: str) -> dict:
+    for line in reversed(stdout.splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
 def run_ingester(
     *,
     transcript_path: Path,
@@ -99,6 +137,25 @@ def run_ingester(
 
     if metadata_path is not None:
         cmd.extend(["--metadata-path", str(metadata_path)])
+
+    if BUILD_STAGE1_AFTER_INGEST:
+        cmd.extend(
+            [
+                "--build-stage1-after-ingest",
+                "--stage1-output-root",
+                str(STAGE1_OUTPUT_ROOT),
+                "--stage1-window-size",
+                str(STAGE1_WINDOW_SIZE),
+                "--stage1-transition-index",
+                str(STAGE1_TRANSITION_INDEX),
+                "--stage1-min-utterance-chars",
+                str(STAGE1_MIN_UTTERANCE_CHARS),
+                "--stage1-max-words-per-utterance",
+                str(STAGE1_MAX_WORDS_PER_UTTERANCE),
+            ]
+        )
+        if UPLOAD_STAGE1_ARTIFACTS:
+            cmd.extend(["--upload-stage1-artifacts", "--stage1-object-prefix", STAGE1_OBJECT_PREFIX])
 
     logger.info("Running ingester: %s", " ".join(cmd))
 
@@ -121,6 +178,26 @@ async def startup_event() -> None:
     logger.info("Log file: %s", LOG_FILE.resolve())
     logger.info("Bearer token enabled: %s", bool(INGEST_TOKEN))
     logger.info("Ingester script: %s", INGEST_SCRIPT.resolve())
+    logger.info(
+        "Stage 1 build mode: %s",
+        "sync_ingest" if BUILD_STAGE1_AFTER_INGEST else "async_db_worker",
+    )
+    logger.info("Build Stage 1 after ingest: %s", BUILD_STAGE1_AFTER_INGEST)
+    if BUILD_STAGE1_AFTER_INGEST and not (0 <= STAGE1_TRANSITION_INDEX < STAGE1_WINDOW_SIZE):
+        raise RuntimeError(
+            "Invalid Stage 1 configuration: transition index must be between 0 and window size - 1"
+        )
+    if BUILD_STAGE1_AFTER_INGEST:
+        logger.info("Stage 1 output root: %s", STAGE1_OUTPUT_ROOT.resolve())
+        logger.info(
+            "Stage 1 config | window_size=%s transition_index=%s min_chars=%s max_words=%s upload=%s prefix=%s",
+            STAGE1_WINDOW_SIZE,
+            STAGE1_TRANSITION_INDEX,
+            STAGE1_MIN_UTTERANCE_CHARS,
+            STAGE1_MAX_WORDS_PER_UTTERANCE,
+            UPLOAD_STAGE1_ARTIFACTS,
+            STAGE1_OBJECT_PREFIX,
+        )
 
     if not INGEST_SCRIPT.exists():
         raise RuntimeError(f"Ingest script not found: {INGEST_SCRIPT}")
@@ -275,13 +352,22 @@ async def ingest_jitsi_transcript(
     if result.stderr:
         logger.info("Ingester stderr:\n%s", result.stderr.strip())
 
+    ingester_summary = parse_ingester_summary(result.stdout or "")
+    if BUILD_STAGE1_AFTER_INGEST:
+        stage1_build_status = ingester_summary.get("stage1_build_status", "unknown")
+        stage1_build_error = ingester_summary.get("stage1_build_error")
+    else:
+        stage1_build_status = "deferred_to_db_worker"
+        stage1_build_error = None
+
     logger.info(
-        "Upload + ingest successful | client=%s | host_external_key=%s | original=%s | saved_as=%s | bytes=%s",
+        "Upload + ingest successful | client=%s | host_external_key=%s | original=%s | saved_as=%s | bytes=%s | stage1=%s",
         client_host,
         raw_host_external_key,
         original_filename,
         safe_name,
         file_size,
+        stage1_build_status,
     )
 
     return {
@@ -290,5 +376,9 @@ async def ingest_jitsi_transcript(
         "saved_as": safe_name,
         "saved_path": str(save_path),
         "bytes": file_size,
-        "ingest_status": "ok",
+        "ingest_status": ingester_summary.get("status", "ok"),
+        "stage1_build_enabled": BUILD_STAGE1_AFTER_INGEST,
+        "stage1_build_mode": "sync_ingest" if BUILD_STAGE1_AFTER_INGEST else "async_db_worker",
+        "stage1_build_status": stage1_build_status,
+        "stage1_build_error": stage1_build_error,
     }
