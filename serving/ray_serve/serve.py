@@ -542,18 +542,18 @@ class SummarizerDeployment:
                 f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in utterances
             )
             seg_ctx = body.get("meeting_context", {})
-            prompt = f"""Summarize this meeting segment. Respond with JSON only, no other text.
+            prompt = f"""<s>[INST] You are a meeting assistant. Summarize this meeting segment.
 
 Segment {seg_ctx.get('segment_index_in_meeting', 1)} of {seg_ctx.get('total_segments', 1)}.
 
 Transcript:
 {transcript}
 
-JSON format:
-{{"topic_label": "2-5 word label", "summary_bullets": ["point 1", "point 2", "point 3"]}}"""
-
+Respond with ONLY this JSON, no other text:
+{{"topic_label": "2-5 word label", "summary_bullets": ["point 1", "point 2", "point 3"]}} [/INST]"""
             response = self.llm(prompt, max_tokens=300, temperature=0.1, stop=["```"])
             text = response["choices"][0]["text"].strip()
+            print(f"[summarizer] raw output: {text[:300]}")
             start_idx = text.find("{")
             end_idx = text.rfind("}") + 1
             parsed = json.loads(text[start_idx:end_idx])
