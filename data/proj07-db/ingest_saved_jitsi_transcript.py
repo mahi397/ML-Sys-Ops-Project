@@ -456,6 +456,8 @@ def build_parsed_payload(
         name: speaker_label_for_index(idx)
         for idx, name in enumerate(speaker_order)
     }
+    normalized_host_display_name = host_identity["display_name"].strip().casefold()
+    normalized_host_user_id = host_identity["user_id"].strip().casefold()
 
     utterance_rows: list[dict[str, Any]] = []
     for idx, utterance in enumerate(utterances):
@@ -522,6 +524,14 @@ def build_parsed_payload(
         "meeting_speakers": [
             {
                 "meeting_id": meeting_id,
+                "user_id": (
+                    host_identity["user_id"]
+                    if name.strip().casefold() in (
+                        normalized_host_display_name,
+                        normalized_host_user_id,
+                    )
+                    else None
+                ),
                 "speaker_label": speaker_labels[name],
                 "display_name": name,
                 "role": None,
@@ -550,7 +560,7 @@ def build_parsed_payload(
             f"Host user identity source: {host_identity['identity_source']}",
             "meeting_participants currently includes only the host uploader identity.",
             "meeting_speakers contains transcript-level spoken identities only.",
-            "meeting_speakers.user_id is left NULL for now.",
+            "meeting_speakers.user_id is populated only when a speaker name matches the host identity.",
             "Raw and parsed transcript artifacts are uploaded to object storage.",
             "Utterance end time is assumed to be just before the next utterance start time.",
         ],
@@ -723,11 +733,12 @@ def insert_rows(
                     display_name,
                     role
                 )
-                VALUES (%s, NULL, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING meeting_speaker_id
                 """,
                 (
                     speaker["meeting_id"],
+                    speaker.get("user_id"),
                     speaker["speaker_label"],
                     speaker["display_name"],
                     speaker["role"],
