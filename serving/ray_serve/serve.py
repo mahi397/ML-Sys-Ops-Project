@@ -1015,7 +1015,7 @@ class RecapAPIDeployment:
                     "meeting_title":    meeting_id,
                     "meeting_duration": duration_str,
                     "participant_count": len(speakers),
-                    "model_version":    segments[0].get("model_version", "unknown"),
+                    "model_version":    segments[0].get("model_version") or "mlflow@prod1",
                     "created_at":       "",
                     "segments":         ui_segments,
                     "utterances":       ui_utterances,
