@@ -675,44 +675,54 @@ class SummarizerDeployment:
                 "topic_label": "", "summary_bullets": [], "status": "draft"
             }
 
-        try:
-            utterances = body.get("utterances", [])[:MAX_SEGMENT_UTTERANCES]
-            transcript = "\n".join(
-                f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in utterances
-            )
-            seg_ctx = body.get("meeting_context", {})
-            prompt = f"""<s>[INST] You are a meeting assistant. Summarize this meeting segment.
+        MAX_RETRIES = 10
+        last_error = None
 
-Segment {seg_ctx.get('segment_index_in_meeting', 1)} of {seg_ctx.get('total_segments', 1)}.
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                utterances = body.get("utterances", [])[:MAX_SEGMENT_UTTERANCES]
+                transcript = "\n".join(
+                    f"[SPEAKER_{u['speaker']}]: {u['text']}" for u in utterances
+                )
+                seg_ctx = body.get("meeting_context", {})
+                prompt = f"""<s>[INST] You are a meeting assistant. Summarize this meeting segment.
 
-Transcript:
-{transcript}
+    Segment {seg_ctx.get('segment_index_in_meeting', 1)} of {seg_ctx.get('total_segments', 1)}.
 
-Respond with ONLY this JSON, no other text:
-{{"topic_label": "2-5 word label", "summary_bullets": ["point 1", "point 2", "point 3"]}} [/INST]"""
-            
-            
-            response = self.llm(prompt, max_tokens=300, temperature=0.1, stop=["```"])
-            text = response["choices"][0]["text"].strip()
-            print(f"[summarizer] raw output: {text[:300]}")
-            start_idx = text.find("{")
-            end_idx = text.rfind("}") + 1
-            parsed = json.loads(text[start_idx:end_idx])
+    Transcript:
+    {transcript}
 
-            return {
-                "meeting_id": meeting_id, "segment_id": segment_id,
-                "t_start": t_start, "t_end": t_end,
-                "topic_label": parsed["topic_label"],
-                "summary_bullets": parsed["summary_bullets"],
-                "status": "complete"
-            }
-        except Exception as e:
-            print(f"[summarizer] Failed for segment {segment_id}: {e}")
-            return {
-                "meeting_id": meeting_id, "segment_id": segment_id,
-                "t_start": t_start, "t_end": t_end,
-                "topic_label": "", "summary_bullets": [], "status": "draft"
-            }
+    Respond with ONLY this JSON, no other text:
+    {{"topic_label": "2-5 word label", "summary_bullets": ["point 1", "point 2", "point 3"]}} [/INST]"""
+
+                response = self.llm(prompt, max_tokens=300, temperature=0.1, stop=["```"])
+                text = response["choices"][0]["text"].strip()
+                print(f"[summarizer] attempt {attempt} raw output: {text[:300]}")
+                start_idx = text.find("{")
+                end_idx = text.rfind("}") + 1
+                parsed = json.loads(text[start_idx:end_idx])
+
+                if not parsed.get("topic_label"):
+                    raise ValueError(f"Empty topic_label in response: {text}")
+
+                return {
+                    "meeting_id": meeting_id, "segment_id": segment_id,
+                    "t_start": t_start, "t_end": t_end,
+                    "topic_label": parsed["topic_label"],
+                    "summary_bullets": parsed.get("summary_bullets", []),
+                    "status": "complete"
+                }
+            except Exception as e:
+                last_error = e
+                print(f"[summarizer] Attempt {attempt}/{MAX_RETRIES} failed for segment {segment_id}: {e}")
+                time.sleep(1)  # sync sleep — _summarize is a regular method
+
+        print(f"[summarizer] All {MAX_RETRIES} attempts failed for segment {segment_id}: {last_error}")
+        return {
+            "meeting_id": meeting_id, "segment_id": segment_id,
+            "t_start": t_start, "t_end": t_end,
+            "topic_label": "", "summary_bullets": [], "status": "draft"
+        }
 
     async def summarize_dict(self, body: dict) -> dict:
         start = time.time()
