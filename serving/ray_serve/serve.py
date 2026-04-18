@@ -642,6 +642,8 @@ Transcript:
 
 Respond with ONLY this JSON, no other text:
 {{"topic_label": "2-5 word label", "summary_bullets": ["point 1", "point 2", "point 3"]}} [/INST]"""
+            
+            
             response = self.llm(prompt, max_tokens=300, temperature=0.1, stop=["```"])
             text = response["choices"][0]["text"].strip()
             print(f"[summarizer] raw output: {text[:300]}")
