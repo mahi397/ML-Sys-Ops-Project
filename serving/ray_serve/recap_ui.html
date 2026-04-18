@@ -172,6 +172,13 @@ async function submitFeedback(meetingId, utteranceIdx, action, segmentSummaryId)
         segment_summary_id: segmentSummaryId ?? null
       })
     });
+    if (res.ok) showToast('Feedback saved — will be used for retraining');
+    else showToast('Feedback saved locally');
+  } catch {
+    showToast('Feedback saved locally (API offline)');
+  }
+}
+
 
 // ── Rendering ──
 function render(data) {
