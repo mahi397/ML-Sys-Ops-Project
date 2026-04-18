@@ -229,8 +229,17 @@ class PostgresRecapStore:
                 cur.execute(sql, (meeting_id,))
                 return [dict(r) for r in cur.fetchall()]
 
+    _ACTION_MAP = {
+        "remove_boundary": "merge_segments",
+        "add_boundary":    "split_segment",
+        "overall_good":    "accept_summary",
+        "overall_bad":     "boundary_correction",
+    }
+
     def save_feedback(self, meeting_id: str, segment_summary_id,
                       event_type: str, before_payload: dict, after_payload: dict) -> int:
+        event_type = self._ACTION_MAP.get(event_type, event_type)
+
         sql = """
             INSERT INTO feedback_events
                 (meeting_id, segment_summary_id, event_type, event_source,
