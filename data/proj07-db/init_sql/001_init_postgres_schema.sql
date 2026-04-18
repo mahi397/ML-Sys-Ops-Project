@@ -9,7 +9,16 @@ BEGIN;
 CREATE TABLE users (
     user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    email TEXT UNIQUE
+    email TEXT UNIQUE,
+    password_salt TEXT,
+    password_hash TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (password_salt IS NULL AND password_hash IS NULL)
+        OR (password_salt IS NOT NULL AND password_hash IS NOT NULL)
+    )
 );
 
 CREATE TABLE meetings (

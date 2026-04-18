@@ -229,6 +229,11 @@ async def ingest_jitsi_transcript(
     request: Request,
     transcript: UploadFile = File(...),
     host_external_key: str = Form(...),
+    host_user_id: str | None = Form(default=None),
+    host_display_name: str | None = Form(default=None),
+    host_email: str | None = Form(default=None),
+    meeting_room: str | None = Form(default=None),
+    identity_source: str | None = Form(default=None),
     authorization: str | None = Header(default=None),
 ):
     client_host = request.client.host if request.client else "unknown"
@@ -310,9 +315,20 @@ async def ingest_jitsi_transcript(
 
     file_size = save_path.stat().st_size
 
+    normalized_host_user_id = (host_user_id or "").strip() or None
+    normalized_host_display_name = (host_display_name or "").strip() or None
+    normalized_host_email = (host_email or "").strip() or None
+    normalized_meeting_room = (meeting_room or "").strip() or None
+    normalized_identity_source = (identity_source or "").strip() or None
+
     metadata_path = save_path.with_suffix(save_path.suffix + ".meta.json")
     metadata = {
         "host_external_key": raw_host_external_key,
+        "host_user_id": normalized_host_user_id,
+        "host_display_name": normalized_host_display_name,
+        "host_email": normalized_host_email,
+        "meeting_room": normalized_meeting_room,
+        "identity_source": normalized_identity_source,
         "client_host": client_host,
         "original_filename": original_filename,
         "saved_as": safe_name,

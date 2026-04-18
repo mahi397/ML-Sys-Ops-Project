@@ -15,3 +15,6 @@ __pycache__/
 
 .env
 *.env
+.vscode/
+.vscode/settings.json
+.idea/

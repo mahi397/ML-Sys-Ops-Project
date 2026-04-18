@@ -389,11 +389,54 @@ def parse_transcript(path: Path, tz_name: str) -> dict[str, Any]:
     }
 
 
+def load_metadata_sidecar(
+    metadata_path: Path | None,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    if metadata_path is None or not metadata_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed reading metadata sidecar: %s", metadata_path)
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def build_host_identity(
+    metadata: dict[str, Any],
+    host_external_key: str,
+) -> dict[str, Any]:
+    host_user_id = str(metadata.get("host_user_id", "") or "").strip() or host_external_key
+    host_display_name = (
+        str(metadata.get("host_display_name", "") or "").strip() or host_user_id
+    )
+    host_email = str(metadata.get("host_email", "") or "").strip() or None
+    identity_source = (
+        str(metadata.get("identity_source", "") or "").strip()
+        or (
+            "host_external_key_fallback"
+            if host_user_id == host_external_key
+            else "transcript_upload_metadata"
+        )
+    )
+    return {
+        "user_id": host_user_id,
+        "display_name": host_display_name,
+        "email": host_email,
+        "identity_source": identity_source,
+        "host_external_key": host_external_key,
+    }
+
+
 def build_parsed_payload(
     *,
     meeting_id: str,
     original_filename: str,
     host_external_key: str,
+    host_identity: dict[str, Any],
     parsed: dict[str, Any],
     raw_folder_prefix: str,
     raw_object_key: str,
@@ -459,13 +502,16 @@ def build_parsed_payload(
             "raw_folder_prefix": raw_folder_prefix,
         },
         "host": {
-            "user_id": host_external_key,
-            "display_name": host_external_key,
+            "user_id": host_identity["user_id"],
+            "display_name": host_identity["display_name"],
+            "email": host_identity["email"],
+            "host_external_key": host_external_key,
+            "identity_source": host_identity["identity_source"],
         },
         "meeting_participants": [
             {
                 "meeting_id": meeting_id,
-                "user_id": host_external_key,
+                "user_id": host_identity["user_id"],
                 "role": "host",
                 "can_view_summary": True,
                 "can_edit_summary": True,
@@ -500,6 +546,8 @@ def build_parsed_payload(
         ],
         "ingest_notes": [
             f"meeting_id derived from original filename: {original_filename}",
+            f"Host uploader node identity: {host_external_key}",
+            f"Host user identity source: {host_identity['identity_source']}",
             "meeting_participants currently includes only the host uploader identity.",
             "meeting_speakers contains transcript-level spoken identities only.",
             "meeting_speakers.user_id is left NULL for now.",
@@ -512,17 +560,59 @@ def build_parsed_payload(
     }
 
 
-def upsert_host_user(cur, host_external_key: str) -> None:
-    # Assumes updated schema:
-    # users.user_id TEXT PRIMARY KEY
+def _row_value(row, key: str, index: int):
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        try:
+            return row[index]
+        except (KeyError, TypeError, IndexError):
+            return None
+
+
+def upsert_host_user(
+    cur,
+    *,
+    user_id: str,
+    display_name: str,
+    email: str | None,
+) -> None:
+    normalized_user_id = user_id.strip()
+    normalized_display_name = display_name.strip() or normalized_user_id
+    normalized_email = email.strip().lower() if email and email.strip() else None
+
+    cur.execute(
+        "SELECT user_id, display_name, email FROM users WHERE user_id = %s",
+        (normalized_user_id,),
+    )
+    existing = cur.fetchone()
+
+    if existing is None:
+        cur.execute(
+            """
+            INSERT INTO users (user_id, display_name, email)
+            VALUES (%s, %s, %s)
+            """,
+            (normalized_user_id, normalized_display_name, normalized_email),
+        )
+        return
+
+    existing_email = _row_value(existing, "email", 2)
+    existing_email = str(existing_email).strip().lower() if existing_email else None
+
+    if normalized_email and existing_email and normalized_email != existing_email:
+        raise ValueError(
+            f"Refusing to remap existing user_id={normalized_user_id} from email={existing_email} to email={normalized_email}"
+        )
+
     cur.execute(
         """
-        INSERT INTO users (user_id, display_name, email)
-        VALUES (%s, %s, NULL)
-        ON CONFLICT (user_id)
-        DO UPDATE SET display_name = EXCLUDED.display_name
+        UPDATE users
+        SET display_name = %s,
+            email = COALESCE(users.email, %s)
+        WHERE user_id = %s
         """,
-        (host_external_key, host_external_key),
+        (normalized_display_name, normalized_email, normalized_user_id),
     )
 
 
@@ -573,7 +663,12 @@ def insert_rows(
             logger.info("Replacing existing meeting: %s", meeting_id)
             cur.execute("DELETE FROM meetings WHERE meeting_id = %s", (meeting_id,))
 
-        upsert_host_user(cur, host["user_id"])
+        upsert_host_user(
+            cur,
+            user_id=host["user_id"],
+            display_name=host["display_name"],
+            email=host.get("email"),
+        )
 
         cur.execute(
             """
@@ -850,12 +945,15 @@ def main() -> None:
         f"{args.parsed_object_prefix.strip('/')}/{meeting_id}/v{args.version}.json"
     )
 
+    metadata_payload = load_metadata_sidecar(args.metadata_path, logger)
+    host_identity = build_host_identity(metadata_payload, host_external_key)
     parsed = parse_transcript(transcript_path, args.timezone)
 
     payload = build_parsed_payload(
         meeting_id=meeting_id,
         original_filename=original_filename,
         host_external_key=host_external_key,
+        host_identity=host_identity,
         parsed=parsed,
         raw_folder_prefix=raw_folder_prefix,
         raw_object_key=raw_object_key,
