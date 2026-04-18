@@ -111,19 +111,6 @@ class RecapStore:
                         seen[rec["utterance_idx"]] = rec
         return sorted(seen.values(), key=lambda r: r["utterance_idx"])
     
-    def get_segment_summary(self, segment_summary_id) -> dict:
-        sql = """
-            SELECT ss.segment_summary_id, ss.topic_label, ss.summary_bullets,
-                ss.segment_index, ts.start_utterance_id, ts.end_utterance_id
-            FROM segment_summaries ss
-            JOIN topic_segments ts ON ss.topic_segment_id = ts.topic_segment_id
-            WHERE ss.segment_summary_id = %s
-        """
-        with self._conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, (segment_summary_id,))
-                row = cur.fetchone()
-        return dict(row) if row else {}
 
     # ── Feedback corrections ─────────────────────────────────────────
 
@@ -243,6 +230,21 @@ class PostgresRecapStore:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql, (meeting_id,))
                 return [dict(r) for r in cur.fetchall()]
+    
+    def get_segment_summary(self, segment_summary_id) -> dict:
+        import psycopg2.extras
+        sql = """
+            SELECT ss.segment_summary_id, ss.topic_label, ss.summary_bullets,
+                ss.segment_index, ts.start_utterance_id, ts.end_utterance_id
+            FROM segment_summaries ss
+            JOIN topic_segments ts ON ss.topic_segment_id = ts.topic_segment_id
+            WHERE ss.segment_summary_id = %s
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (segment_summary_id,))
+                row = cur.fetchone()
+        return dict(row) if row else {}
 
     _ACTION_MAP = {
     "remove_boundary":  "merge_segments",
