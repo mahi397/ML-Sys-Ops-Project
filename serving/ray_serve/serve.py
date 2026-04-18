@@ -235,7 +235,7 @@ class PostgresRecapStore:
             INSERT INTO feedback_events
                 (meeting_id, segment_summary_id, event_type, event_source,
                  before_payload, after_payload)
-            VALUES (%s, %s, %s, 'recap_ui', %s::jsonb, %s::jsonb)
+            VALUES (%s, %s, %s, 'user', %s::jsonb, %s::jsonb)
             RETURNING feedback_event_id
         """
         with self._conn() as conn:
