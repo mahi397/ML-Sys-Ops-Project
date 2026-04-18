@@ -31,6 +31,11 @@ STAGE1_ARTIFACT_FILES = {
     "stage1_manifest_json": "manifest.json",
 }
 
+STAGE2_INPUT_ARTIFACT_FILES = {
+    "stage2_inputs_jsonl": "stage2_inputs.jsonl",
+    "stage2_inputs_json": "stage2_inputs.json",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -40,10 +45,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-utterance-chars",
         type=int,
-        default=1,
+        default=20,
         help="Minimum characters to keep in online inference view. Use 20 to mirror Stage 1 training exactly.",
     )
     parser.add_argument("--max-words-per-utterance", type=int, default=50)
+    parser.add_argument(
+        "--min-inference-utterances",
+        type=int,
+        default=2,
+        help="Minimum cleaned source utterances required before Stage 1 inference is allowed.",
+    )
+    parser.add_argument(
+        "--short-meeting-max-utterances",
+        type=int,
+        default=6,
+        help="Meetings at or below this cleaned source utterance count are flagged as low confidence.",
+    )
     parser.add_argument(
         "--stage1-responses-jsonl",
         type=Path,
@@ -178,6 +195,70 @@ def build_stage1_request_rows(
     return rows
 
 
+def assess_stage1_meeting(
+    *,
+    source_rows: list[dict],
+    derived_utterances: list[dict],
+    min_chars: int,
+    min_inference_utterances: int,
+    short_meeting_max_utterances: int,
+) -> dict:
+    cleaned_source_rows = [
+        row for row in source_rows if (row.get("clean_text") or "").strip()
+    ]
+    eligible_source_rows = [
+        row
+        for row in cleaned_source_rows
+        if len((row.get("clean_text") or "").strip()) >= min_chars
+    ]
+    eligible_source_count = len(eligible_source_rows)
+    derived_count = len(derived_utterances)
+
+    status = "eligible"
+    skip_reason: str | None = None
+    warning: str | None = None
+    meeting_flags: list[str] = []
+    recap_notice: str | None = None
+
+    if not cleaned_source_rows:
+        status = "skipped"
+        skip_reason = "no_utterances_after_cleaning"
+        warning = "Skipping inference because zero utterances remain after cleaning"
+    elif not eligible_source_rows:
+        status = "skipped"
+        skip_reason = "all_utterances_below_min_chars"
+        warning = (
+            f"Skipping inference because all cleaned utterances are shorter than "
+            f"{min_chars} chars"
+        )
+    elif eligible_source_count < min_inference_utterances:
+        status = "skipped"
+        skip_reason = "meeting_too_short_for_inference"
+        warning = (
+            f"Meeting too short for inference: cleaned_eligible_utterances="
+            f"{eligible_source_count}"
+        )
+    elif eligible_source_count <= short_meeting_max_utterances:
+        status = "eligible_short"
+        meeting_flags.append("short_meeting_low_confidence")
+        recap_notice = "short meeting, low confidence"
+        warning = (
+            f"Short meeting allowed for inference with low-confidence flag: "
+            f"cleaned_eligible_utterances={eligible_source_count}"
+        )
+
+    return {
+        "status": status,
+        "skip_reason": skip_reason,
+        "warning": warning,
+        "meeting_flags": meeting_flags,
+        "recap_notice": recap_notice,
+        "cleaned_source_utterance_count": len(cleaned_source_rows),
+        "eligible_source_utterance_count": eligible_source_count,
+        "derived_utterance_count": derived_count,
+    }
+
+
 def load_stage1_responses(path: Path, meeting_id: str) -> dict[int, dict]:
     responses: dict[int, dict] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -210,6 +291,30 @@ def stage1_local_artifact_paths(
         artifact_type: out_root / file_name
         for artifact_type, file_name in STAGE1_ARTIFACT_FILES.items()
     }
+
+
+def stage2_input_output_dir(output_root: Path, meeting_id: str, version: int) -> Path:
+    return output_root / meeting_id / f"v{version}"
+
+
+def stage2_local_artifact_paths(
+    output_root: Path,
+    meeting_id: str,
+    version: int,
+) -> dict[str, Path]:
+    out_root = stage2_input_output_dir(output_root, meeting_id, version)
+    return {
+        artifact_type: out_root / file_name
+        for artifact_type, file_name in STAGE2_INPUT_ARTIFACT_FILES.items()
+    }
+
+
+def reconstructed_segments_local_path(
+    segments_root: Path,
+    meeting_id: str,
+    version: int,
+) -> Path:
+    return segments_root / meeting_id / f"v{version}.json"
 
 
 def build_stage2_inputs(
@@ -271,11 +376,47 @@ def build_stage2_inputs(
                 "metadata": {
                     "start_model_index": segment_utts[0]["model_index"],
                     "end_model_index": segment_utts[-1]["model_index"],
+                    "start_source_utterance_index": segment_utts[0]["source_utterance_index"],
+                    "end_source_utterance_index": segment_utts[-1]["source_utterance_index"],
                 },
             }
         )
 
     return rows
+
+
+def build_reconstructed_segments(stage2_inputs: list[dict]) -> dict:
+    return {
+        "meeting_id": stage2_inputs[0]["meeting_id"] if stage2_inputs else None,
+        "segment_count": len(stage2_inputs),
+        "segments": [
+            {
+                "segment_id": segment["segment_id"],
+                "t_start": segment["t_start"],
+                "t_end": segment["t_end"],
+                "total_utterances": segment["total_utterances"],
+                "start_model_index": segment["metadata"]["start_model_index"],
+                "end_model_index": segment["metadata"]["end_model_index"],
+                "start_source_utterance_index": segment["metadata"]["start_source_utterance_index"],
+                "end_source_utterance_index": segment["metadata"]["end_source_utterance_index"],
+            }
+            for segment in stage2_inputs
+        ],
+    }
+
+
+def fetch_meeting_source_type(conn, meeting_id: str) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT source_type
+            FROM meetings
+            WHERE meeting_id = %s
+            """,
+            (meeting_id,),
+        )
+        row = cur.fetchone()
+    return None if row is None else row["source_type"]
 
 
 def main() -> None:
@@ -286,6 +427,13 @@ def main() -> None:
     logger = setup_logger(args.log_file)
     conn = get_conn()
     try:
+        source_type = fetch_meeting_source_type(conn, args.meeting_id)
+        if source_type != "jitsi":
+            raise RuntimeError(
+                f"build_online_inference_payloads only supports jitsi meetings; "
+                f"meeting_id={args.meeting_id} source_type={source_type}"
+            )
+
         source_rows = fetch_source_utterances(conn, [args.meeting_id])
         if not source_rows:
             raise RuntimeError(f"No utterances found for meeting {args.meeting_id}")
@@ -296,12 +444,36 @@ def main() -> None:
             min_chars=args.min_utterance_chars,
         )
         utterances = model_utterances_by_meeting.get(args.meeting_id, [])
-        stage1_requests = build_stage1_request_rows(
-            meeting_id=args.meeting_id,
-            utterances=utterances,
-            window_size=args.window_size,
-            transition_index=args.transition_index,
+        meeting_assessment = assess_stage1_meeting(
+            source_rows=source_rows,
+            derived_utterances=utterances,
+            min_chars=args.min_utterance_chars,
+            min_inference_utterances=args.min_inference_utterances,
+            short_meeting_max_utterances=args.short_meeting_max_utterances,
         )
+        if meeting_assessment["warning"]:
+            if meeting_assessment["status"] == "skipped":
+                logger.warning(
+                    "%s | meeting_id=%s",
+                    meeting_assessment["warning"],
+                    args.meeting_id,
+                )
+            else:
+                logger.info(
+                    "%s | meeting_id=%s",
+                    meeting_assessment["warning"],
+                    args.meeting_id,
+                )
+
+        if meeting_assessment["status"] == "skipped":
+            stage1_requests: list[dict] = []
+        else:
+            stage1_requests = build_stage1_request_rows(
+                meeting_id=args.meeting_id,
+                utterances=utterances,
+                window_size=args.window_size,
+                transition_index=args.transition_index,
+            )
 
         out_root = stage1_output_dir(args.output_root, args.meeting_id, args.version)
         ensure_dir(out_root)
@@ -334,6 +506,14 @@ def main() -> None:
             "transition_index": args.transition_index,
             "min_utterance_chars": args.min_utterance_chars,
             "max_words_per_utterance": args.max_words_per_utterance,
+            "min_inference_utterances": args.min_inference_utterances,
+            "short_meeting_max_utterances": args.short_meeting_max_utterances,
+            "stage1_inference_status": meeting_assessment["status"],
+            "stage1_skip_reason": meeting_assessment["skip_reason"],
+            "meeting_flags": meeting_assessment["meeting_flags"],
+            "recap_notice": meeting_assessment["recap_notice"],
+            "cleaned_source_utterance_count": meeting_assessment["cleaned_source_utterance_count"],
+            "eligible_source_utterance_count": meeting_assessment["eligible_source_utterance_count"],
             "derived_utterances": len(utterances),
             "stage1_request_count": len(stage1_requests),
             "stage2_input_count": 0,

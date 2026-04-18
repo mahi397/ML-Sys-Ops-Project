@@ -6,7 +6,13 @@ COPY jitsi_transcript_receiver.py /app/jitsi_transcript_receiver.py
 COPY ingest_saved_jitsi_transcript.py /app/
 COPY build_online_inference_payloads.py /app/
 COPY db_task_worker.py /app/
+COPY stage1_payload_service.py /app/
+COPY stage1_forward_service.py /app/
+COPY stage2_input_service.py /app/
+COPY stage2_forward_service.py /app/
 COPY feedback_common.py /app/
+COPY task_service_common.py /app/
+COPY workflow_task_common.py /app/
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates rclone \
