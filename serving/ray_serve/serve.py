@@ -477,7 +477,7 @@ class SegmenterDeployment:
         self.model = None
         self.model_version = "base"
 
-        # 1. Try MLflow registry first (Mahima's trained model)
+        # 1. Try MLflow registry
         if MLFLOW_TRACKING_URI:
             try:
                 import mlflow.pytorch
@@ -487,8 +487,14 @@ class SegmenterDeployment:
                 self.model_version = f"mlflow@{MODEL_ALIAS}"
                 print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
             except Exception as e:
-                print(f"[segmenter] MLflow load failed ({e}), falling back to local path")
-
+                print(f"[segmenter] MLflow @{MODEL_ALIAS} failed ({e}), trying @fallback")
+                try:
+                    fallback_uri = f"models:/{MLFLOW_MODEL_NAME}@fallback"
+                    self.model = mlflow.pytorch.load_model(fallback_uri)
+                    self.model_version = "mlflow@fallback"
+                    print(f"[segmenter] Loaded fallback model from MLflow")
+                except Exception as e2:
+                    print(f"[segmenter] MLflow fallback also failed ({e2}), using local path")
         # 2. Fall back to local fine-tuned weights
         if self.model is None and os.path.exists(MODEL_PATH):
             self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
