@@ -21,6 +21,7 @@ from pathlib import Path
 import os
 import time
 import psutil
+import psycopg2.extras
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -109,6 +110,20 @@ class RecapStore:
                     if rec["meeting_id"] == meeting_id:
                         seen[rec["utterance_idx"]] = rec
         return sorted(seen.values(), key=lambda r: r["utterance_idx"])
+    
+    def get_segment_summary(self, segment_summary_id) -> dict:
+        sql = """
+            SELECT ss.segment_summary_id, ss.topic_label, ss.summary_bullets,
+                ss.segment_index, ts.start_utterance_id, ts.end_utterance_id
+            FROM segment_summaries ss
+            JOIN topic_segments ts ON ss.topic_segment_id = ts.topic_segment_id
+            WHERE ss.segment_summary_id = %s
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (segment_summary_id,))
+                row = cur.fetchone()
+        return dict(row) if row else {}
 
     # ── Feedback corrections ─────────────────────────────────────────
 
@@ -1131,10 +1146,22 @@ class RecapAPIDeployment:
                 )
 
             if isinstance(self.store, PostgresRecapStore):
+                seg = {}
+                if segment_summary_id:
+                    try:
+                        seg = self.store.get_segment_summary(segment_summary_id)
+                        bullets = seg.get("summary_bullets") or []
+                        if isinstance(bullets, str):
+                            seg["summary_bullets"] = json.loads(bullets)
+                    except Exception:
+                        pass
+                seg_snapshot = {k: seg.get(k) for k in
+                                ("segment_summary_id", "topic_label", "summary_bullets", "segment_index")}
                 before = {"utterance_idx": utterance_idx,
-                          "is_boundary": action == "remove_boundary"}
+                        "is_boundary": action == "remove_boundary",
+                        "segment": seg_snapshot}
                 after  = {"utterance_idx": utterance_idx,
-                          "is_boundary": action == "add_boundary"}
+                        "is_boundary": action == "add_boundary"}
                 fid = self.store.save_feedback(
                     meeting_id, segment_summary_id, action, before, after
                 )
