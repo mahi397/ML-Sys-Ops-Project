@@ -28,7 +28,7 @@ services:
       - MAX_SEGMENT_UTTERANCES=200
       - RAY_DEDUP_LOGS=0
       - MODEL_VERSION=roberta-base-v0
-      - DATABASE_URL=postgresql://proj07_user:proj07@129.114.27.165:5432/proj07_sql_db
+      - DATABASE_URL=postgresql://proj07_user:proj07@129.114.27.165:5050/proj07_sql_db
       - MLFLOW_TRACKING_URI=http://129.114.25.185:8000
       - MODEL_ALIAS=prod1        # change to "fallback" to rollback, then: docker compose restart ray-serve
 
