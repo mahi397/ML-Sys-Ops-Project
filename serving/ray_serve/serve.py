@@ -182,7 +182,15 @@ class PostgresRecapStore:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql)
-                return [dict(r) for r in cur.fetchall()]
+                rows = cur.fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            for k in ('started_at', 'ended_at'):
+                if d.get(k) is not None:
+                    d[k] = d[k].isoformat()
+            result.append(d)
+        return result
 
     def get_recap(self, meeting_id: str):
         import psycopg2.extras
