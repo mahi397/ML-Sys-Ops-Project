@@ -88,14 +88,18 @@
 <script>
 // ── Configuration ──
 const API_BASE = '/api';   // proxied by nginx to serving-api:8000
-const MEETING_ID = new URLSearchParams(window.location.search).get('meeting_id') || 'demo';
+const MEETING_ID = new URLSearchParams(window.location.search).get('meeting_id');
 
 // ── State ──
 let recapData = null;
 
 // ── Boot ──
 document.addEventListener('DOMContentLoaded', () => {
-  fetchRecap(MEETING_ID);
+  if (MEETING_ID) {
+    fetchRecap(MEETING_ID);
+  } else {
+    fetchMeetingList();
+  }
 });
 
 // ── API calls ──
@@ -120,9 +124,43 @@ async function fetchRecap(meetingId) {
   }
 }
 
-async function submitFeedback(meetingId, utteranceIdx, action) {
-  const original = action === 'remove_boundary' ? 1 : 0;
-  const corrected = action === 'remove_boundary' ? 0 : 1;
+// ── Meeting list (no meeting_id in URL) ──────────────────────────
+async function fetchMeetingList() {
+  const app = document.getElementById('app');
+  try {
+    const res = await fetch(`${API_BASE}/meetings`);
+    const data = await res.json();
+    const meetings = data.meetings || [];
+
+    if (meetings.length === 0) {
+      app.innerHTML = `
+        <h1>Meeting Recaps</h1>
+        <p class="meta">No recaps yet. POST to <code>/recap</code> to generate one.</p>`;
+      return;
+    }
+
+    let html = `<h1>Meeting Recaps</h1><p class="meta">${meetings.length} meeting${meetings.length !== 1 ? 's' : ''}</p>`;
+    meetings.forEach(m => {
+      // Postgres returns started_at + source_name; JSONL fallback returns created_at + model_version
+      const rawDate = m.started_at || m.created_at || '';
+      const date = rawDate ? rawDate.toString().replace('T', ' ').replace('Z', ' UTC') : '';
+      const badge = m.source_name || m.model_version || 'meeting';
+      html += `
+        <div class="segment" style="cursor:pointer" onclick="window.location='?meeting_id=${m.meeting_id}'">
+          <div class="seg-head">
+            <span class="seg-title">${m.meeting_id}</span>
+            <span class="model-badge">${badge}</span>
+          </div>
+          <p class="seg-summary">${m.segment_count} segment${m.segment_count !== 1 ? 's' : ''} &middot; ${date}</p>
+        </div>`;
+    });
+    app.innerHTML = html;
+  } catch (err) {
+    app.innerHTML = `<h1>Meeting Recaps</h1><p class="meta">Could not load meetings: ${err.message}</p>`;
+  }
+}
+
+async function submitFeedback(meetingId, utteranceIdx, action, segmentSummaryId) {
   try {
     const res = await fetch(`${API_BASE}/feedback`, {
       method: 'POST',
@@ -131,16 +169,9 @@ async function submitFeedback(meetingId, utteranceIdx, action) {
         meeting_id: meetingId,
         utterance_idx: utteranceIdx,
         action: action,
-        original_label: original,
-        corrected_label: corrected
+        segment_summary_id: segmentSummaryId ?? null
       })
     });
-    if (res.ok) showToast('Feedback saved — will be used for retraining');
-    else showToast('Feedback saved locally');
-  } catch {
-    showToast('Feedback saved locally (API offline)');
-  }
-}
 
 // ── Rendering ──
 function render(data) {
@@ -148,7 +179,10 @@ function render(data) {
   const segments = data.segments || [];
   const utterances = data.utterances || [];
 
-  let html = `
+    let html = `
+    <div style="margin-bottom:12px">
+      <a href="/ui" style="font-size:12px;color:var(--blue);text-decoration:none">← All meetings</a>
+    </div>
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
       <div>
         <h1>Meeting recap</h1>
@@ -191,8 +225,7 @@ function render(data) {
         <div class="boundary" id="boundary-${segIdx}">
           <div class="boundary-line"></div>
           <span class="conf">confidence: ${confDisplay}</span>
-          <button class="btn" id="btn-boundary-${segIdx}" onclick="toggleRemoveBoundary(${segIdx}, '${data.meeting_id}', ${boundaryUttIdx})">Remove boundary</button>
-          <div class="boundary-line"></div>
+          <button class="btn" id="btn-boundary-${segIdx}" onclick="toggleRemoveBoundary(${segIdx}, '${data.meeting_id}', ${boundaryUttIdx}, ${seg.segment_summary_id ?? null})">Remove boundary</button>
         </div>
       `;
     }
@@ -217,18 +250,17 @@ function toggleTranscript(id, btn) {
   btn.textContent = el.classList.contains('open') ? 'Hide transcript' : 'Show transcript';
 }
 
-function toggleRemoveBoundary(segIdx, meetingId, uttIdx) {
+function toggleRemoveBoundary(segIdx, meetingId, uttIdx, segmentSummaryId) {
   const btn = document.getElementById(`btn-boundary-${segIdx}`);
   const isActive = btn.classList.contains('btn-remove-active');
   if (isActive) {
-    // Undo — restore boundary, record add_boundary so retraining knows
     btn.classList.remove('btn-remove-active');
     btn.textContent = 'Remove boundary';
-    submitFeedback(meetingId, uttIdx, 'add_boundary');
+    submitFeedback(meetingId, uttIdx, 'add_boundary', segmentSummaryId);
   } else {
     btn.classList.add('btn-remove-active');
     btn.textContent = 'Removed — undo?';
-    submitFeedback(meetingId, uttIdx, 'remove_boundary');
+    submitFeedback(meetingId, uttIdx, 'remove_boundary', segmentSummaryId);
   }
 }
 

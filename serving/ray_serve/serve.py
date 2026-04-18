@@ -29,8 +29,8 @@ from starlette.middleware import Middleware
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LOCAL STORAGE — JSONL file store (drop-in until Postgres is ready)
-# Swap: replace RecapStore methods with Postgres queries, API stays the same.
+# LOCAL STORAGE — JSONL file store (drop-in until Postgress ready)
+# Swap: replace RecapStore methods with Postgres queries, API stays the same
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -152,6 +152,96 @@ class RecapStore:
                     rows.append(json.loads(line.strip()))
         return rows
 
+class PostgresRecapStore:
+    """Reads meetings/utterances/segments from Postgres. Writes feedback to feedback_events"""
+
+    def __init__(self):
+        import psycopg2
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL env var not set")
+        self._url = DATABASE_URL
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.close()
+        print("[postgres] Connection OK")
+
+    def _conn(self):
+        import psycopg2
+        import psycopg2.extras
+        return psycopg2.connect(self._url)
+
+    def list_meetings(self) -> list:
+        import psycopg2.extras
+        sql = """
+            SELECT m.meeting_id, m.source_name, m.started_at, m.ended_at,
+                   COUNT(DISTINCT ss.segment_summary_id) AS segment_count
+            FROM meetings m
+            LEFT JOIN segment_summaries ss ON ss.meeting_id = m.meeting_id
+            GROUP BY m.meeting_id, m.source_name, m.started_at, m.ended_at
+            ORDER BY m.started_at DESC NULLS LAST LIMIT 50
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql)
+                return [dict(r) for r in cur.fetchall()]
+
+    def get_recap(self, meeting_id: str):
+        import psycopg2.extras
+        sql = """
+            SELECT ss.segment_summary_id, ss.segment_index, ss.topic_label,
+                   ss.summary_bullets, ss.status, ss.model_version,
+                   ts.start_utterance_id, ts.end_utterance_id,
+                   ts.start_time_sec AS t_start, ts.end_time_sec AS t_end
+            FROM segment_summaries ss
+            JOIN topic_segments ts ON ss.topic_segment_id = ts.topic_segment_id
+            WHERE ss.meeting_id = %s
+            ORDER BY ss.segment_index
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (meeting_id,))
+                rows = cur.fetchall()
+        return [dict(r) for r in rows] if rows else None
+
+    def get_utterances(self, meeting_id: str) -> list:
+        import psycopg2.extras
+        sql = """
+            SELECT u.utterance_id, u.utterance_index, ms.speaker_label,
+                   COALESCE(u.clean_text, u.raw_text) AS text,
+                   u.start_time_sec, u.end_time_sec,
+                   ut.pred_boundary_prob  AS boundary_confidence,
+                   ut.pred_boundary_label AS is_boundary
+            FROM utterances u
+            JOIN  meeting_speakers ms ON ms.meeting_speaker_id = u.meeting_speaker_id
+            LEFT JOIN utterance_transitions ut ON ut.left_utterance_id = u.utterance_id
+            WHERE u.meeting_id = %s
+            ORDER BY u.utterance_index
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (meeting_id,))
+                return [dict(r) for r in cur.fetchall()]
+
+    def save_feedback(self, meeting_id: str, segment_summary_id,
+                      event_type: str, before_payload: dict, after_payload: dict) -> int:
+        sql = """
+            INSERT INTO feedback_events
+                (meeting_id, segment_summary_id, event_type, event_source,
+                 before_payload, after_payload)
+            VALUES (%s, %s, %s, 'recap_ui', %s::jsonb, %s::jsonb)
+            RETURNING feedback_event_id
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (
+                    meeting_id,
+                    segment_summary_id,
+                    event_type,
+                    json.dumps(before_payload),
+                    json.dumps(after_payload)
+                ))
+                fid = cur.fetchone()[0]
+            conn.commit()
+        return fid
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -166,6 +256,7 @@ DEVICE             = "cuda"  # overridden per-actor in __init__
 MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://129.114.25.185:8000")
 MODEL_ALIAS           = os.getenv("MODEL_ALIAS", "prod1")   # switch to "fallback" to rollback
 MLFLOW_MODEL_NAME     = "jitsi-topic-segmenter"
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
 def _normalize_utterance(u: dict) -> dict:
@@ -814,7 +905,7 @@ class RecapPipelineDeployment:
             return JSONResponse({"error": str(e)}, status_code=500)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RECAP API — GET /api/recap/{meeting_id} + POST /api/feedback
+# RECAP API — GET /api/recap/{meeting_id} + POST /api/feedback --Postgres
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @serve.deployment(name="recap_api", num_replicas=1)
@@ -823,174 +914,252 @@ class RecapAPIDeployment:
     GET  /api/recap/{meeting_id}  → fetch stored recap + utterances
     POST /api/feedback            → submit boundary correction
     GET  /api/feedback/count      → pending corrections count (for retraining trigger)
-    GET  /api/feedback/all        → all corrections (for Aneesh's retraining pipeline)
+    GET  /api/feedback/all        → all corrections ( retraining pipeline)
     """
+    #def __init__(self):
+    #    self.store = RecapStore()
+
+    
     def __init__(self):
-        self.store = RecapStore()
+        if DATABASE_URL:
+            try:
+                self.store = PostgresRecapStore()
+                print("[recap_api] Using PostgresRecapStore")
+            except Exception as e:
+                print(f"[recap_api] Postgres init failed ({e}), falling back to RecapStore")
+                self.store = RecapStore()
+        else:
+            print("[recap_api] No DATABASE_URL — using RecapStore (JSONL)")
+            self.store = RecapStore()
 
     async def __call__(self, request: Request) -> JSONResponse:
         path = request.url.path
         method = request.method
 
         # ── GET /api/recap/{meeting_id} ──────────────────────────
+
         if method == "GET" and "/api/recap/" in path:
             meeting_id = path.split("/api/recap/")[-1].strip("/")
             if not meeting_id:
                 return JSONResponse({"error": "meeting_id required"}, status_code=400)
 
-            recap = self.store.get_recap(meeting_id)
-            if not recap:
-                return JSONResponse(
-                    {"error": f"No recap found for meeting_id '{meeting_id}'"},
-                    status_code=404
-                )
-            utterances = self.store.get_utterances(meeting_id)
-            # ── Transform to UI-compatible format ───────────────────
-            # Reconstruct start_utt/end_utt from stored boundary labels
-            boundary_idxs = [u["utterance_idx"] for u in utterances
-                             if u.get("predicted_label") == 1]
-            summaries = recap["segments_json"]  # Mistral outputs, ordered by segment_id
+            if isinstance(self.store, PostgresRecapStore):
+                # ── Postgres path ────────────────────────────────
+                segments   = self.store.get_recap(meeting_id)
+                if not segments:
+                    return JSONResponse(
+                        {"error": f"No recap found for meeting_id '{meeting_id}'"},
+                        status_code=404
+                    )
+                utterances = self.store.get_utterances(meeting_id)
 
-            ui_segments = []
-            start_utt = 0
-            for i, seg in enumerate(summaries):
-                end_utt = boundary_idxs[i] if i < len(boundary_idxs) else (
-                    utterances[-1]["utterance_idx"] if utterances else 0
-                )
-                # boundary_confidence from the utterance at end_utt
-                conf = next(
-                    (u.get("boundary_confidence") for u in utterances
-                     if u["utterance_idx"] == end_utt),
-                    None
-                )
-                ui_segments.append({
-                    "segment_idx":        i,
-                    "start_utt":          start_utt,
-                    "end_utt":            end_utt,
-                    "t_start":            seg.get("t_start", 0),
-                    "t_end":              seg.get("t_end", 0),
-                    "topic_label":        seg.get("topic_label", ""),
-                    # join bullets into a single string for the UI
-                    "summary":            ". ".join(seg.get("summary_bullets", []))
-                                          or seg.get("topic_label", "No summary"),
-                    "boundary_confidence": conf,
+                # utterance_id → utterance_index lookup for start/end mapping
+                uid_to_idx = {u["utterance_id"]: u["utterance_index"] for u in utterances}
+                last_idx   = utterances[-1]["utterance_index"] if utterances else 0
+
+                ui_segments = []
+                for i, seg in enumerate(segments):
+                    start_utt = uid_to_idx.get(seg["start_utterance_id"], 0)
+                    end_utt   = uid_to_idx.get(seg["end_utterance_id"], last_idx)
+                    conf = next(
+                        (u.get("boundary_confidence") for u in utterances
+                         if u["utterance_index"] == end_utt),
+                        None
+                    )
+                    bullets = seg.get("summary_bullets") or []
+                    if isinstance(bullets, str):
+                        try:
+                            bullets = json.loads(bullets)
+                        except Exception:
+                            bullets = [bullets]
+                    ui_segments.append({
+                        "segment_idx":        i,
+                        "segment_summary_id": seg["segment_summary_id"],
+                        "start_utt":          start_utt,
+                        "end_utt":            end_utt,
+                        "t_start":            float(seg.get("t_start") or 0),
+                        "t_end":              float(seg.get("t_end") or 0),
+                        "topic_label":        seg.get("topic_label", ""),
+                        "summary":            ". ".join(bullets) or seg.get("topic_label", "No summary"),
+                        "boundary_confidence": float(conf) if conf is not None else None,
+                    })
+
+                speakers = list({u.get("speaker_label", "") for u in utterances if u.get("speaker_label")})
+                t_vals = [float(u["start_time_sec"]) for u in utterances if u.get("start_time_sec") is not None]
+                duration_secs = int(max(t_vals) - min(t_vals)) if len(t_vals) > 1 else 0
+                duration_str  = f"{duration_secs // 60} min" if duration_secs else ""
+
+                ui_utterances = [
+                    {
+                        "utterance_idx": u["utterance_index"],
+                        "speaker":       u.get("speaker_label", "Speaker"),
+                        "text":          u.get("text", ""),
+                        "t_start":       float(u.get("start_time_sec") or 0),
+                    }
+                    for u in utterances
+                ]
+
+                return JSONResponse({
+                    "recap_id":         f"pg_{meeting_id}",
+                    "meeting_id":       meeting_id,
+                    "meeting_title":    meeting_id,
+                    "meeting_duration": duration_str,
+                    "participant_count": len(speakers),
+                    "model_version":    segments[0].get("model_version", "unknown"),
+                    "created_at":       "",
+                    "segments":         ui_segments,
+                    "utterances":       ui_utterances,
                 })
-                start_utt = end_utt + 1
 
-            # Compute meeting metadata from utterances
-            speakers = list({u.get("speaker", "") for u in utterances if u.get("speaker")})
-            t_values = [u.get("t_start", 0) for u in utterances if u.get("t_start") is not None]
-            duration_secs = int(max(t_values) - min(t_values)) if len(t_values) > 1 else 0
-            duration_str = f"{duration_secs // 60} min" if duration_secs else ""
-
-            ui_utterances = [
-                {
-                    "utterance_idx": u["utterance_idx"],
-                    "speaker":       u.get("speaker", "Speaker"),
-                    "text":          u.get("text", ""),
-                    "t_start":       u.get("t_start", 0),
-                }
-                for u in utterances
-            ]
-
-            return JSONResponse({
-                "recap_id":        recap["recap_id"],
-                "meeting_id":      meeting_id,
-                "meeting_title":   meeting_id,          # no title stored; use id
-                "meeting_duration": duration_str,
-                "participant_count": len(speakers),
-                "model_version":   recap["model_version"],
-                "created_at":      recap["created_at"],
-                "segments":        ui_segments,
-                "utterances":      ui_utterances,
-            })
-
+            else:
+                # ── JSONL fallback path ──────────────────────────
+                recap = self.store.get_recap(meeting_id)
+                if not recap:
+                    return JSONResponse(
+                        {"error": f"No recap found for meeting_id '{meeting_id}'"},
+                        status_code=404
+                    )
+                utterances = self.store.get_utterances(meeting_id)
+                boundary_idxs = [u["utterance_idx"] for u in utterances
+                                 if u.get("predicted_label") == 1]
+                summaries = recap["segments_json"]
+                ui_segments = []
+                start_utt = 0
+                for i, seg in enumerate(summaries):
+                    end_utt = boundary_idxs[i] if i < len(boundary_idxs) else (
+                        utterances[-1]["utterance_idx"] if utterances else 0
+                    )
+                    conf = next(
+                        (u.get("boundary_confidence") for u in utterances
+                         if u["utterance_idx"] == end_utt), None
+                    )
+                    ui_segments.append({
+                        "segment_idx":        i,
+                        "segment_summary_id": None,
+                        "start_utt":          start_utt,
+                        "end_utt":            end_utt,
+                        "t_start":            seg.get("t_start", 0),
+                        "t_end":              seg.get("t_end", 0),
+                        "topic_label":        seg.get("topic_label", ""),
+                        "summary":            ". ".join(seg.get("summary_bullets", []))
+                                              or seg.get("topic_label", "No summary"),
+                        "boundary_confidence": conf,
+                    })
+                    start_utt = end_utt + 1
+                speakers = list({u.get("speaker", "") for u in utterances if u.get("speaker")})
+                t_values = [u.get("t_start", 0) for u in utterances if u.get("t_start") is not None]
+                duration_secs = int(max(t_values) - min(t_values)) if len(t_values) > 1 else 0
+                duration_str  = f"{duration_secs // 60} min" if duration_secs else ""
+                ui_utterances = [
+                    {
+                        "utterance_idx": u["utterance_idx"],
+                        "speaker":       u.get("speaker", "Speaker"),
+                        "text":          u.get("text", ""),
+                        "t_start":       u.get("t_start", 0),
+                    }
+                    for u in utterances
+                ]
+                return JSONResponse({
+                    "recap_id":         recap["recap_id"],
+                    "meeting_id":       meeting_id,
+                    "meeting_title":    meeting_id,
+                    "meeting_duration": duration_str,
+                    "participant_count": len(speakers),
+                    "model_version":    recap["model_version"],
+                    "created_at":       recap["created_at"],
+                    "segments":         ui_segments,
+                    "utterances":       ui_utterances,
+                })
+            
         # ── POST /api/feedback ───────────────────────────────────
+             
         if method == "POST" and path.rstrip("/") == "/api/feedback":
             try:
                 body = await request.json()
             except Exception:
                 return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-            meeting_id    = body.get("meeting_id")
-            utterance_idx = body.get("utterance_idx")
-            action        = body.get("action")
+            meeting_id         = body.get("meeting_id")
+            utterance_idx      = body.get("utterance_idx")
+            action             = body.get("action")
+            segment_summary_id = body.get("segment_summary_id")  # passed by UI from segment data
 
             if not meeting_id:
                 return JSONResponse({"error": "meeting_id required"}, status_code=400)
             if not action:
                 return JSONResponse({"error": "action required"}, status_code=400)
 
-            # Overall meeting-level feedback — no utterance_idx needed
+            # ── Overall meeting-level feedback ────────────────────
             if isinstance(action, str) and action.startswith("overall_"):
-                correction = self.store.save_feedback(meeting_id, -1, action, -1)
+                if isinstance(self.store, PostgresRecapStore):
+                    before = {}
+                    after  = {"rating": action.replace("overall_", "")}
+                    fid = self.store.save_feedback(meeting_id, None, action, before, after)
+                    return JSONResponse({"status": "recorded", "action": action,
+                                        "feedback_event_id": fid})
+                else:
+                    correction = self.store.save_feedback(meeting_id, -1, action, -1)
+                    return JSONResponse({"status": "recorded", "action": action,
+                                        "correction_id": correction["correction_id"]})
+
+            # ── Boundary-level feedback ───────────────────────────
+            if utterance_idx is None:
+                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
+            if action not in ("remove_boundary", "add_boundary"):
+                return JSONResponse(
+                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
+                    status_code=400
+                )
+
+            if isinstance(self.store, PostgresRecapStore):
+                before = {"utterance_idx": utterance_idx,
+                          "is_boundary": action == "remove_boundary"}
+                after  = {"utterance_idx": utterance_idx,
+                          "is_boundary": action == "add_boundary"}
+                fid = self.store.save_feedback(
+                    meeting_id, segment_summary_id, action, before, after
+                )
                 return JSONResponse({
                     "status": "recorded",
-                    "action": action,
-                    "correction_id": correction["correction_id"]
+                    "feedback_event_id": fid,
+                    "meeting_id":    meeting_id,
+                    "utterance_idx": utterance_idx,
+                    "action":        action,
                 })
-
-            # Boundary-level feedback — utterance_idx required
-            if utterance_idx is None:
-                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
-            if action not in ("remove_boundary", "add_boundary"):
-                return JSONResponse(
-                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
-                    status_code=400
+            else:
+                utterances = self.store.get_utterances(meeting_id)
+                original_label = 0
+                for u in utterances:
+                    if u["utterance_idx"] == utterance_idx:
+                        original_label = u["predicted_label"]
+                        break
+                correction = self.store.save_feedback(
+                    meeting_id, utterance_idx, action, original_label
                 )
-
-            # ── Boundary-level feedback (utterance_idx required) ──────────────
-            if utterance_idx is None:
-                return JSONResponse({"error": "utterance_idx required"}, status_code=400)
-            if action not in ("remove_boundary", "add_boundary"):
-                return JSONResponse(
-                    {"error": "action must be 'remove_boundary', 'add_boundary', or 'overall_*'"},
-
-                    status_code=400
-                )
-
-            # Look up original label from stored utterances
-            utterances = self.store.get_utterances(meeting_id)
-            original_label = 0
-            for u in utterances:
-                if u["utterance_idx"] == utterance_idx:
-                    original_label = u["predicted_label"]
-                    break
-
-            correction = self.store.save_feedback(
-                meeting_id, utterance_idx, action, original_label
-            )
-            pending = self.store.count_pending_corrections()
-
-            return JSONResponse({
-                "status": "recorded",
-                "correction_id": correction["correction_id"],
-                "meeting_id": meeting_id,
-                "utterance_idx": utterance_idx,
-                "action": action,
-                "original_label": original_label,
-                "corrected_label": correction["corrected_label"],
-                "pending_corrections_total": pending,
-                "retrain_threshold": 500,
-                "retrain_triggered": pending >= 500
-            })
-
+                return JSONResponse({
+                    "status":          "recorded",
+                    "correction_id":   correction["correction_id"],
+                    "meeting_id":      meeting_id,
+                    "utterance_idx":   utterance_idx,
+                    "action":          action,
+                    "original_label":  original_label,
+                    "corrected_label": correction["corrected_label"],
+                })
+            
         # ── GET /api/feedback/count ──────────────────────────────
+             
         if method == "GET" and path.rstrip("/") == "/api/feedback/count":
-            pending = self.store.count_pending_corrections()
-            return JSONResponse({
-                "pending_corrections": pending,
-                "retrain_threshold": 500,
-                "retrain_triggered": pending >= 500
-            })
+            # tracks retraining thresholds via dataset_versions table
+            return JSONResponse({"info": "Feedback tracked in Postgres feedback_events"})
 
         # ── GET /api/feedback/all ────────────────────────────────
         if method == "GET" and path.rstrip("/") == "/api/feedback/all":
-            corrections = self.store.get_all_feedback()
-            return JSONResponse({
-                "total": len(corrections),
-                "corrections": corrections
-            })
+            return JSONResponse({"info": "Query feedback_events table directly"})
+
+        # ── GET /api/meetings ─────────────────────────────────────
+        if method == "GET" and path.rstrip("/") == "/api/meetings":
+            meetings = self.store.list_meetings()
+            return JSONResponse({"meetings": meetings, "total": len(meetings)})
 
         return JSONResponse({"error": "Not found"}, status_code=404)
 
