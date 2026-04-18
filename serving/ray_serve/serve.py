@@ -245,16 +245,24 @@ class PostgresRecapStore:
                 return [dict(r) for r in cur.fetchall()]
 
     _ACTION_MAP = {
-        "remove_boundary": "merge_segments",
-        "add_boundary":    "split_segment",
-        "overall_good":    "accept_summary",
-        "overall_bad":     "boundary_correction",
-    }
+    "remove_boundary":  "merge_segments",
+    "add_boundary":     "split_segment",
+    "overall_good":     "accept_summary",
+    "overall_positive": "accept_summary",
+    "overall_bad":      "boundary_correction",
+    "overall_negative": "boundary_correction",
+    "overall_needs_work": "boundary_correction",
+}
 
     def save_feedback(self, meeting_id: str, segment_summary_id,
                       event_type: str, before_payload: dict, after_payload: dict) -> int:
-        event_type = self._ACTION_MAP.get(event_type, event_type)
-
+        if event_type.startswith("overall_"):
+            positive_words = ("good", "positive", "great", "ok")
+            event_type = "accept_summary" if any(w in event_type for w in positive_words) \
+                        else "boundary_correction"
+        else:
+            event_type = {"remove_boundary": "merge_segments",
+                        "add_boundary":    "split_segment"}.get(event_type, "boundary_correction")
         sql = """
             INSERT INTO feedback_events
                 (meeting_id, segment_summary_id, event_type, event_source,
