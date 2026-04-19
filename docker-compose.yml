@@ -213,7 +213,7 @@ services:
       - bash
       - -c
     command:
-      - "pip install psycopg2-binary boto3 && mlflow server --backend-store-uri postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/mlflowdb --artifacts-destination s3://${BUCKET_NAME}/ --serve-artifacts --host 0.0.0.0 --port 8000"
+      - "pip install psycopg2-binary boto3 && mlflow server --backend-store-uri postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/mlflowdb --artifacts-destination s3://${BUCKET_NAME}/ --serve-artifacts --host 0.0.0.0 --port 5000"
     environment:
       # MLflow artifact store — CHI@TACC S3 (same bucket as lab setup)
       MLFLOW_TRACKING_URI: http://0.0.0.0:5000
@@ -295,7 +295,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       # MLflow for model loading — port 8000
-      MLFLOW_TRACKING_URI: http://mlflow:8000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       MODEL_NAME: jitsi-topic-segmenter
       MODEL_ALIAS: production
       # MinIO for local artifact cache
