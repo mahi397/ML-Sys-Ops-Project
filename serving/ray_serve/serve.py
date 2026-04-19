@@ -506,6 +506,7 @@ class MetricsDeployment:
     name="segmenter",
     num_replicas=1,
     ray_actor_options={"num_gpus": 0.3},
+    max_ongoing_requests=10, 
 )
 class SegmenterDeployment:
     def __init__(self):
@@ -713,6 +714,7 @@ class SegmenterDeployment:
     name="summarizer",
     num_replicas=1,
     ray_actor_options={"num_gpus": 0.7},
+    max_ongoing_requests=3,
 )
 class SummarizerDeployment:
     def __init__(self):
