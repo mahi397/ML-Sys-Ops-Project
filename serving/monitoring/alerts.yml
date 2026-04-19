@@ -91,10 +91,33 @@ groups:
           summary: "Median boundary confidence < 0.3 — possible data drift"
 
       - alert: RetrainingThresholdReached
-        expr: jitsi_pending_corrections >= 500
+        expr: jitsi_pending_corrections >= 50
         for: 5m
         labels:
           severity: warning
           action: retrain
         annotations:
           summary: "500 corrections accumulated — trigger retraining"
+
+  - name: user_feedback_drift
+    rules:
+      - alert: HighBoundaryCorrections
+        expr: increase(jitsi_feedback_corrections_total{action="remove_boundary"}[1h]) > 10
+        for: 0m
+        labels:
+          severity: warning
+          action: investigate
+        annotations:
+          summary: "10+ boundary removals in 1 hour — users disagreeing with model segmentation"
+          description: "{{ $value }} corrections in last hour. Possible model drift — check confidence distribution."
+
+      - alert: FeedbackDriftSpiking
+        expr: |
+          rate(jitsi_feedback_corrections_total{action="remove_boundary"}[10m]) 
+          / rate(jitsi_requests_total{endpoint="recap",status="success"}[10m]) > 0.3
+        for: 5m
+        labels:
+          severity: critical
+          action: investigate
+        annotations:
+          summary: "30%+ of recap segments being manually corrected — model output unreliable"        

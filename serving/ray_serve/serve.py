@@ -434,6 +434,10 @@ class MetricsDeployment:
             'jitsi_active_requests', 'Active requests',
             ['endpoint'], registry=self.registry
         )
+        self.feedback_corrections = Counter(
+            'jitsi_feedback_corrections_total', 'User boundary corrections',
+            ['action'], registry=self.registry
+        )
 
     def _update_system(self):
         try:
@@ -458,7 +462,7 @@ class MetricsDeployment:
             self.request_latency.labels(endpoint=endpoint).observe(latency)
 
         if "batch_size" in data:
-            self.batch_size.labels(model="segmenter").observe(data["batch_size"])
+            self.batch_size.labels(model="segmenter").observe(data["batch_size"])    
         if "confidence" in data:
             self.confidence.observe(data["confidence"])
         if data.get("is_boundary"):
@@ -479,6 +483,12 @@ class MetricsDeployment:
             self.recap_duration.observe(data["recap_duration"])
         if "recap_segments" in data:
             self.recap_segments.observe(data["recap_segments"])
+        if "feedback_action" in data:
+            self.feedback_corrections.labels(action=data["feedback_action"]).inc()
+        if data.get("active_inc"):
+            self.active_requests.labels(endpoint=endpoint).inc()
+        if data.get("active_dec"):
+            self.active_requests.labels(endpoint=endpoint).dec()    
 
     async def __call__(self, request: Request) -> Response:
         self._update_system()
@@ -1057,9 +1067,12 @@ class RecapAPIDeployment:
             except Exception as e:
                 print(f"[recap_api] Postgres init failed ({e}), falling back to RecapStore")
                 self.store = RecapStore()
+                #self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
         else:
             print("[recap_api] No DATABASE_URL — using RecapStore (JSONL)")
             self.store = RecapStore()
+        self.metrics = serve.get_deployment_handle("metrics", app_name="metrics")
+
 
     async def __call__(self, request: Request) -> JSONResponse:
         path = request.url.path
@@ -1220,10 +1233,12 @@ class RecapAPIDeployment:
                     before = {}
                     after  = {"rating": action.replace("overall_", "")}
                     fid = self.store.save_feedback(meeting_id, None, action, before, after)
+                    self.metrics.record.remote({"feedback_action": "overall"})
                     return JSONResponse({"status": "recorded", "action": action,
                                         "feedback_event_id": fid})
                 else:
                     correction = self.store.save_feedback(meeting_id, -1, action, -1)
+                    self.metrics.record.remote({"feedback_action": "overall"})  
                     return JSONResponse({"status": "recorded", "action": action,
                                         "correction_id": correction["correction_id"]})
 
@@ -1256,6 +1271,7 @@ class RecapAPIDeployment:
                 fid = self.store.save_feedback(
                     meeting_id, segment_summary_id, action, before, after
                 )
+                self.metrics.record.remote({"feedback_action": action}) 
                 return JSONResponse({
                     "status": "recorded",
                     "feedback_event_id": fid,
@@ -1273,6 +1289,7 @@ class RecapAPIDeployment:
                 correction = self.store.save_feedback(
                     meeting_id, utterance_idx, action, original_label
                 )
+                self.metrics.record.remote({"feedback_action": action}) 
                 return JSONResponse({
                     "status":          "recorded",
                     "correction_id":   correction["correction_id"],

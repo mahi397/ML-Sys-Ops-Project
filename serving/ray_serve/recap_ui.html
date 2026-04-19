@@ -130,7 +130,8 @@ async function fetchRecap(meetingId) {
 async function fetchMeetingList() {
   const app = document.getElementById('app');
   try {
-    const res = await fetch(`${API_BASE}/api/meetings`);
+     const res = await fetch(`${API_BASE}/api/meetings`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const meetings = data.meetings || [];
 
