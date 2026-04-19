@@ -268,19 +268,9 @@ def trigger_retrain(correction_count, watermark):
 
     try:
         result = subprocess.run(
-            [
-                "docker", "compose",
-                "--profile", "retrain",
-                "run", "--rm",
-                "-e", f"DATASET_VERSION={dataset_version_id or 'unknown'}",
-                "-e", f"FEEDBACK_DATA_DIR={feedback_pool_dir or ''}",
-                "-e", f"MAX_FEEDBACK_EVENT_ID={new_watermark}",
-                "retrain-job",
-                "python", "retrain.py",
-            ],
+            [sys.executable, "/app/retrain.py"],
             capture_output=False,
             timeout=7200,
-            cwd="/project",
             env=retrain_env,
         )
         success = result.returncode == 0
