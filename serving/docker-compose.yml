@@ -29,7 +29,7 @@ services:
       - RAY_DEDUP_LOGS=0
       - MODEL_VERSION=roberta-base-v0
       - DATABASE_URL=postgresql://proj07_user:proj07@129.114.27.165:5432/proj07_sql_db
-      - MLFLOW_TRACKING_URI=http://129.114.25.185:5000/
+      - MLFLOW_TRACKING_URI= http://192.5.86.182:5000
       - MODEL_ALIAS=production 
       - MODEL_RELOAD_INTERVAL_SECONDS=300     
 
