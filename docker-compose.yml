@@ -336,7 +336,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ray_head:
+      ray-head:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
