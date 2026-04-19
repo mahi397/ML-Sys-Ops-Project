@@ -10,6 +10,7 @@ COPY stage1_payload_service.py /app/
 COPY stage1_forward_service.py /app/
 COPY stage2_input_service.py /app/
 COPY stage2_forward_service.py /app/
+COPY user_summary_materialize_service.py /app/
 COPY feedback_common.py /app/
 COPY task_service_common.py /app/
 COPY workflow_task_common.py /app/

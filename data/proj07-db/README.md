@@ -153,6 +153,7 @@ Role:
 - Validates the transcript upload
 - Saves the raw transcript under `/mnt/block/user-behaviour/received_transcripts`
 - Launches the ingester subprocess
+- Returns `400` for invalid parsed transcripts such as missing metadata or zero spoken utterances
 
 DB writes:
 - none directly

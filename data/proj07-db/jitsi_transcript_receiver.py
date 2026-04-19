@@ -123,6 +123,20 @@ def parse_ingester_summary(stdout: str) -> dict:
     return {}
 
 
+def classify_ingester_failure(stdout: str, stderr: str) -> tuple[int, str]:
+    combined_output = "\n".join(part for part in (stdout, stderr) if part)
+    validation_errors = {
+        "No spoken utterances were found in transcript": "No spoken utterances were found in transcript",
+        "Transcript is missing required header/start/end metadata": (
+            "Transcript is missing required header/start/end metadata"
+        ),
+    }
+    for marker, detail in validation_errors.items():
+        if marker in combined_output:
+            return 400, detail
+    return 500, "Transcript saved but DB ingest failed"
+
+
 def run_ingester(
     *,
     transcript_path: Path,
@@ -366,17 +380,19 @@ async def ingest_jitsi_transcript(
         )
 
     if result.returncode != 0:
-        logger.error("Ingester failed for %s", save_path)
+        status_code, detail = classify_ingester_failure(
+            result.stdout or "",
+            result.stderr or "",
+        )
+        log = logger.error if status_code >= 500 else logger.warning
+        log("Ingester failed for %s | detail=%s", save_path, detail)
 
         if result.stdout:
-            logger.error("Ingester stdout:\n%s", result.stdout.strip())
+            log("Ingester stdout:\n%s", result.stdout.strip())
         if result.stderr:
-            logger.error("Ingester stderr:\n%s", result.stderr.strip())
+            log("Ingester stderr:\n%s", result.stderr.strip())
 
-        raise HTTPException(
-            status_code=500,
-            detail="Transcript saved but DB ingest failed",
-        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     if result.stdout:
         logger.info("Ingester stdout:\n%s", result.stdout.strip())
