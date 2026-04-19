@@ -1,27 +1,43 @@
 """
 retrain.py — Fault-tolerant automated retraining with Ray Train
 
-This script is triggered by retrain_watcher.py when enough user feedback
-corrections accumulate. It uses Ray Train's TorchTrainer to make retraining
-robust against worker failures — critical for unattended automated pipelines.
+Adapted to Aneesh's data design (Data_Design_Document.pdf):
+  - Training datasets at objstore-proj07/datasets/roberta_stage1/vN/
+  - Feedback pool at objstore-proj07/datasets/roberta_stage1_feedback_pool/vN/
+  - Dataset versions tracked in dataset_versions table in proj07_sql_db
+  - Data staged to /mnt/block/ before training via rclone
 
 Ray Train integration goes beyond the lab in three ways:
-  1. Wraps a raw PyTorch training loop (not Lightning) with Ray Train's
-     TorchTrainer, using prepare_model/prepare_data_loader/report patterns.
-  2. Uses FailureConfig for real operational robustness: when this runs as
-     an automated retrain job at 3am with no one watching, a GPU hiccup
-     doesn't silently break the feedback loop — Ray resumes from checkpoint.
-  3. Integrates checkpoint-resume with MLflow quality gates: only models that
-     pass task-specific thresholds (boundary F1, Pk, WindowDiff) get
-     registered and promoted. Failed retrains are logged but don't pollute
-     the model registry.
+  1. Wraps a raw PyTorch training loop (not Lightning) with TorchTrainer
+  2. Uses FailureConfig for unattended automated retraining robustness
+  3. Integrates checkpoint-resume with MLflow quality gates for promotion
+
+New in this version (safeguarding + evaluation hardening):
+  - [EVAL]  Slice evaluation: Pk/F1/WD broken down by meeting-size bucket
+            (short/medium/long) and speaker-count bucket. Feeds FAIRNESS
+            safeguarding requirement. Lab: "evaluate on slices of interest."
+  - [EVAL]  Fairness gate: no slice with sufficient data may have Pk > 0.40
+  - [EVAL]  Known failure mode tests: single-topic meetings, very-short meetings,
+            speaker-relabeling invariance. Lab: "evaluate on known failure modes."
+            These are WARN only (don't block registration) but are surfaced in
+            the model card and MLflow.
+  - [SAFE]  Model card: JSON artifact logged to MLflow on every run. Documents
+            training data, metrics, thresholds, fairness results, privacy notes,
+            accountability chain. Covers TRANSPARENCY + ACCOUNTABILITY principles.
+  - [SAFE]  best_threshold tagged on the registered model version so Shruti's
+            serving layer reads it from the registry — not hardcoded.
+  - [SAFE]  Speaker relabeling tokens [SPEAKER_X], [SPEAKER_Y] added to tokenizer
+            vocab so template perturbation tests run without UNK tokens.
+
+Previous fixes retained:
+  - rclone remote configurable via RCLONE_REMOTE env var
+  - DATABASE_URL wired through; DB name proj07_sql_db
+  - OBJSTORE_BUCKET replaces TRAINING_DATA_BUCKET
+  - Soft-fail on audit_log / retrain_log writes
 
 Usage:
-  # Standalone (for testing):
-  python retrain.py --data_dir /data/ami_processed --config configs/retrain.yaml
-
-  # Triggered by retrain_watcher (production):
-  python retrain.py  # reads all config from environment variables
+  python retrain.py --data_dir /mnt/block/roberta_stage1/v2   # local test
+  python retrain.py                                            # production (reads env)
 """
 
 import argparse
@@ -29,9 +45,10 @@ import json
 import os
 import time
 import logging
+import subprocess
 import tempfile
-from pathlib import Path
-from typing import Dict, Any, Optional
+import datetime
+from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
 import yaml
@@ -44,9 +61,8 @@ import mlflow
 import mlflow.pytorch
 
 from sklearn.metrics import f1_score, precision_score, recall_score
-from nltk.metrics.segmentation import windowdiff, pk as pk_metric
+#from nltk.metrics.segmentation import windowdiff, pk as pk_metric
 
-# ── Ray Train imports ──
 import ray
 from ray import train
 from ray.train import RunConfig, FailureConfig, CheckpointConfig, ScalingConfig
@@ -58,6 +74,13 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+#import nltk
+#for pkg in ("punkt", "punkt_tab"):
+ #   try:
+  #      nltk.data.find(f"tokenizers/{pkg}")
+   # except LookupError:
+    #    nltk.download(pkg, quiet=True)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -67,45 +90,43 @@ log = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 DEFAULT_RETRAIN_CONFIG = {
-    # ── Model: use Optuna-best hyperparameters from initial implementation ──
-    # Best trial (#10/20): test_pk=0.213, test_f1=0.232, test_wd=0.365
-    # These are the proven-best values; retrain should not deviate without cause.
+    # Optuna-best from initial implementation (Trial #10/20)
+    # test_pk=0.213, test_f1=0.232, test_wd=0.365
     "model_name": "roberta-base",
     "freeze_backbone": False,
-    "lr": 2.29e-5,                       # Optuna best (sweep range: 1e-5 to 5e-5)
-    "batch_size": 32,                    # Optuna best
-    "epochs": 8,                         # same as best full run
-    "warmup_ratio": 0.105,               # Optuna best
-    "weight_decay": 0.072,               # Optuna best
+    "lr": 2.29e-5,
+    "batch_size": 8, # was 32, reduced for test on cpu vm
+    "epochs": 8,
+    "warmup_ratio": 0.105,
+    "weight_decay": 0.072,
     "max_seq_len": 256,
-    "dropout": 0.21,                     # Optuna best
+    "dropout": 0.21,
     "early_stopping_patience": 2,
-    "max_oversample": 4.1,               # Optuna best
+    "max_oversample": 4.1,
     "seed": 42,
-    # ── Warm-start: load existing fine-tuned model from MLflow instead of base ──
-    # Retraining with feedback data on top of an already-fine-tuned model converges
-    # faster and is less likely to regress. Set to None to train from base weights.
-    "warm_start_model_alias": "production",  # load this alias from MLflow registry
-    # ── Data ──
-    "data_dir": "/data/ami_processed",
-    "feedback_data_dir": None,           # if set, merges feedback corrections
-    "feedback_weight": 2.0,              # upsample weight for feedback examples
-    # ── MLflow ──
+    "warm_start_model_alias": "production",
+    # Data paths
+    "data_dir": "/mnt/block/roberta_stage1/v2",
+    "feedback_data_dir": None,
+    "feedback_weight": 2.0,
+    # Object storage
+    "objstore_bucket": "objstore-proj07",
+    "staging_base": "/mnt/block",
+    "rclone_remote": "chi_tacc",
+    # MLflow
     "experiment_name": "jitsi-topic-segmentation",
     "model_registry_name": "jitsi-topic-segmenter",
-    # ── Quality gates — calibrated to actual initial impl results ──
-    # The retrained model must be at least as good as the current production model.
-    # Best initial results: test_pk=0.213, test_f1=0.232, test_wd=0.365
-    # Gates are set slightly below best to allow for noise from new feedback data,
-    # but above the non-sweep roberta-base results (pk=0.228, f1=0.222) to ensure
-    # we don't regress below our second-best candidate.
-    "gate_min_f1": 0.20,                 # below 0.232 best, above 0.144 baseline
-    "gate_max_pk": 0.25,                 # below 0.228 second-best, above 0.213 best
-    "gate_max_windowdiff": 0.40,         # below 0.393 frozen-backbone, above 0.365 best
-    # ── Ray Train ──
+    # Aggregate quality gates (calibrated to actual initial impl results)
+    "gate_min_f1": 0.20,
+    "gate_max_pk": 0.25,
+    "gate_max_windowdiff": 0.40,
+    # Slice fairness gate — no single slice may exceed this Pk
+    # Set higher than aggregate gate to allow for small-slice noise
+    "slice_gate_max_pk": 0.40,
+    # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
-    "ray_storage_path": "s3://ray-checkpoints/",
+    "ray_storage_path": "/mnt/block/ray-checkpoints",
     "ray_max_failures": 2,
 }
 
@@ -115,24 +136,23 @@ def load_retrain_config(config_path: Optional[str] = None) -> Dict:
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:
             cfg.update(yaml.safe_load(f))
-    # Environment variable overrides (for Docker/compose integration)
-    env_map = {
+    env_overrides = {
         "DATA_DIR": "data_dir",
         "FEEDBACK_DATA_DIR": "feedback_data_dir",
-        "MLFLOW_TRACKING_URI": None,  # handled separately
         "MODEL_NAME": "model_registry_name",
-        "TRAINING_DATA_BUCKET": None,
         "RETRAIN_LR": "lr",
         "RETRAIN_EPOCHS": "epochs",
         "RETRAIN_BATCH_SIZE": "batch_size",
+        "OBJSTORE_BUCKET": "objstore_bucket",
+        "RCLONE_REMOTE": "rclone_remote",
     }
-    for env_key, cfg_key in env_map.items():
+    for env_key, cfg_key in env_overrides.items():
         val = os.environ.get(env_key)
-        if val and cfg_key:
+        if val:
             cfg[cfg_key] = val
-    # Type coercion
     for k in ("lr", "weight_decay", "warmup_ratio", "dropout", "feedback_weight",
-              "max_oversample", "gate_min_f1", "gate_max_pk", "gate_max_windowdiff"):
+              "max_oversample", "gate_min_f1", "gate_max_pk", "gate_max_windowdiff",
+              "slice_gate_max_pk"):
         if k in cfg and cfg[k] is not None:
             cfg[k] = float(cfg[k])
     for k in ("batch_size", "epochs", "max_seq_len", "early_stopping_patience",
@@ -143,86 +163,212 @@ def load_retrain_config(config_path: Optional[str] = None) -> Dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Data loading (reused from train.py with feedback integration)
+# Data staging
+# ═══════════════════════════════════════════════════════════════════════════
+
+def stage_data_from_objstore(objstore_path: str, local_dir: str, cfg: Dict = None) -> bool:
+    if os.path.exists(local_dir) and any(f.endswith(".jsonl") for f in os.listdir(local_dir)):
+        log.info(f"Data already staged at {local_dir}, skipping download")
+        return True
+    rclone_remote = (cfg or {}).get("rclone_remote") or os.environ.get("RCLONE_REMOTE", "chi_tacc")
+    bucket = os.environ.get("OBJSTORE_BUCKET", (cfg or {}).get("objstore_bucket", "objstore-proj07"))
+    remote = f"{rclone_remote}:{bucket}/{objstore_path}"
+    os.makedirs(local_dir, exist_ok=True)
+    log.info(f"Staging data: {remote} → {local_dir}")
+    try:
+        result = subprocess.run(
+            ["rclone", "copy", remote, local_dir, "--progress"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            log.error(f"rclone failed: {result.stderr[:500]}")
+            return False
+        log.info(f"Staged {len(os.listdir(local_dir))} files to {local_dir}")
+        return True
+    except FileNotFoundError:
+        log.warning("rclone not found — assuming data is already staged locally")
+        return os.path.exists(local_dir)
+    except subprocess.TimeoutExpired:
+        log.error("rclone timed out after 300s")
+        return False
+
+
+def resolve_dataset_path(cfg: Dict) -> str:
+    if os.path.exists(cfg["data_dir"]):
+        jsonl_files = [f for f in os.listdir(cfg["data_dir"]) if f.endswith(".jsonl")]
+        if jsonl_files:
+            log.info(f"Using explicit data_dir: {cfg['data_dir']} ({len(jsonl_files)} files)")
+            return cfg["data_dir"]
+    db_url = os.environ.get("DATABASE_URL", "postgresql://recap:changeme@postgres:5432/proj07_sql_db")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT object_key FROM dataset_versions
+            WHERE dataset_name = 'roberta_stage1'
+            ORDER BY dataset_version_id DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if row:
+            obj_key = row[0]
+            version = obj_key.rstrip("/").split("/")[-1]
+            local_dir = os.path.join(cfg["staging_base"], "roberta_stage1", version)
+            if stage_data_from_objstore(obj_key, local_dir, cfg):
+                log.info(f"Resolved dataset from dataset_versions: {local_dir}")
+                return local_dir
+        else:
+            log.warning("No roberta_stage1 entry in dataset_versions — falling back to default")
+    except Exception as e:
+        log.warning(f"Could not resolve dataset from DB: {e}")
+    log.info(f"Falling back to default data_dir: {cfg['data_dir']}")
+    return cfg["data_dir"]
+
+
+def resolve_feedback_path(cfg: Dict) -> Optional[str]:
+    if cfg.get("feedback_data_dir"):
+        if os.path.exists(cfg["feedback_data_dir"]):
+            return cfg["feedback_data_dir"]
+        version = cfg["feedback_data_dir"].rstrip("/").split("/")[-1]
+        local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback_pool", version)
+        if stage_data_from_objstore(cfg["feedback_data_dir"], local_dir, cfg):
+            return local_dir
+    db_url = os.environ.get("DATABASE_URL", "postgresql://recap:changeme@postgres:5432/proj07_sql_db")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT object_key FROM dataset_versions
+            WHERE dataset_name = 'roberta_stage1_feedback_pool'
+            ORDER BY dataset_version_id DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if row:
+            obj_key = row[0]
+            version = obj_key.rstrip("/").split("/")[-1]
+            local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback_pool", version)
+            if stage_data_from_objstore(obj_key, local_dir, cfg):
+                log.info(f"Resolved feedback pool: {local_dir}")
+                return local_dir
+    except Exception as e:
+        log.warning(f"Could not resolve feedback pool from DB: {e}")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Data loading
 # ═══════════════════════════════════════════════════════════════════════════
 
 def format_window(window: list) -> str:
     parts = []
     for utt in sorted(window, key=lambda u: u["position"]):
-        if utt["text"].strip():
-            parts.append(f"[SPEAKER_{utt['speaker']}]: {utt['text']}")
+        if utt.get("is_padding", False):
+            continue
+        if utt["text"] and utt["text"].strip():
+            speaker = utt["speaker"] or "UNK"
+            parts.append(f"[SPEAKER_{speaker}]: {utt['text']}")
     return " ".join(parts)
 
 
-def load_jsonl(path: str):
-    examples = []
+def load_jsonl(path: str) -> List[Dict]:
     with open(path) as f:
-        for line in f:
-            examples.append(json.loads(line))
-    return examples
+        return [json.loads(line) for line in f]
 
 
-def load_split(data_dir: str, split: str):
+def load_split(data_dir: str, split: str) -> Tuple[List, List, List]:
     path = os.path.join(data_dir, f"{split}.jsonl")
     if not os.path.exists(path):
         log.warning(f"Split file not found: {path}")
         return [], [], []
     examples = load_jsonl(path)
-    texts = [format_window(e["window"]) for e in examples]
-    labels = [e["label"] for e in examples]
-    meeting_ids = [e["meeting_id"] for e in examples]
+    texts = [format_window(e["input"]["window"]) for e in examples]
+    labels = [e["output"]["label"] for e in examples]
+    meeting_ids = [e["input"]["meeting_id"] for e in examples]
     return texts, labels, meeting_ids
 
 
-def load_feedback_data(feedback_dir: str):
-    """
-    Load user-corrected training examples from the batch pipeline output.
-    These are stored in the same JSONL format as AMI data, but with
-    meeting_ids prefixed 'fb-' to distinguish production data from AMI.
-    """
-    path = os.path.join(feedback_dir, "feedback_train.jsonl")
+def load_split_with_metadata(data_dir: str, split: str) -> Tuple[List, List, List, List]:
+    """Load split and return number-of-speakers per example for slice evaluation."""
+    path = os.path.join(data_dir, f"{split}.jsonl")
     if not os.path.exists(path):
-        log.info("No feedback training data found — training on AMI only")
-        return [], [], []
+        log.warning(f"Split file not found: {path}")
+        return [], [], [], []
     examples = load_jsonl(path)
-    texts = [format_window(e["window"]) for e in examples]
-    labels = [e["label"] for e in examples]
-    meeting_ids = [e["meeting_id"] for e in examples]
-    log.info(f"Loaded {len(texts)} feedback examples for retraining")
-    return texts, labels, meeting_ids
+    texts = [format_window(e["input"]["window"]) for e in examples]
+    labels = [e["output"]["label"] for e in examples]
+    meeting_ids = [e["input"]["meeting_id"] for e in examples]
+    n_speakers = [len(set(u["speaker"] for u in e["input"]["window"] if u["speaker"] is not None)) for e in examples]
+    return texts, labels, meeting_ids, n_speakers
 
 
-def merge_datasets(ami_texts, ami_labels, ami_mids,
-                   fb_texts, fb_labels, fb_mids,
+def load_feedback_data(feedback_dir: str) -> Tuple[List, List, List]:
+    for filename in ("feedback_examples.jsonl", "feedback_train.jsonl"):
+        path = os.path.join(feedback_dir, filename)
+        if os.path.exists(path):
+            examples = load_jsonl(path)
+            texts = [format_window(e["input"]["window"]) for e in examples]
+            labels = [e["output"]["label"] for e in examples]
+            meeting_ids = [e["input"]["meeting_id"] for e in examples]
+            log.info(f"Loaded {len(texts)} feedback examples from {path}")
+            return texts, labels, meeting_ids
+    log.info(f"No feedback data found in {feedback_dir} — AMI only")
+    return [], [], []
+
+
+def merge_datasets(ami_texts, ami_labels, ami_mids, fb_texts, fb_labels, fb_mids,
                    feedback_weight: float = 2.0):
-    """
-    Merge AMI corpus with user feedback data.
-    Feedback examples are upsampled by feedback_weight to give the model
-    stronger signal on the types of boundaries users actually correct.
-    This implements the proposal's "upsample high-disagreement meetings"
-    strategy — feedback examples ARE the high-disagreement cases.
-    """
     n_repeats = max(1, int(feedback_weight))
-    all_texts = ami_texts + fb_texts * n_repeats
-    all_labels = ami_labels + fb_labels * n_repeats
-    all_mids = ami_mids + fb_mids * n_repeats
-    log.info(f"Merged dataset: {len(ami_texts)} AMI + {len(fb_texts)}x{n_repeats} "
-             f"feedback = {len(all_texts)} total")
-    return all_texts, all_labels, all_mids
+    log.info(f"Merged: {len(ami_texts)} AMI + {len(fb_texts)}x{n_repeats} feedback"
+             f" = {len(ami_texts) + len(fb_texts) * n_repeats} total")
+    return (ami_texts + fb_texts * n_repeats,
+            ami_labels + fb_labels * n_repeats,
+            ami_mids + fb_mids * n_repeats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Metrics (reused from train.py)
+# Metrics
 # ═══════════════════════════════════════════════════════════════════════════
 
 THRESHOLDS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
 
+def _pk_single(ref, hyp, k, boundary="1"):
+    """Pure Python Pk metric — no nltk needed."""
+    if len(ref) != len(hyp):
+        return 1.0
+    err = 0
+    total = 0
+    for i in range(len(ref) - k):
+        r = ref[i] != ref[i + k]
+        h = hyp[i] != hyp[i + k]
+        if r != h:
+            err += 1
+        total += 1
+    return err / total if total > 0 else 0.0
 
-def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
-    if meeting_ids is None:
+
+def _windowdiff_single(ref, hyp, k, boundary="1"):
+    """Pure Python WindowDiff — no nltk needed."""
+    if len(ref) != len(hyp):
+        return 1.0
+    err = 0
+    total = 0
+    for i in range(len(ref) - k):
+        r = ref[i:i+k+1].count(boundary)
+        h = hyp[i:i+k+1].count(boundary)
+        if r != h:
+            err += 1
+        total += 1
+    return err / total if total > 0 else 0.0
+
+
+def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None) -> Dict:
+    if not meeting_ids:
         return {"window_diff": -1.0, "pk": -1.0}
-    meeting_true = defaultdict(list)
-    meeting_pred = defaultdict(list)
+    meeting_true: Dict[str, List] = defaultdict(list)
+    meeting_pred: Dict[str, List] = defaultdict(list)
     for mid, t, p in zip(meeting_ids, true_labels, pred_labels):
         meeting_true[mid].append(t)
         meeting_pred[mid].append(p)
@@ -234,8 +380,8 @@ def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
             continue
         k = max(2, len(ref) // 10)
         try:
-            wd_scores.append(windowdiff(ref, hyp, k=k, boundary="1"))
-            pk_scores.append(pk_metric(ref, hyp, k=k, boundary="1"))
+            wd_scores.append(_windowdiff_single(ref, hyp, k=k, boundary="1"))
+            pk_scores.append(_pk_single(ref, hyp, k=k, boundary="1"))
         except Exception:
             pass
     if not wd_scores:
@@ -249,13 +395,10 @@ def compute_segmentation_metrics(true_labels, pred_labels, meeting_ids=None):
 def sweep_thresholds(probs, true_labels, meeting_ids):
     probs = np.array(probs)
     true_labels = np.array(true_labels)
-    best_pk = float("inf")
-    best_threshold = 0.5
-    best_metrics = {}
+    best_pk, best_threshold, best_metrics = float("inf"), 0.5, {}
     for thr in THRESHOLDS:
         preds = (probs >= thr).astype(int)
-        seg = compute_segmentation_metrics(
-            true_labels.tolist(), preds.tolist(), meeting_ids)
+        seg = compute_segmentation_metrics(true_labels.tolist(), preds.tolist(), meeting_ids)
         pk_val = seg.get("pk", 1.0)
         if pk_val < best_pk:
             best_pk = pk_val
@@ -264,14 +407,386 @@ def sweep_thresholds(probs, true_labels, meeting_ids):
                 "f1": f1_score(true_labels, preds, zero_division=0),
                 "precision": precision_score(true_labels, preds, zero_division=0),
                 "recall": recall_score(true_labels, preds, zero_division=0),
-                "pk": seg.get("pk", 1.0),
+                "pk": pk_val,
                 "window_diff": seg.get("window_diff", 1.0),
             }
     return best_threshold, best_metrics
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Ray Train training function
+# FAIRNESS SAFEGUARDING — Slice evaluation
+#
+# Lab: "evaluate the performance of the model on different groups to identify
+# potential unfairness." Slices: meeting-size bucket + speaker-count bucket.
+# Single-speaker or short meetings may correspond to specific user types
+# (1:1 calls, quick standups) — if they perform worse, that's a fairness gap.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_slice_metrics(
+    true_labels: List[int],
+    test_probs: List[float],
+    meeting_ids: List[str],
+    n_speakers_per_example: List[int],
+    threshold: float,
+) -> Dict[str, Dict]:
+    """
+    Break Pk/F1/WD down by meeting-size and speaker-count slices.
+    Logged to MLflow as slice_pk_* and slice_f1_* metrics.
+    """
+    preds = (np.array(test_probs) >= threshold).astype(int).tolist()
+
+    # Count transitions per meeting to determine size bucket
+    meeting_size: Dict[str, int] = defaultdict(int)
+    for mid in meeting_ids:
+        meeting_size[mid] += 1
+
+    def size_bucket(mid: str) -> str:
+        n = meeting_size[mid]
+        if n < 15:   return "short_lt15"
+        elif n <= 40: return "medium_15to40"
+        else:         return "long_gt40"
+
+    def speaker_bucket(n: int) -> str:
+        if n == 1:   return "single_speaker"
+        elif n == 2: return "two_speaker"
+        else:        return "multi_speaker_3plus"
+
+    slices: Dict[str, Dict[str, List]] = defaultdict(
+        lambda: {"true": [], "pred": [], "probs": [], "mids": []}
+    )
+    for t, p, prob, mid, ns in zip(true_labels, preds, test_probs, meeting_ids, n_speakers_per_example):
+        for key in (size_bucket(mid), speaker_bucket(ns)):
+            slices[key]["true"].append(t)
+            slices[key]["pred"].append(p)
+            slices[key]["probs"].append(prob)
+            slices[key]["mids"].append(mid)
+
+    results = {}
+    log.info("Slice evaluation results:")
+    for slice_name, data in slices.items():
+        if len(data["true"]) < 10:
+            results[slice_name] = {
+                "pk": -1.0, "f1": -1.0, "window_diff": -1.0,
+                "n_examples": len(data["true"]),
+                "n_meetings": len(set(data["mids"])),
+                "note": "too_few_examples",
+            }
+            continue
+        seg = compute_segmentation_metrics(data["true"], data["pred"], data["mids"])
+        f1 = f1_score(data["true"], data["pred"], zero_division=0)
+        results[slice_name] = {
+            "pk": seg.get("pk", -1.0),
+            "f1": round(f1, 4),
+            "window_diff": seg.get("window_diff", -1.0),
+            "n_examples": len(data["true"]),
+            "n_meetings": len(set(data["mids"])),
+        }
+        log.info(f"  [{slice_name:25s}] Pk={results[slice_name]['pk']:.4f}  "
+                 f"F1={results[slice_name]['f1']:.4f}  "
+                 f"n_meetings={results[slice_name]['n_meetings']}")
+    return results
+
+
+def check_fairness_gate(slice_metrics: Dict, slice_gate_max_pk: float) -> Tuple[bool, List[str]]:
+    """Fail if any data-sufficient slice has Pk > slice_gate_max_pk."""
+    failures = []
+    for slice_name, m in slice_metrics.items():
+        if m.get("note") == "too_few_examples":
+            continue
+        pk = m.get("pk", -1.0)
+        if pk > slice_gate_max_pk:
+            failures.append(f"{slice_name}: Pk={pk:.4f} > {slice_gate_max_pk}")
+    passed = len(failures) == 0
+    if passed:
+        log.info(f"Fairness gate PASSED — all slices Pk <= {slice_gate_max_pk}")
+    else:
+        log.warning(f"Fairness gate FAILED: {failures}")
+    return passed, failures
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ROBUSTNESS SAFEGUARDING — Known failure mode tests
+#
+# Lab: "evaluate a model on known failure modes" and "create a test suite."
+# Three documented hard cases for topic segmentation:
+#   1. Very short meetings (<5 transitions) — too few transitions to segment
+#   2. No-boundary meetings — single topic, should predict all zeros
+#   3. Speaker relabeling — label invariant to which speaker is A vs B
+# Tests are WARN-only (don't block registration) but visible in model card.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_failure_mode_examples(
+    test_texts: List[str],
+    test_labels: List[int],
+    test_meeting_ids: List[str],
+) -> Dict[str, Dict]:
+    """Build synthetic failure-mode test sets from real test data."""
+    meeting_data: Dict[str, Dict[str, List]] = defaultdict(
+        lambda: {"texts": [], "labels": [], "mids": []}
+    )
+    for t, l, mid in zip(test_texts, test_labels, test_meeting_ids):
+        meeting_data[mid]["texts"].append(t)
+        meeting_data[mid]["labels"].append(l)
+        meeting_data[mid]["mids"].append(mid)
+
+    fm_sets = {}
+
+    # ── FM 1: very short meetings (<5 transitions) ──
+    s_t, s_l, s_m = [], [], []
+    for d in meeting_data.values():
+        if len(d["texts"]) < 5:
+            s_t.extend(d["texts"]); s_l.extend(d["labels"]); s_m.extend(d["mids"])
+    if s_t:
+        fm_sets["very_short_lt5"] = {
+            "texts": s_t, "labels": s_l, "mids": s_m,
+            "description": "Meetings with <5 transitions — model must not crash and gracefully handle minimal input",
+            "pk_threshold": 0.50,   # relaxed — genuinely hard with so few transitions
+        }
+
+    # ── FM 2: no-boundary meetings (all labels = 0) ──
+    n_t, n_l, n_m = [], [], []
+    for d in meeting_data.values():
+        if all(l == 0 for l in d["labels"]):
+            n_t.extend(d["texts"]); n_l.extend(d["labels"]); n_m.extend(d["mids"])
+    if n_t:
+        fm_sets["no_boundary_meetings"] = {
+            "texts": n_t, "labels": n_l, "mids": n_m,
+            "description": "Single-topic meetings — model should predict ~all zeros; high boundary rate here is a known failure mode",
+            "pk_threshold": 0.35,
+        }
+
+    # ── FM 3: speaker relabeling invariance (template test) ──
+    # Rename SPEAKER_A→SPEAKER_X, SPEAKER_B→SPEAKER_Y.
+    # Boundary labels should be identical. If Pk degrades significantly,
+    # the model over-relies on speaker-identity tokens rather than content.
+    relabeled = [
+        t.replace("[SPEAKER_A]", "[SPEAKER_X]").replace("[SPEAKER_B]", "[SPEAKER_Y]")
+        for t in test_texts
+    ]
+    fm_sets["speaker_relabel_invariance"] = {
+        "texts": relabeled, "labels": test_labels, "mids": test_meeting_ids,
+        "description": "Speaker tokens relabeled A→X, B→Y. Pk should be similar to aggregate — tests content vs. identity reliance.",
+        "pk_threshold": 0.30,   # should be close to aggregate Pk
+    }
+
+    return fm_sets
+
+
+def run_failure_mode_tests(
+    model, tokenizer, device,
+    test_texts: List[str],
+    test_labels: List[int],
+    test_meeting_ids: List[str],
+    threshold: float,
+    batch_size: int,
+    max_seq_len: int,
+) -> Dict[str, Dict]:
+    """Run known-failure-mode tests. Returns results logged to MLflow + model card."""
+    log.info("Running known failure mode tests (robustness)...")
+    fm_sets = generate_failure_mode_examples(test_texts, test_labels, test_meeting_ids)
+    results = {}
+
+    for test_name, fm in fm_sets.items():
+        if len(fm["texts"]) < 3:
+            results[test_name] = {
+                "status": "SKIP", "reason": "too_few_examples",
+                "n": len(fm["texts"]), "description": fm["description"],
+            }
+            log.info(f"  [{test_name}] SKIP — only {len(fm['texts'])} examples")
+            continue
+
+        ds = WindowDataset(fm["texts"], fm["labels"], tokenizer, max_seq_len)
+        loader = DataLoader(ds, batch_size=batch_size * 2, num_workers=0)
+        probs_list, true_list = [], []
+        model.eval()
+        with torch.no_grad():
+            for batch in loader:
+                logits = model(
+                    input_ids=batch["input_ids"].to(device),
+                    attention_mask=batch["attention_mask"].to(device),
+                ).logits
+                probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+                probs_list.extend(probs)
+                true_list.extend(batch["labels"].numpy())
+
+        preds = (np.array(probs_list) >= threshold).astype(int).tolist()
+        seg = compute_segmentation_metrics(true_list, preds, fm["mids"])
+        pk = seg.get("pk", -1.0)
+        f1 = f1_score(true_list, preds, zero_division=0)
+        thr = fm["pk_threshold"]
+        passed = (pk <= thr) if pk >= 0 else True
+
+        status = "PASS" if passed else "WARN"
+        results[test_name] = {
+            "status": status,
+            "pk": pk,
+            "f1": round(f1, 4),
+            "window_diff": seg.get("window_diff", -1.0),
+            "pk_threshold": thr,
+            "n_examples": len(fm["texts"]),
+            "description": fm["description"],
+        }
+        log.info(f"  [{test_name}] {status} — Pk={pk:.4f} (limit={thr}), "
+                 f"F1={f1:.4f}, n={len(fm['texts'])}")
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TRANSPARENCY + ACCOUNTABILITY SAFEGUARDING — Model card
+#
+# Safeguarding lecture: "users should be able to see the metrics of the system"
+# and "someone needs to own the system when harm is reported."
+# A model card logged as a MLflow artifact fulfils both: it documents
+# training data, thresholds, fairness results, privacy handling, and
+# the accountability chain.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_model_card(
+    config: Dict,
+    test_f1: float, test_pk: float, test_wd: float,
+    best_threshold: float,
+    gates_passed: bool,
+    slice_metrics: Dict,
+    failure_mode_results: Dict,
+    dataset_version: str,
+    run_id: str,
+) -> Dict:
+    fairness_summary = {
+        k: {"pk": v.get("pk", -1.0), "f1": v.get("f1", -1.0),
+            "n_meetings": v.get("n_meetings", 0), "note": v.get("note", "")}
+        for k, v in slice_metrics.items()
+    }
+    robustness_summary = {
+        k: {"status": v.get("status"), "pk": v.get("pk", -1.0),
+            "description": v.get("description", "")}
+        for k, v in failure_mode_results.items()
+    }
+    return {
+        "model_name": config["model_registry_name"],
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "created_by": "automated retrain pipeline (retrain.py) — NeuralOps / Mahima",
+        "mlflow_run_id": run_id,
+
+        # Transparency: training data provenance
+        "training_data": {
+            "source": "AMI Meeting Corpus (Univ. of Edinburgh) + user feedback corrections",
+            "dataset_version": dataset_version,
+            "feedback_included": config.get("feedback_data_dir") is not None,
+            "feedback_weight": config.get("feedback_weight", 0),
+            "split_strategy": "strict split by meeting_id — no meeting spans train/val/test",
+            "leakage_controls": (
+                "Meeting IDs frozen at roberta_stage1/v1 creation; Jitsi meetings "
+                "only promoted to training set by Aneesh's batch pipeline after explicit review."
+            ),
+        },
+
+        # Transparency: model
+        "model": {
+            "base": config["model_name"],
+            "task": "binary classification — boundary vs. non-boundary utterance transition",
+            "warm_start": config.get("warm_start_model_alias", "none"),
+            "hyperparameters": {
+                "lr": config["lr"], "batch_size": config["batch_size"],
+                "dropout": config["dropout"], "max_oversample": config["max_oversample"],
+                "warmup_ratio": config["warmup_ratio"], "epochs_run": config["epochs"],
+            },
+        },
+
+        # Transparency: inference threshold
+        # IMPORTANT FOR SERVING: Shruti must read best_threshold from this card
+        # or from the model version tag, NOT hardcode 0.5.
+        "inference": {
+            "best_threshold": best_threshold,
+            "threshold_selection": "sweep [0.05..0.50] on val set, minimise per-meeting Pk",
+            "serving_note": (
+                "READ best_threshold FROM model version tag 'best_threshold' in MLflow. "
+                "Do NOT hardcode 0.5 — the optimal threshold is calibrated per training run."
+            ),
+        },
+
+        # Aggregate test metrics
+        "aggregate_test_metrics": {
+            "f1": round(test_f1, 4),
+            "pk": round(test_pk, 4),
+            "window_diff": round(test_wd, 4),
+        },
+
+        # Quality gates
+        "quality_gates": {
+            "gate_min_f1": config["gate_min_f1"],
+            "gate_max_pk": config["gate_max_pk"],
+            "gate_max_windowdiff": config["gate_max_windowdiff"],
+            "slice_gate_max_pk": config["slice_gate_max_pk"],
+            "aggregate_passed": (
+                test_f1 >= config["gate_min_f1"]
+                and test_pk <= config["gate_max_pk"]
+                and test_wd <= config["gate_max_windowdiff"]
+            ),
+            "overall_passed": gates_passed,
+        },
+
+        # Fairness: per-slice evaluation
+        # Slices: meeting size (short/medium/long) + speaker count (1/2/3+)
+        # Gate: no slice with n>=10 examples may have Pk > slice_gate_max_pk
+        "fairness_slice_evaluation": fairness_summary,
+
+        # Robustness: failure mode tests
+        # WARN-only: very short meetings, no-boundary meetings, speaker relabeling
+        "robustness_failure_mode_tests": robustness_summary,
+
+        # Privacy
+        "privacy": {
+            "speaker_pii": (
+                "Speaker identity abstracted to SPEAKER_A/B/C tokens in all training examples. "
+                "No participant names, emails, or IDs in training data."
+            ),
+            "feedback_data_handling": (
+                "User corrections reference utterance_idx only; raw transcript text "
+                "processed by Aneesh's pipeline before entering training JSONL."
+            ),
+            "data_retention": (
+                "Training JSONL files versioned in objstore-proj07. "
+                "Versions older than 6 months may be archived per team policy."
+            ),
+            "consent": (
+                "AMI corpus: publicly released research dataset (ICSICORPUS licence). "
+                "Jitsi feedback: meeting participants implicitly consent via session terms."
+            ),
+        },
+
+        # Accountability
+        "accountability": {
+            "training_owner": "Mahima Sachdeva (NeuralOps training role)",
+            "serving_owner": "Shruti Pangare (NeuralOps serving role)",
+            "data_owner": "Aneesh Mokashi (NeuralOps data role)",
+            "promotion_process": (
+                "Automated: 'candidate' alias set in MLflow if all gates pass. "
+                "Manual: engineer promotes candidate→production in MLflow UI. "
+                "No SSH required for promotion."
+            ),
+            "rollback_trigger": (
+                "Shruti's monitoring: if user correction rate exceeds 2x baseline "
+                "post-deployment, serving layer auto-rolls back to previous 'production' version."
+            ),
+            "audit_log": "Every retrain event written to audit_log table in proj07_sql_db.",
+        },
+
+        # Known limitations (transparency)
+        "limitations": [
+            "Trained primarily on AMI (English, structured corporate meetings). "
+            "May underperform on informal or non-English meetings.",
+            "Class imbalance (~40:1) handled by WeightedRandomSampler; F1 is low by design.",
+            "Single-speaker meetings lack speaker-change signal; relies on lexical cues only.",
+            "Threshold optimised for Pk, not F1. Serving layer must use best_threshold tag.",
+            "Feedback data is weighted 2x but volume is small relative to AMI — "
+            "bias toward AMI meeting style remains.",
+        ],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dataset class
 # ═══════════════════════════════════════════════════════════════════════════
 
 class WindowDataset(Dataset):
@@ -293,70 +808,50 @@ class WindowDataset(Dataset):
         }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Ray Train training function
+# ═══════════════════════════════════════════════════════════════════════════
+
 def train_func(config: Dict):
     """
-    Ray Train training function. This wraps the raw PyTorch training loop
-    from train.py with Ray Train primitives for:
-      - Automatic device placement (prepare_model, prepare_data_loader)
-      - Checkpoint saving to object storage (MinIO) every epoch
-      - Checkpoint restoration after worker failure (get_checkpoint)
-      - Metric reporting back to the TorchTrainer driver
-
-    Key difference from the lab: the lab wraps PyTorch Lightning with
-    RayDDPStrategy/RayLightningEnvironment. Here we wrap a raw PyTorch
-    loop using prepare_model + prepare_data_loader + train.report(),
-    which requires explicit checkpoint management but gives us full
-    control over the training logic (threshold sweeping, per-meeting
-    segmentation metrics, class-imbalanced sampling).
+    Ray Train training function wrapping raw PyTorch (not Lightning).
+    Beyond the lab: raw PyTorch loop, operational fault tolerance,
+    quality gates + MLflow integration.
     """
     import ray.train.torch
 
-    seed = config.get("seed", 42)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    torch.manual_seed(config.get("seed", 42))
+    np.random.seed(config.get("seed", 42))
 
-    # ── Load data ──
     train_texts, train_labels, _ = load_split(config["data_dir"], "train")
     val_texts, val_labels, val_meeting_ids = load_split(config["data_dir"], "val")
 
-    # Merge feedback data if available
     if config.get("feedback_data_dir"):
         fb_texts, fb_labels, fb_mids = load_feedback_data(config["feedback_data_dir"])
         if fb_texts:
             train_texts, train_labels, _ = merge_datasets(
                 train_texts, train_labels, ["ami"] * len(train_texts),
-                fb_texts, fb_labels, fb_mids,
-                config.get("feedback_weight", 2.0),
+                fb_texts, fb_labels, fb_mids, config.get("feedback_weight", 2.0),
             )
 
-    # ── Tokenizer + datasets ──
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
-    special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"]
+    # Include relabeled speaker tokens for template perturbation tests
+    special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"] + ["[SPEAKER_X]", "[SPEAKER_Y]"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
     train_ds = WindowDataset(train_texts, train_labels, tokenizer, config["max_seq_len"])
     val_ds = WindowDataset(val_texts, val_labels, tokenizer, config["max_seq_len"])
 
-    # Class-imbalanced sampling
     n_pos = sum(train_labels)
     n_neg = len(train_labels) - n_pos
-    effective_ratio = min(n_neg / max(n_pos, 1), config.get("max_oversample", 5.0))
+    effective_ratio = min(n_neg / max(n_pos, 1), config.get("max_oversample", 4.1))
     sample_weights = [1.0 if l == 0 else effective_ratio for l in train_labels]
     sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
 
     train_loader = DataLoader(train_ds, batch_size=config["batch_size"],
-                              sampler=sampler, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=0)
+                              sampler=sampler, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=2)
 
-    # ── Model ──
-    # Warm-start: if a production model exists in MLflow, load its weights
-    # instead of starting from base roberta-base. This means retraining with
-    # feedback data continues from the already-fine-tuned checkpoint, which:
-    #   - converges in 2-3 epochs instead of 5-8 (saves GPU hours)
-    #   - is less likely to regress on the AMI test set
-    #   - only adapts to the delta introduced by user corrections
-    # Falls back to base weights if no production model is registered yet
-    # (e.g., the very first training run in the system).
     model = AutoModelForSequenceClassification.from_pretrained(
         config["model_name"], num_labels=2,
         hidden_dropout_prob=config["dropout"],
@@ -364,42 +859,28 @@ def train_func(config: Dict):
     )
     model.resize_token_embeddings(len(tokenizer))
 
-    warm_start_alias = config.get("warm_start_model_alias")
-    if warm_start_alias:
+    if config.get("warm_start_model_alias"):
         try:
-            tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
             registry_name = config.get("model_registry_name", "jitsi-topic-segmenter")
-            log.info(f"Attempting warm-start from MLflow: {registry_name}@{warm_start_alias}")
+            log.info(f"Warm-start from {registry_name}@{config['warm_start_model_alias']}")
             warm_model = mlflow.pytorch.load_model(
-                f"models:/{registry_name}@{warm_start_alias}"
+                f"models:/{registry_name}@{config['warm_start_model_alias']}"
             )
-            # Copy state dict from warm-start model — handles the case where
-            # the registered model might have slightly different architecture
-            # (e.g., different dropout) by loading with strict=False
-            missing, unexpected = model.load_state_dict(
-                warm_model.state_dict(), strict=False
-            )
+            missing, _ = model.load_state_dict(warm_model.state_dict(), strict=False)
             if missing:
                 log.warning(f"Warm-start missing keys: {missing}")
-            if unexpected:
-                log.warning(f"Warm-start unexpected keys: {unexpected}")
-            log.info(f"Warm-start loaded successfully from {registry_name}@{warm_start_alias}")
-            # Use fewer epochs for warm-start since we're not starting from scratch
+            log.info("Warm-start loaded successfully")
             if config["epochs"] > 5:
                 config["epochs"] = 5
-                log.info(f"Reduced epochs to {config['epochs']} for warm-start fine-tuning")
+                log.info(f"Reduced to {config['epochs']} epochs for warm-start")
         except Exception as e:
-            log.warning(f"Warm-start failed ({e}), training from base weights")
+            log.warning(f"Warm-start failed ({e}), using base weights")
 
     if config.get("freeze_backbone", False):
         for name, param in model.named_parameters():
             if "classifier" not in name:
                 param.requires_grad = False
 
-    # ── Ray Train: prepare model and data loaders ──
-    # This handles device placement and (if num_workers > 1) DDP wrapping.
-    # Unlike the lab which uses RayDDPStrategy on Lightning, we call
-    # prepare_model/prepare_data_loader directly on raw PyTorch objects.
     model = ray.train.torch.prepare_model(model)
     train_loader = ray.train.torch.prepare_data_loader(train_loader)
     val_loader = ray.train.torch.prepare_data_loader(val_loader)
@@ -410,89 +891,67 @@ def train_func(config: Dict):
         lr=config["lr"], weight_decay=config["weight_decay"],
     )
     total_steps = len(train_loader) * config["epochs"]
-    warmup_steps = int(config["warmup_ratio"] * total_steps)
-    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, int(config["warmup_ratio"] * total_steps), total_steps
+    )
 
-    # ── Ray Train: restore from checkpoint if resuming after failure ──
-    # This is the key robustness feature. In the lab, they manually killed
-    # a container to demo this. In our system, this runs unattended as an
-    # automated retrain job — if the Chameleon GPU node has a transient
-    # failure at 3am, Ray resumes from the last epoch checkpoint instead
-    # of losing the entire training run and breaking the feedback loop.
-    start_epoch = 1
-    best_val_pk = float("inf")
-    best_threshold = 0.5
+    # Restore from checkpoint if resuming after Ray failure
+    start_epoch, best_val_pk, best_threshold = 1, float("inf"), 0.5
     checkpoint = train.get_checkpoint()
     if checkpoint:
         with checkpoint.as_directory() as ckpt_dir:
             ckpt = torch.load(os.path.join(ckpt_dir, "checkpoint.pt"), weights_only=False)
-            # Access underlying model if wrapped in DDP
-            underlying = model.module if hasattr(model, 'module') else model
-            underlying.load_state_dict(ckpt["model_state_dict"])
+            (model.module if hasattr(model, "module") else model).load_state_dict(
+                ckpt["model_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
             start_epoch = ckpt["epoch"] + 1
             best_val_pk = ckpt.get("best_val_pk", float("inf"))
             best_threshold = ckpt.get("best_threshold", 0.5)
-            log.info(f"Restored from checkpoint at epoch {ckpt['epoch']}, "
-                     f"best_val_pk={best_val_pk:.4f}")
+            log.info(f"Resumed from checkpoint epoch {ckpt['epoch']}, best_pk={best_val_pk:.4f}")
 
-    # ── Training loop ──
     patience_counter = 0
-    best_model_state = None
 
     for epoch in range(start_epoch, config["epochs"] + 1):
         model.train()
         epoch_loss = 0.0
-
         for batch in train_loader:
             optimizer.zero_grad()
-            outputs = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
+            loss = loss_fn(
+                model(input_ids=batch["input_ids"],
+                      attention_mask=batch["attention_mask"]).logits,
+                batch["labels"]
             )
-            loss = loss_fn(outputs.logits, batch["labels"])
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
+            optimizer.step(); scheduler.step()
             epoch_loss += loss.item()
 
-        # ── Validation with threshold sweep ──
         model.eval()
         val_probs, val_true = [], []
         with torch.no_grad():
             for batch in val_loader:
-                logits = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                ).logits
-                probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+                probs = torch.softmax(
+                    model(input_ids=batch["input_ids"],
+                          attention_mask=batch["attention_mask"]).logits,
+                    dim=-1
+                )[:, 1].cpu().numpy()
                 val_probs.extend(probs)
                 val_true.extend(batch["labels"].cpu().numpy())
 
-        epoch_threshold, epoch_metrics = sweep_thresholds(
-            val_probs, val_true, val_meeting_ids)
-
+        epoch_threshold, epoch_metrics = sweep_thresholds(val_probs, val_true, val_meeting_ids)
         val_pk = epoch_metrics.get("pk", 1.0)
         val_f1 = epoch_metrics.get("f1", 0.0)
 
-        # Track best model
         if val_pk < best_val_pk:
             best_val_pk = val_pk
             best_threshold = epoch_threshold
-            underlying = model.module if hasattr(model, 'module') else model
-            best_model_state = {k: v.cpu().clone() for k, v in underlying.state_dict().items()}
             patience_counter = 0
         else:
             patience_counter += 1
 
-        # ── Ray Train: save checkpoint + report metrics ──
-        # Checkpoint includes everything needed to resume: model weights,
-        # optimizer state, scheduler state, and training progress metadata.
-        # Saved to MinIO object storage so any worker can pick it up.
         with tempfile.TemporaryDirectory() as tmpdir:
-            underlying = model.module if hasattr(model, 'module') else model
+            underlying = model.module if hasattr(model, "module") else model
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": underlying.state_dict(),
@@ -501,10 +960,7 @@ def train_func(config: Dict):
                 "best_val_pk": best_val_pk,
                 "best_threshold": best_threshold,
             }, os.path.join(tmpdir, "checkpoint.pt"))
-
-            # Also save tokenizer with checkpoint (needed for full model recovery)
             tokenizer.save_pretrained(os.path.join(tmpdir, "tokenizer"))
-
             train.report(
                 metrics={
                     "epoch": epoch,
@@ -520,113 +976,122 @@ def train_func(config: Dict):
 
         log.info(f"Epoch {epoch}/{config['epochs']} | "
                  f"loss={epoch_loss / max(len(train_loader), 1):.4f} | "
-                 f"val_f1={val_f1:.4f} | val_pk={val_pk:.4f} | "
-                 f"threshold={epoch_threshold:.2f}")
+                 f"val_f1={val_f1:.4f} | val_pk={val_pk:.4f} | thr={epoch_threshold:.2f}")
 
-        # Early stopping
         if patience_counter >= config["early_stopping_patience"]:
             log.info(f"Early stopping at epoch {epoch}")
             break
 
-    # Return best state for the driver to use
-    return best_model_state, best_threshold, best_val_pk
-
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Quality gates + MLflow registration (runs on driver, not inside Ray)
+# Evaluation + registration (runs on driver, not Ray workers)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def evaluate_and_register(config: Dict, result):
-    """
-    After Ray Train completes, evaluate the best checkpoint on the test set,
-    apply quality gates, and register in MLflow only if gates pass.
-    """
-    # Load best checkpoint
-    best_checkpoint = result.checkpoint
-    if best_checkpoint is None:
-        log.error("No checkpoint available from training — cannot evaluate")
+def evaluate_and_register(config: Dict, result) -> bool:
+    if result.checkpoint is None:
+        log.error("No checkpoint — cannot evaluate")
         return False
 
-    with best_checkpoint.as_directory() as ckpt_dir:
+    with result.checkpoint.as_directory() as ckpt_dir:
         ckpt = torch.load(os.path.join(ckpt_dir, "checkpoint.pt"), weights_only=False)
-        tokenizer_path = os.path.join(ckpt_dir, "tokenizer")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
-    special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"]
+    special_tokens = [f"[SPEAKER_{s}]" for s in "ABCDEFGH"] + ["[SPEAKER_X]", "[SPEAKER_Y]"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        config["model_name"], num_labels=2)
+    model = AutoModelForSequenceClassification.from_pretrained(config["model_name"], num_labels=2)
     model.resize_token_embeddings(len(tokenizer))
     model.load_state_dict(ckpt["model_state_dict"])
-    model = model.to(device)
-    model.eval()
+    model = model.to(device).eval()
 
     best_threshold = ckpt.get("best_threshold", 0.5)
 
-    # Test evaluation
-    test_texts, test_labels, test_meeting_ids = load_split(config["data_dir"], "test")
+    # Load test data WITH metadata (n_speakers per example) for slice eval
+    test_texts, test_labels, test_meeting_ids, test_n_speakers = \
+        load_split_with_metadata(config["data_dir"], "test")
+
+    # Run inference
     test_ds = WindowDataset(test_texts, test_labels, tokenizer, config["max_seq_len"])
     test_loader = DataLoader(test_ds, batch_size=config["batch_size"] * 2, num_workers=2)
-
     test_probs, test_true = [], []
     with torch.no_grad():
         for batch in test_loader:
-            logits = model(
-                input_ids=batch["input_ids"].to(device),
-                attention_mask=batch["attention_mask"].to(device),
-            ).logits
-            probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+            probs = torch.softmax(
+                model(input_ids=batch["input_ids"].to(device),
+                      attention_mask=batch["attention_mask"].to(device)).logits,
+                dim=-1
+            )[:, 1].cpu().numpy()
             test_probs.extend(probs)
             test_true.extend(batch["labels"].numpy())
 
     test_preds = (np.array(test_probs) >= best_threshold).astype(int)
-    test_seg = compute_segmentation_metrics(
-        test_true, test_preds.tolist(), test_meeting_ids)
-
+    test_seg = compute_segmentation_metrics(test_true, test_preds.tolist(), test_meeting_ids)
     test_f1 = f1_score(test_true, test_preds, zero_division=0)
     test_pk = test_seg.get("pk", 1.0)
     test_wd = test_seg.get("window_diff", 1.0)
 
-    log.info(f"Test results: F1={test_f1:.4f}, Pk={test_pk:.4f}, WD={test_wd:.4f}")
+    log.info(f"Aggregate — F1={test_f1:.4f}, Pk={test_pk:.4f}, WD={test_wd:.4f}, "
+             f"threshold={best_threshold:.2f}")
 
-    # ── Quality gates ──
-    gates_passed = (
+    # ── Aggregate gates ──
+    agg_passed = (
         test_f1 >= config["gate_min_f1"]
         and test_pk <= config["gate_max_pk"]
         and test_wd <= config["gate_max_windowdiff"]
     )
+    log.info(f"Aggregate gates: F1 {'PASS' if test_f1 >= config['gate_min_f1'] else 'FAIL'} | "
+             f"Pk {'PASS' if test_pk <= config['gate_max_pk'] else 'FAIL'} | "
+             f"WD {'PASS' if test_wd <= config['gate_max_windowdiff'] else 'FAIL'}")
 
-    gate_details = {
-        "f1": f"{test_f1:.4f} >= {config['gate_min_f1']} → {'PASS' if test_f1 >= config['gate_min_f1'] else 'FAIL'}",
-        "pk": f"{test_pk:.4f} <= {config['gate_max_pk']} → {'PASS' if test_pk <= config['gate_max_pk'] else 'FAIL'}",
-        "wd": f"{test_wd:.4f} <= {config['gate_max_windowdiff']} → {'PASS' if test_wd <= config['gate_max_windowdiff'] else 'FAIL'}",
-    }
-    log.info(f"Quality gates: {gate_details}")
+    # ── Slice evaluation (FAIRNESS) ──
+    log.info("Running slice evaluation (fairness safeguarding)...")
+    slice_metrics = compute_slice_metrics(
+        test_true, test_probs, test_meeting_ids, test_n_speakers, best_threshold
+    )
+    fairness_passed, fairness_failures = check_fairness_gate(
+        slice_metrics, config["slice_gate_max_pk"]
+    )
 
-    # ── MLflow logging ──
+    gates_passed = agg_passed and fairness_passed
+
+    # ── Known failure mode tests (ROBUSTNESS) ──
+    failure_mode_results = run_failure_mode_tests(
+        model=model, tokenizer=tokenizer, device=device,
+        test_texts=test_texts, test_labels=test_true,
+        test_meeting_ids=test_meeting_ids,
+        threshold=best_threshold,
+        batch_size=config["batch_size"],
+        max_seq_len=config["max_seq_len"],
+    )
+    any_fm_warn = any(r.get("status") == "WARN" for r in failure_mode_results.values())
+    if any_fm_warn:
+        log.warning("Some failure mode tests WARN — details in model card")
+
+    # ── MLflow ──
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     mlflow.set_experiment(config["experiment_name"])
-
     dataset_version = os.environ.get("DATASET_VERSION", "unknown")
     run_name = f"retrain-{'pass' if gates_passed else 'fail'}-{int(time.time())}"
 
     with mlflow.start_run(run_name=run_name) as run:
+        # Parameters
         mlflow.log_params({
             "model_name": config["model_name"],
-            "lr": config["lr"],
-            "batch_size": config["batch_size"],
-            "epochs": config["epochs"],
-            "max_oversample": config["max_oversample"],
-            "dropout": config["dropout"],
+            "lr": config["lr"], "batch_size": config["batch_size"],
+            "epochs": config["epochs"], "max_oversample": config["max_oversample"],
+            "dropout": config["dropout"], "warmup_ratio": config["warmup_ratio"],
+            "weight_decay": config["weight_decay"],
             "feedback_weight": config.get("feedback_weight", 0),
             "dataset_version": dataset_version,
+            "warm_start": config.get("warm_start_model_alias", "none"),
             "ray_num_workers": config["ray_num_workers"],
             "ray_max_failures": config["ray_max_failures"],
             "retrain_mode": "automated",
         })
+
+        # Aggregate metrics
         mlflow.log_metrics({
             "test_f1": round(test_f1, 4),
             "test_pk": round(test_pk, 4),
@@ -635,23 +1100,46 @@ def evaluate_and_register(config: Dict, result):
             "test_recall": round(recall_score(test_true, test_preds, zero_division=0), 4),
             "best_threshold": best_threshold,
             "gates_passed": int(gates_passed),
+            "fairness_gate_passed": int(fairness_passed),
         })
 
+        # Per-slice metrics
+        for slice_name, sm in slice_metrics.items():
+            if sm.get("pk", -1) >= 0:
+                mlflow.log_metric(f"slice_pk_{slice_name}", sm["pk"])
+            if sm.get("f1", -1) >= 0:
+                mlflow.log_metric(f"slice_f1_{slice_name}", sm["f1"])
+
+        # Failure mode metrics
+        for test_name, fm_res in failure_mode_results.items():
+            if fm_res.get("pk", -1) >= 0:
+                mlflow.log_metric(f"fm_pk_{test_name}", fm_res["pk"])
+
+        # Build model card (for ALL runs — useful for debugging failures too)
+        model_card = build_model_card(
+            config=config, test_f1=test_f1, test_pk=test_pk, test_wd=test_wd,
+            best_threshold=best_threshold, gates_passed=gates_passed,
+            slice_metrics=slice_metrics, failure_mode_results=failure_mode_results,
+            dataset_version=dataset_version, run_id=run.info.run_id,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            card_path = os.path.join(tmpdir, "model_card.json")
+            with open(card_path, "w") as f:
+                json.dump(model_card, f, indent=2)
+            mlflow.log_artifact(card_path, artifact_path="model_card")
+        log.info("Model card logged to MLflow")
+
         if gates_passed:
-            log.info("Quality gates PASSED — registering model in MLflow")
+            log.info("All gates PASSED — registering model")
             mlflow.pytorch.log_model(
                 model, artifact_path="model",
                 pip_requirements=["transformers==4.40.0", "torch==2.2.0"],
                 registered_model_name=config["model_registry_name"],
             )
-            # Save tokenizer as artifact
             with tempfile.TemporaryDirectory() as tmpdir:
                 tokenizer.save_pretrained(tmpdir)
                 mlflow.log_artifacts(tmpdir, artifact_path="tokenizer")
 
-            mlflow.log_param("best_threshold", best_threshold)
-
-            # Set alias for serving to pick up
             client = mlflow.tracking.MlflowClient()
             latest = client.get_latest_versions(config["model_registry_name"])
             if latest:
@@ -659,119 +1147,123 @@ def evaluate_and_register(config: Dict, result):
                 try:
                     client.set_registered_model_alias(
                         config["model_registry_name"], "candidate", version)
-                    log.info(f"Model version {version} aliased as 'candidate'")
+                    # Tag threshold so serving reads it directly from registry
+                    client.set_model_version_tag(
+                        config["model_registry_name"], version,
+                        "best_threshold", str(best_threshold))
+                    client.set_model_version_tag(
+                        config["model_registry_name"], version,
+                        "dataset_version", dataset_version)
+                    client.set_model_version_tag(
+                        config["model_registry_name"], version,
+                        "gates_passed", "true")
+                    log.info(f"v{version} aliased 'candidate', tagged best_threshold={best_threshold}")
                 except Exception as e:
-                    log.warning(f"Could not set alias: {e}")
+                    log.warning(f"Could not set alias/tags: {e}")
         else:
-            log.warning("Quality gates FAILED — model NOT registered")
+            log.warning("Gates FAILED — model NOT registered")
             mlflow.pytorch.log_model(model, artifact_path="model-failed")
 
-    # ── Log to audit table (for safeguarding accountability) ──
     _log_to_audit_db("retrain_completed", {
         "run_id": run.info.run_id,
         "gates_passed": gates_passed,
-        "test_f1": test_f1,
-        "test_pk": test_pk,
+        "aggregate_passed": agg_passed,
+        "fairness_passed": fairness_passed,
+        "fairness_failures": fairness_failures,
+        "test_f1": round(test_f1, 4),
+        "test_pk": round(test_pk, 4),
+        "best_threshold": best_threshold,
         "dataset_version": dataset_version,
+        "fm_warns": [k for k, v in failure_mode_results.items() if v.get("status") == "WARN"],
+        "max_feedback_event_id": int(os.environ.get("MAX_FEEDBACK_EVENT_ID", "0")),
     })
 
     return gates_passed
 
 
 def _log_to_audit_db(event_type: str, details: dict):
-    """Best-effort audit log to Postgres."""
+    """Soft-fail audit log — table may not exist on first run."""
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
+        log.warning("DATABASE_URL not set — skipping audit log")
         return
     try:
         import psycopg2
         conn = psycopg2.connect(db_url)
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO audit_log (event_type, details) VALUES (%s, %s)",
-            (event_type, json.dumps(details))
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        cur.execute("INSERT INTO audit_log (event_type, details) VALUES (%s, %s)",
+                    (event_type, json.dumps(details)))
+        conn.commit(); cur.close(); conn.close()
+        log.info(f"Audit log written: {event_type}")
     except Exception as e:
-        log.warning(f"Audit log write failed: {e}")
+        log.warning(f"Audit log write failed (run add_mlops_tables.sql if missing): {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Main — launches Ray Train
+# Main
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="Fault-tolerant retraining with Ray Train")
-    parser.add_argument("--config", default=None, help="YAML config path")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=None)
     parser.add_argument("--data_dir", default=None)
     parser.add_argument("--feedback_data_dir", default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--no_gpu", action="store_true",
+                        help="Disable GPU (for CPU-only testing)")
     args = parser.parse_args()
 
     cfg = load_retrain_config(args.config)
-    if args.data_dir:
-        cfg["data_dir"] = args.data_dir
-    if args.feedback_data_dir:
-        cfg["feedback_data_dir"] = args.feedback_data_dir
-    if args.epochs:
-        cfg["epochs"] = args.epochs
-    if args.lr:
-        cfg["lr"] = args.lr
+    if args.data_dir:       cfg["data_dir"] = args.data_dir
+    if args.feedback_data_dir: cfg["feedback_data_dir"] = args.feedback_data_dir
+    if args.epochs:         cfg["epochs"] = args.epochs
+    if args.lr:             cfg["lr"] = args.lr
+    if args.no_gpu:         cfg["ray_use_gpu"] = False
 
-    log.info(f"Starting fault-tolerant retrain with Ray Train")
-    log.info(f"Config: epochs={cfg['epochs']}, lr={cfg['lr']}, "
-             f"workers={cfg['ray_num_workers']}, max_failures={cfg['ray_max_failures']}")
+    cfg["data_dir"] = resolve_dataset_path(cfg)
+    fb_dir = resolve_feedback_path(cfg)
+    if fb_dir:
+        cfg["feedback_data_dir"] = fb_dir
 
-    # Initialize Ray (connects to existing cluster or starts local)
+    log.info("Starting retrain pipeline")
+    log.info(f"  data_dir:     {cfg['data_dir']}")
+    log.info(f"  feedback_dir: {cfg.get('feedback_data_dir', 'none')}")
+    log.info(f"  objstore:     {cfg['rclone_remote']}:{cfg['objstore_bucket']}")
+    log.info(f"  gates:        F1>={cfg['gate_min_f1']}, Pk<={cfg['gate_max_pk']}, "
+             f"WD<={cfg['gate_max_windowdiff']}, SlicePk<={cfg['slice_gate_max_pk']}")
+    log.info(f"  train:        epochs={cfg['epochs']}, lr={cfg['lr']}, "
+             f"gpu={cfg['ray_use_gpu']}, workers={cfg['ray_num_workers']}")
+
     ray.init(ignore_reinit_error=True)
-
-    # ── Configure Ray Train ──
-    # RunConfig: checkpoints go to MinIO so any worker can resume.
-    # FailureConfig: up to ray_max_failures automatic restarts.
-    # This is the core robustness feature — if the Chameleon GPU node
-    # has a transient failure during an unattended retrain job, Ray
-    # restarts on another worker from the last checkpoint.
-    run_config = RunConfig(
-        name=f"retrain-{int(time.time())}",
-        storage_path=cfg["ray_storage_path"],
-        failure_config=FailureConfig(max_failures=cfg["ray_max_failures"]),
-        checkpoint_config=CheckpointConfig(
-            num_to_keep=2,  # keep last 2 checkpoints, prune older ones
-        ),
-    )
-
-    scaling_config = ScalingConfig(
-        num_workers=cfg["ray_num_workers"],
-        use_gpu=cfg["ray_use_gpu"],
-        resources_per_worker={"CPU": 4, "GPU": 1} if cfg["ray_use_gpu"] else {"CPU": 4},
-    )
 
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,
         train_loop_config=cfg,
-        scaling_config=scaling_config,
-        run_config=run_config,
+        scaling_config=ScalingConfig(
+            num_workers=cfg["ray_num_workers"],
+            use_gpu=cfg["ray_use_gpu"],
+            resources_per_worker={"CPU": 4, "GPU": 1} if cfg["ray_use_gpu"] else {"CPU": 1},
+        ),
+        run_config=RunConfig(
+            name=f"retrain-{int(time.time())}",
+            storage_path=cfg["ray_storage_path"],
+            failure_config=FailureConfig(max_failures=cfg["ray_max_failures"]),
+            checkpoint_config=CheckpointConfig(num_to_keep=2),
+        ),
     )
 
     log.info("Launching Ray TorchTrainer...")
     result = trainer.fit()
-    log.info(f"Training complete. Best metrics: {result.metrics}")
+    log.info(f"Training done. Best val metrics: {result.metrics}")
 
-    # ── Quality gates + registration ──
     gates_passed = evaluate_and_register(cfg, result)
-
-    if gates_passed:
-        log.info("Retrain SUCCESS — new model registered as 'candidate'")
-    else:
-        log.info("Retrain completed but model did not pass quality gates")
+    log.info("Retrain SUCCESS — model registered as 'candidate'" if gates_passed
+             else "Retrain done — model did NOT pass quality gates")
 
     ray.shutdown()
     return gates_passed
 
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    exit(0 if main() else 1)
