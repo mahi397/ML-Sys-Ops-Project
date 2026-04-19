@@ -327,6 +327,8 @@ services:
   retrain-watcher:
     build: ./train
     command: retrain_watcher.py
+    runtime: nvidia
+    shm_size: '10g'
     restart: unless-stopped
     depends_on:
       postgres:
@@ -334,6 +336,7 @@ services:
       ray-head:
         condition: service_started
     environment:
+      NVIDIA_VISIBLE_DEVICES: all
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
