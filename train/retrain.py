@@ -126,7 +126,7 @@ DEFAULT_RETRAIN_CONFIG = {
     # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
-    "ray_storage_path": "/mnt/block/ray-checkpoints",
+    "ray_storage_path": os.environ.get("RAY_STORAGE", "/mnt/block/ray-checkpoints"),
     "ray_max_failures": 2,
 }
 
@@ -1235,7 +1235,10 @@ def main():
     log.info(f"  train:        epochs={cfg['epochs']}, lr={cfg['lr']}, "
              f"gpu={cfg['ray_use_gpu']}, workers={cfg['ray_num_workers']}")
 
-    ray.init(ignore_reinit_error=True)
+    ray.init(
+       address=os.environ.get("RAY_ADDRESS", "auto"),
+       ignore_reinit_error=True
+    )
 
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,
