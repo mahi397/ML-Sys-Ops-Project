@@ -1235,10 +1235,11 @@ def main():
     log.info(f"  train:        epochs={cfg['epochs']}, lr={cfg['lr']}, "
              f"gpu={cfg['ray_use_gpu']}, workers={cfg['ray_num_workers']}")
 
-    ray.init(
-       address=os.environ.get("RAY_ADDRESS", "auto"),
-       ignore_reinit_error=True
-    )
+    ray_address = os.environ.get("RAY_ADDRESS", None)
+    if ray_address:
+        ray.init(address=ray_address, ignore_reinit_error=True, log_to_driver=True)
+    else:
+        ray.init(ignore_reinit_error=True, log_to_driver=True)
 
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,

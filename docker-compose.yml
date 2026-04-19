@@ -180,16 +180,11 @@ services:
   ray-head:
     image: rayproject/ray:2.54.0
     restart: unless-stopped
-    command: |
-      /bin/sh -c "
-      ray start --head --port=6379
-      --dashboard-host=0.0.0.0
-      --dashboard-port=8265
-      --block
-      --num-cpus=4"
+    command: ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --block --num-cpus=4
     ports:
       - "6379:6379"
       - "8265:8265"
+      - "10001:10001"
     shm_size: '4g'
     volumes:
       - /mnt/block/ray-checkpoints:/tmp/ray-checkpoints  # ← bind mount like postgres/minio
@@ -336,7 +331,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ray_head:
+      ray-head:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
@@ -378,7 +373,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID} # TACC — for MLflow artifacts
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY} # TACC
       AWS_ENDPOINT_URL: http://minio:9000
-      RAY_ADDRESS: ray://ray-head:6379
+      RAY_ADDRESS: ray-head:6379
       RAY_STORAGE: /mnt/block/ray-checkpoints # block volume - no S3 needed
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       MODEL_NAME: jitsi-topic-segmenter
