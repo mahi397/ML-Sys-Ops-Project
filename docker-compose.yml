@@ -136,8 +136,6 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      RAY_ADDRESS: ray://ray-head:6379
-      RAY_STORAGE: s3://ray-checkpoints/
       MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
     volumes:
@@ -196,9 +194,9 @@ services:
     volumes:
       - /mnt/block/ray-checkpoints:/tmp/ray-checkpoints  # ← bind mount like postgres/minio
     environment:
-      - AWS_ACCESS_KEY_ID=${MINIO_USER:-minioadmin}
-      - AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}
-      - AWS_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480
     depends_on:
       minio:
         condition: service_healthy
@@ -338,21 +336,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ray_head:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
-      RETRAIN_CHECK_INTERVAL_SECONDS: ${RETRAIN_CHECK_INTERVAL_SECONDS:-300}
+      RETRAIN_CHECK_INTERVAL_SECONDS: 300
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      # MinIO for model artifact access
-      AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
     volumes:
       - /mnt/block:/mnt/block
       - /home/cc/.config/rclone:/root/.config/rclone:ro
       - /home/cc/nltk_data:/root/nltk_data:ro
+      - /var/run/docker.sock:/var/run/docker.sock  # ← ADD for docker compose access
+      - /home/cc/ML-Sys-Ops-Project:/project:ro    # ← ADD so it can find docker-compose.yml
     networks:
       - recap-net
 
@@ -371,12 +372,14 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MINIO_ENDPOINT: http://minio:9000
-      # MinIO for model artifact storage
-      AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
+      # MinIO creds only for MLflow server proxy
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID} # TACC — for MLflow artifacts
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY} # TACC
       AWS_ENDPOINT_URL: http://minio:9000
       RAY_ADDRESS: ray://ray-head:6379
-      RAY_STORAGE: s3://ray-checkpoints/
+      RAY_STORAGE: /mnt/block/ray-checkpoints # block volume - no S3 needed
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       MODEL_NAME: jitsi-topic-segmenter
       MLFLOW_AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
@@ -421,3 +424,4 @@ services:
       - prometheus
     networks:
       - recap-net
+
