@@ -112,9 +112,7 @@ async function fetchRecap(meetingId) {
         document.getElementById('app').innerHTML = '<p class="error">No recap found for this meeting.</p>';
         return;
     }
-        render(recapData);
-        return;
-      }
+        
       throw new Error(`HTTP ${res.status}`);
     }
     recapData = await res.json();
