@@ -87,7 +87,8 @@
 
 <script>
 // ── Configuration ──
-const API_BASE = '/api';   // proxied by nginx to serving-api:8000
+///---const API_BASE = '/api'; 
+const API_BASE = 'http://192.5.86.194:8000';  // proxied by nginx to serving-api:8000
 const MEETING_ID = new URLSearchParams(window.location.search).get('meeting_id');
 
 // ── State ──
