@@ -114,7 +114,7 @@ DEFAULT_RETRAIN_CONFIG = {
     "staging_base": "/mnt/block",
     "rclone_remote": "chi_tacc",
     # MLflow
-    "experiment_name": "jitsi-topic-segmentation",
+    "experiment_name": "retraining",
     "model_registry_name": "jitsi-topic-segmenter",
     # Aggregate quality gates (calibrated to actual initial impl results)
     "gate_min_f1": 0.20,
