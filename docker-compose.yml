@@ -326,7 +326,7 @@ services:
 
   retrain-watcher:
     build: ./train
-    command: python retrain_watcher.py
+    command: retrain_watcher.py
     restart: unless-stopped
     depends_on:
       postgres:
@@ -354,7 +354,7 @@ services:
 
   retrain-job:
     build: ./train
-    command: python retrain.py
+    command: retrain.py
     runtime: nvidia
     shm_size: '10g'
     depends_on:
