@@ -1125,7 +1125,7 @@ def evaluate_and_register(config: Dict, result) -> bool:
         with tempfile.TemporaryDirectory() as tmpdir:
             card_path = os.path.join(tmpdir, "model_card.json")
             with open(card_path, "w") as f:
-                json.dump(model_card, f, indent=2)
+                json.dump(model_card, f, indent=2, default=lambda o: bool(o) if isinstance(o, __import__("numpy").bool_) else str(o))
             mlflow.log_artifact(card_path, artifact_path="model_card")
         log.info("Model card logged to MLflow")
 
