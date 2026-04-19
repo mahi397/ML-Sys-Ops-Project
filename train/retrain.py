@@ -95,7 +95,7 @@ DEFAULT_RETRAIN_CONFIG = {
     "model_name": "roberta-base",
     "freeze_backbone": False,
     "lr": 2.29e-5,
-    "batch_size": 8, # was 32, reduced for test on cpu vm
+    "batch_size": 32, # was 32, reduced for test on cpu vm
     "epochs": 8,
     "warmup_ratio": 0.105,
     "weight_decay": 0.072,
