@@ -14,16 +14,13 @@
 #   5. Training/MLOps    — Mahima's containers
 #   6. Monitoring        — Prometheus + Grafana
 #
-# Fixes vs previous version:
-#   [FIX 2+4] DATABASE_URL in retrain-job and retrain-watcher now use proj07_sql_db
-#   [FIX 2]   retrain-job now receives DATABASE_URL (was missing entirely)
-#   [FIX 3]   TRAINING_DATA_BUCKET removed; replaced with OBJSTORE_BUCKET=objstore-proj07
-#   [FIX 1]   RCLONE_REMOTE added to retrain-job so it can be overridden if needed
+# Single docker compose up brings up the entire system.
+# Profiles:
+#   --profile retrain          triggers retraining pipeline
+#   --profile emulated-traffic runs data generator for ongoing operation
 ###############################################################################
 
 volumes:
-  postgres_data:          # Shared Postgres persistent data
-  minio_data:             # MLflow artifact store
   jitsi_web_config:
   jitsi_jvb_config:
   jitsi_prosody_config:
@@ -31,14 +28,12 @@ volumes:
   jigasi_config:
   prometheus_data:
   grafana_data:
+  # NOTE: postgres and minio use bind mounts to /mnt/block for persistence
+  # across VM restarts. Named volumes would be lost if VM is deleted.
 
 networks:
   recap-net:
     driver: bridge
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Environment variables loaded from .env file (see .env.example)
-# ─────────────────────────────────────────────────────────────────────────────
 
 services:
 
@@ -118,17 +113,18 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-recap}
+      POSTGRES_USER: ${POSTGRES_USER:-proj07_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      # [FIX 4] DB name is proj07_sql_db to match Aneesh's actual schema
+      # Default DB is proj07_sql_db; mlflowdb is created separately
       POSTGRES_DB: proj07_sql_db
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # Bind mount to block storage — survives VM restarts and reattachment
+      - /mnt/block/postgres_data:/var/lib/postgresql/data
       - ./platform/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recap}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proj07_user}"]
       interval: 10s
       retries: 5
     networks:
@@ -142,7 +138,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
     volumes:
-      - minio_data:/data
+      # Bind mount to block storage — survives VM restarts
+      - /mnt/block/minio_data:/data
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -154,7 +151,8 @@ services:
       - recap-net
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.18.0
+    # Using v3.9.0 to match the lab setup that has historical training runs
+    image: ghcr.io/mlflow/mlflow:v3.9.0
     restart: unless-stopped
     depends_on:
       postgres:
@@ -165,13 +163,17 @@ services:
       - bash
       - -c
     command:
-      - "pip install psycopg2-binary boto3 && mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db --default-artifact-root s3://mlflow-artifacts/"
+      - "pip install psycopg2-binary boto3 && mlflow server --backend-store-uri postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/mlflowdb --artifacts-destination s3://${BUCKET_NAME}/ --serve-artifacts --host 0.0.0.0 --port 8000"
     environment:
-      AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      # MLflow artifact store — CHI@TACC S3 (same bucket as lab setup)
+      MLFLOW_TRACKING_URI: http://0.0.0.0:8000
+      MLFLOW_SERVER_ALLOWED_HOSTS: "*"
+      MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      BUCKET_NAME: ${BUCKET_NAME:-proj07-mlflow-artifacts}
     ports:
-      - "5000:5000"
+      - "8000:8000"
     networks:
       - recap-net
 
@@ -186,8 +188,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # [FIX 4] DB name corrected to proj07_sql_db
-      DATABASE_URL: postgresql://${POSTGRES_USER:-recap}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       MINIO_ENDPOINT: http://minio:9000
       MINIO_USER: ${MINIO_USER:-minioadmin}
       MINIO_PASSWORD: ${MINIO_PASSWORD}
@@ -202,13 +203,12 @@ services:
       - serving-api
       - postgres
     environment:
-      # [FIX 4] DB name corrected
-      DATABASE_URL: postgresql://${POSTGRES_USER:-recap}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       SERVING_API_URL: http://serving-api:8000
     networks:
       - recap-net
     profiles:
-      - emulated-traffic   # only runs during ongoing operation: docker compose --profile emulated-traffic up
+      - emulated-traffic   # docker compose --profile emulated-traffic up -d data-generator
 
   batch-pipeline:
     build: ./data-pipeline
@@ -219,19 +219,16 @@ services:
       minio:
         condition: service_healthy
     environment:
-      # [FIX 4] DB name corrected
-      DATABASE_URL: postgresql://${POSTGRES_USER:-recap}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       MINIO_ENDPOINT: http://minio:9000
       MINIO_USER: ${MINIO_USER:-minioadmin}
       MINIO_PASSWORD: ${MINIO_PASSWORD}
-      # [FIX 3] Output to objstore-proj07 via rclone, not MinIO
-      # This env var tells batch_compile.py where to write datasets
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
     networks:
       - recap-net
     profiles:
-      - retrain    # only runs when triggered: docker compose --profile retrain run batch-pipeline
+      - retrain   # docker compose --profile retrain run batch-pipeline
 
   # ═══════════════════════════════════════════════════════════════════════════
   # 4. SERVING + UI — Shruti's API + Mahima's Recap UI
@@ -246,16 +243,17 @@ services:
       mlflow:
         condition: service_started
     environment:
-      # [FIX 4] DB name corrected
-      DATABASE_URL: postgresql://${POSTGRES_USER:-recap}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      # MLflow for model loading — port 8000
+      MLFLOW_TRACKING_URI: http://mlflow:8000
       MODEL_NAME: jitsi-topic-segmenter
       MODEL_ALIAS: production
+      # MinIO for local artifact cache
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
     ports:
-      - "8000:8000"
+      - "8001:8000"
     networks:
       - recap-net
 
@@ -284,18 +282,20 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # [FIX 3+4] Correct DB name; no TRAINING_DATA_BUCKET
-      DATABASE_URL: postgresql://${POSTGRES_USER:-recap}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}    # low for demo, 500 for production
-      RETRAIN_CHECK_INTERVAL_SECONDS: 300
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
+      RETRAIN_CHECK_INTERVAL_SECONDS: ${RETRAIN_CHECK_INTERVAL_SECONDS:-300}
+      MLFLOW_TRACKING_URI: http://mlflow:8000
+      # MinIO for model artifact access
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      # [FIX 1] rclone remote name (must match what's configured on the VM)
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
-      # [FIX 3] Chameleon object store bucket for training data
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+    volumes:
+      - /mnt/block:/mnt/block
+      - /home/cc/.config/rclone:/root/.config/rclone:ro
+      - /home/cc/nltk_data:/root/nltk_data:ro
     networks:
       - recap-net
 
@@ -311,26 +311,25 @@ services:
       minio:
         condition: service_healthy
     environment:
-      # [FIX 2] DATABASE_URL was missing entirely — now present so dataset_versions
-      #         lookup and audit_log writes actually work
-      # [FIX 4] DB name corrected to proj07_sql_db
-      DATABASE_URL: postgresql://${POSTGRES_USER:-recap}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      # MinIO is only for MLflow artifacts (model weights), NOT for training datasets
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      MLFLOW_TRACKING_URI: http://mlflow:8000
       MINIO_ENDPOINT: http://minio:9000
+      # MinIO for model artifact storage
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       MODEL_NAME: jitsi-topic-segmenter
-      # [FIX 3] TRAINING_DATA_BUCKET removed; training data is in Chameleon objstore
-      #         accessed via rclone, not MinIO. retrain.py reads OBJSTORE_BUCKET.
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
-      # [FIX 1] rclone remote — must match name configured on host VM
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
+      RAY_memory_monitor_refresh_ms: 0
+    volumes:
+      - /mnt/block:/mnt/block
+      - /home/cc/.config/rclone:/root/.config/rclone:ro
+      - /home/cc/nltk_data:/root/nltk_data:ro
     networks:
       - recap-net
     profiles:
-      - retrain    # triggered by retrain-watcher or manually: docker compose --profile retrain run retrain-job
+      - retrain   # docker compose --profile retrain run retrain-job
 
   # ═══════════════════════════════════════════════════════════════════════════
   # 6. MONITORING — Prometheus + Grafana
