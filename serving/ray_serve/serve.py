@@ -749,6 +749,17 @@ class SummarizerDeployment:
         t_start = body.get("t_start", 0)
         t_end = body.get("t_end", 0)
 
+        # ── VALIDATION: require utterances ──
+        utterances = body.get("utterances", [])
+        if not utterances:
+            return {
+                "meeting_id": meeting_id, "segment_id": segment_id,
+                "t_start": t_start, "t_end": t_end,
+                "topic_label": "", "summary_bullets": [],
+                "status": "error", "error": "No utterances provided"
+            }
+
+
         if self.llm is None:
             return {
                 "meeting_id": meeting_id, "segment_id": segment_id,
@@ -1145,7 +1156,7 @@ class RecapAPIDeployment:
                     "meeting_title":    meeting_id,
                     "meeting_duration": duration_str,
                     "participant_count": len(speakers),
-                    "model_version":    segments[0].get("model_version") or "mlflow@prod1",
+                    "model_version":    segments[0].get("model_version") or f"mlflow@{MODEL_ALIAS}",
                     "created_at":       "",
                     "segments":         ui_segments,
                     "utterances":       ui_utterances,
@@ -1327,16 +1338,22 @@ class RecapAPIDeployment:
 @serve.deployment(name="recap_ui", num_replicas=1)
 class RecapUIDeployment:
     def __init__(self):
-        ui_path = Path(__file__).parent / "recap_ui.html"
-        if ui_path.exists():
-            self._html = ui_path.read_text()
-            print(f"[recap_ui] Loaded UI from {ui_path}")
+        self._path = Path(__file__).parent / "recap_ui.html"
+        if not self._path.exists():
+            print(f"[recap_ui] WARNING: {self._path} not found")
         else:
-            self._html = "<h1>recap_ui.html not found</h1>"
-            print(f"[recap_ui] WARNING: {ui_path} not found")
+            print(f"[recap_ui] Will serve UI from {self._path} (disk-read per request)")
 
     async def __call__(self, request: Request) -> Response:
-        return Response(content=self._html, media_type="text/html")
+        if self._path.exists():
+            html = self._path.read_text()
+        else:
+            html = "<h1>recap_ui.html not found</h1>"
+        return Response(
+            content=html,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
     
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
