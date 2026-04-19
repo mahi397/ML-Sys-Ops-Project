@@ -87,7 +87,7 @@
 
 <script>
 // ── Configuration ──
-///---const API_BASE = '/api'; 
+///const API_BASE = '/api'; 
 const API_BASE = 'http://192.5.86.194:8000';  // proxied by nginx to serving-api:8000
 const MEETING_ID = new URLSearchParams(window.location.search).get('meeting_id');
 
@@ -106,22 +106,23 @@ document.addEventListener('DOMContentLoaded', () => {
 // ── API calls ──
 async function fetchRecap(meetingId) {
   try {
-    const res = await fetch(`${API_BASE}/recap/${meetingId}`);
+    const res = await fetch(`${API_BASE}/api/recap/${meetingId}`);
     if (!res.ok) {
-      // If the API isn't running yet, show demo data for development
-      if (res.status === 404) { 
+      if (res.status === 404) {
         document.getElementById('app').innerHTML = '<p class="error">No recap found for this meeting.</p>';
         return;
-    }
-        
+      }
       throw new Error(`HTTP ${res.status}`);
     }
     recapData = await res.json();
     render(recapData);
   } catch (err) {
-    console.warn('API not reachable, using demo data:', err.message);
-    recapData = getDemoData();
-    render(recapData);
+    console.error('Failed to load recap:', err.message);
+    document.getElementById('app').innerHTML =
+      `<div style="text-align:center;padding:40px 0">
+        <p class="error">Could not load recap: ${err.message}</p>
+        <p style="font-size:13px;color:var(--text3);margin-top:8px">Check that the API at <code>${API_BASE}</code> is reachable.</p>
+       </div>`;
   }
 }
 
@@ -129,7 +130,7 @@ async function fetchRecap(meetingId) {
 async function fetchMeetingList() {
   const app = document.getElementById('app');
   try {
-    const res = await fetch(`${API_BASE}/meetings`);
+    const res = await fetch(`${API_BASE}/api/meetings`);
     const data = await res.json();
     const meetings = data.meetings || [];
 
@@ -163,7 +164,7 @@ async function fetchMeetingList() {
 
 async function submitFeedback(meetingId, utteranceIdx, action, segmentSummaryId) {
   try {
-    const res = await fetch(`${API_BASE}/feedback`, {
+    const res = await fetch(`${API_BASE}/api/feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

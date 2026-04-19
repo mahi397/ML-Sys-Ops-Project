@@ -29,6 +29,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware import Middleware
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOCAL STORAGE — JSONL file store (drop-in until Postgress ready)
 # Swap: replace RecapStore methods with Postgres queries, API stays the same
@@ -72,6 +73,27 @@ class RecapStore:
                     if rec["meeting_id"] == meeting_id:
                         result = rec
         return result
+    
+    def list_meetings(self) -> list:
+        if not _RECAPS_FILE.exists():
+            return []
+        seen = {}
+        with self._lock:
+            with open(_RECAPS_FILE) as f:
+                for line in f:
+                    rec = json.loads(line.strip())
+                    seen[rec["meeting_id"]] = rec 
+        result = []
+        for rec in seen.values():
+            segs = rec.get("segments_json") or []
+            result.append({
+                "meeting_id":    rec["meeting_id"],
+                "model_version": rec.get("model_version", ""),
+                "created_at":    rec.get("created_at", ""),
+                "segment_count": len(segs),
+            })
+        result.sort(key=lambda r: r["created_at"], reverse=True)
+        return result[:50]
 
     # ── Utterances ──────────────────────────────────────────────────
 
@@ -110,6 +132,8 @@ class RecapStore:
                     if rec["meeting_id"] == meeting_id:
                         seen[rec["utterance_idx"]] = rec
         return sorted(seen.values(), key=lambda r: r["utterance_idx"])
+        
+    
     
 
     # ── Feedback corrections ─────────────────────────────────────────
@@ -197,14 +221,18 @@ class PostgresRecapStore:
     def get_recap(self, meeting_id: str):
         import psycopg2.extras
         sql = """
-            SELECT ss.segment_summary_id, ss.segment_index, ss.topic_label,
-                   ss.summary_bullets, ss.status, ss.model_version,
-                   ts.start_utterance_id, ts.end_utterance_id,
-                   ts.start_time_sec AS t_start, ts.end_time_sec AS t_end
-            FROM segment_summaries ss
-            JOIN topic_segments ts ON ss.topic_segment_id = ts.topic_segment_id
-            WHERE ss.meeting_id = %s
-            ORDER BY ss.segment_index
+    SELECT ss.segment_summary_id, ss.segment_index, ss.topic_label,
+           ss.summary_bullets, ss.status, ss.model_version,
+           ts.start_time_sec        AS t_start,
+           ts.end_time_sec          AS t_end,
+           u_start.utterance_index  AS start_utterance_index,
+           u_end.utterance_index    AS end_utterance_index
+    FROM segment_summaries ss
+    JOIN topic_segments ts ON ss.topic_segment_id = ts.topic_segment_id
+    LEFT JOIN utterances u_start ON u_start.utterance_id = ts.start_utterance_id
+    LEFT JOIN utterances u_end   ON u_end.utterance_id   = ts.end_utterance_id
+    WHERE ss.meeting_id = %s
+    ORDER BY ss.segment_index
         """
         with self._conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -230,6 +258,8 @@ class PostgresRecapStore:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql, (meeting_id,))
                 return [dict(r) for r in cur.fetchall()]
+            
+            
     
     def get_segment_summary(self, segment_summary_id) -> dict:
         import psycopg2.extras
@@ -1015,16 +1045,13 @@ class RecapAPIDeployment:
                 utterances = self.store.get_utterances(meeting_id)
 
                 # utterance_id → utterance_index lookup for start/end mapping
-                uid_to_idx = {u["utterance_id"]: u["utterance_index"] for u in utterances}
-                last_idx   = utterances[-1]["utterance_index"] if utterances else 0
+                last_idx = utterances[-1]["utterance_index"] if utterances else 0
 
                 ui_segments = []
                 for i, seg in enumerate(segments):
-                    start_utt = uid_to_idx.get(seg["start_utterance_id"], 0)
-                    end_utt   = uid_to_idx.get(seg["end_utterance_id"], last_idx)
-                    _matched = next((u for u in utterances if u["utterance_idx"] == end_utt),
-                        None
-                    )
+                    start_utt = seg["start_utterance_index"] if seg.get("start_utterance_index") is not None else 0
+                    end_utt   = seg["end_utterance_index"]   if seg.get("end_utterance_index")   is not None else last_idx
+                    _matched  = next((u for u in utterances if u["utterance_index"] == end_utt), None)
                     conf = _matched.get("boundary_confidence") if _matched else None
                     bullets = seg.get("summary_bullets") or []
                     if isinstance(bullets, str):
