@@ -1021,11 +1021,11 @@ class RecapAPIDeployment:
                 for i, seg in enumerate(segments):
                     start_utt = uid_to_idx.get(seg["start_utterance_id"], 0)
                     end_utt   = uid_to_idx.get(seg["end_utterance_id"], last_idx)
-                    conf = next(
-                        (u.get("boundary_confidence") for u in utterances
-                         if u["utterance_index"] == end_utt),
+                    _matched = next(
+                        (u for u in utterances if u["utterance_idx"] == end_utt),
                         None
                     )
+                    conf = _matched.get("boundary_confidence") if _matched else None
                     bullets = seg.get("summary_bullets") or []
                     if isinstance(bullets, str):
                         try:

@@ -226,8 +226,8 @@ function render(data) {
     // Boundary bar between segments (not after the last one)
     if (segIdx < segments.length - 1) {
       const boundaryUttIdx = seg.end_utt;
-      const conf = seg.boundary_confidence != null ? seg.boundary_confidence : '?';
-      const confDisplay = typeof conf === 'number' ? conf.toFixed(2) : conf;
+      const conf = (seg.boundary_confidence != null) ? seg.boundary_confidence : null;
+      const confDisplay = (conf !== null) ? conf.toFixed(2) : 'N/A';
       html += `
         <div class="boundary" id="boundary-${segIdx}">
           <div class="boundary-line"></div>
