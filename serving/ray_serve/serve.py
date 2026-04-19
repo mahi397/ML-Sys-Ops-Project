@@ -296,9 +296,10 @@ DEVICE             = "cuda"  # overridden per-actor in __init__
 
 # MLflow model registry 
 MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://129.114.25.185:8000")
-MODEL_ALIAS           = os.getenv("MODEL_ALIAS", "prod1")   # switch to "fallback" to rollback
+MODEL_ALIAS           = os.getenv("MODEL_ALIAS", "production")   # switch to "fallback" to rollback
 MLFLOW_MODEL_NAME     = "jitsi-topic-segmenter"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+
 
 
 def _normalize_utterance(u: dict) -> dict:
