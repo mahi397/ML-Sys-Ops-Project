@@ -302,7 +302,7 @@ services:
   retrain-job:
     build: ./train
     command: python retrain.py
-    shm_size: '1.5gb'
+    shm_size: '10g'
     depends_on:
       postgres:
         condition: service_healthy
