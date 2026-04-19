@@ -286,6 +286,7 @@ class UserSummaryMaterializeService:
             return True
         except Exception as exc:
             if lease is not None:
+                conn.rollback()
                 next_status = mark_task_retry(
                     conn,
                     lease=lease,
@@ -345,7 +346,7 @@ class UserSummaryMaterializeService:
                 WHERE meeting_id = %s
                   AND event_type = ANY(%s)
                   AND after_payload ? 'edit_session_id'
-                  AND (%s IS NULL OR created_at > %s)
+                  AND created_at > COALESCE(%s::timestamptz, '-infinity'::timestamptz)
                 GROUP BY after_payload ->> 'edit_session_id'
                 ORDER BY latest_feedback_event_id DESC
                 LIMIT 1
@@ -353,7 +354,6 @@ class UserSummaryMaterializeService:
                 (
                     meeting_id,
                     list(MATERIALIZABLE_EVENT_TYPES),
-                    latest_user_summary_at,
                     latest_user_summary_at,
                 ),
             )
