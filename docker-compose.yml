@@ -294,7 +294,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      # MLflow for model loading — port 8000
+      # MLflow for model loading — port 5000
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MODEL_NAME: jitsi-topic-segmenter
       MODEL_ALIAS: production
@@ -355,6 +355,7 @@ services:
   retrain-job:
     build: ./train
     command: python retrain.py
+    runtime: nvidia
     shm_size: '10g'
     depends_on:
       postgres:
