@@ -32,6 +32,7 @@ STAGE1_BUILD_QUEUE = "stage1_build"
 STAGE1_FORWARD_QUEUE = "stage1_forward"
 STAGE2_BUILD_QUEUE = "stage2_build"
 STAGE2_FORWARD_QUEUE = "stage2_forward"
+USER_SUMMARY_QUEUE = "user_summary_materialize"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class DispatcherConfig:
     stage1_forward_max_attempts: int = env_int("STAGE1_FORWARD_MAX_ATTEMPTS", 8)
     stage2_build_max_attempts: int = env_int("STAGE2_BUILD_MAX_ATTEMPTS", 8)
     stage2_forward_max_attempts: int = env_int("STAGE2_FORWARD_MAX_ATTEMPTS", 8)
+    user_summary_max_attempts: int = env_int("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS", 8)
     stale_after_seconds: int = env_int("WORKFLOW_TASK_STALE_AFTER_SECONDS", 600)
     stage1_build_dispatch_enabled: bool = env_flag(
         "DB_TASK_STAGE1_BUILD_ENABLED",
@@ -66,6 +68,10 @@ class DispatcherConfig:
     )
     stage2_forward_dispatch_enabled: bool = env_flag(
         "DB_TASK_STAGE2_FORWARD_ENABLED",
+        True,
+    )
+    user_summary_dispatch_enabled: bool = env_flag(
+        "DB_TASK_USER_SUMMARY_ENABLED",
         True,
     )
 
@@ -385,6 +391,91 @@ class Stage2ForwardDispatchTask:
         return [row["meeting_id"] for row in rows]
 
 
+@dataclass
+class UserSummaryDispatchTask:
+    config: DispatcherConfig
+    logger: object
+    name: str = "user_summary_dispatch"
+
+    def run_cycle(self, *, full_scan: bool) -> int:
+        conn = get_conn()
+        try:
+            meeting_ids = self.fetch_candidate_meeting_ids(conn, full_scan=full_scan)
+            dispatched = 0
+            for meeting_id in meeting_ids:
+                payload = {
+                    "task_name": USER_SUMMARY_QUEUE,
+                    "meeting_id": meeting_id,
+                    "artifact_version": self.config.stage1_version,
+                    "phase": "user_summary_pending",
+                    "enqueued_at": utcnow_iso(),
+                }
+                upsert_workflow_task(
+                    conn,
+                    task_type=USER_SUMMARY_QUEUE,
+                    meeting_id=meeting_id,
+                    artifact_version=self.config.stage1_version,
+                    payload_json=payload,
+                    max_attempts=self.config.user_summary_max_attempts,
+                    commit=False,
+                )
+                dispatched += 1
+            conn.commit()
+        finally:
+            conn.close()
+        return dispatched
+
+    def fetch_candidate_meeting_ids(self, conn, *, full_scan: bool) -> list[str]:
+        sql = """
+            WITH latest_user_summary AS (
+                SELECT
+                    meeting_id,
+                    MAX(created_at) AS latest_user_summary_created_at
+                FROM summaries
+                WHERE summary_type = 'user_edited'
+                GROUP BY meeting_id
+            ),
+            latest_edit_feedback AS (
+                SELECT
+                    meeting_id,
+                    MAX(created_at) AS latest_feedback_created_at
+                FROM feedback_events
+                WHERE event_type IN (
+                    'merge_segments',
+                    'split_segment',
+                    'edit_topic_label',
+                    'edit_summary_bullets'
+                )
+                  AND after_payload ? 'edit_session_id'
+                GROUP BY meeting_id
+            )
+            SELECT feedback.meeting_id
+            FROM latest_edit_feedback feedback
+            JOIN meetings m
+              ON m.meeting_id = feedback.meeting_id
+            LEFT JOIN latest_user_summary user_summary
+              ON user_summary.meeting_id = feedback.meeting_id
+            WHERE m.source_type = 'jitsi'
+              AND (
+                    user_summary.latest_user_summary_created_at IS NULL
+                    OR feedback.latest_feedback_created_at > user_summary.latest_user_summary_created_at
+               )
+            ORDER BY feedback.latest_feedback_created_at DESC, feedback.meeting_id DESC
+        """
+        params: list[object] = []
+        if full_scan and self.config.full_scan_limit > 0:
+            sql += " LIMIT %s"
+            params.append(self.config.full_scan_limit)
+        elif not full_scan:
+            sql += " LIMIT %s"
+            params.append(self.config.batch_size)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [row["meeting_id"] for row in rows]
+
+
 def build_dispatch_tasks(config: DispatcherConfig, logger) -> list[DispatchTask]:
     tasks: list[DispatchTask] = []
     if config.stage1_build_dispatch_enabled:
@@ -395,6 +486,8 @@ def build_dispatch_tasks(config: DispatcherConfig, logger) -> list[DispatchTask]
         tasks.append(Stage2BuildDispatchTask(config=config, logger=logger))
     if config.stage2_forward_dispatch_enabled:
         tasks.append(Stage2ForwardDispatchTask(config=config, logger=logger))
+    if config.user_summary_dispatch_enabled:
+        tasks.append(UserSummaryDispatchTask(config=config, logger=logger))
     return tasks
 
 
@@ -413,6 +506,8 @@ def validate_config(config: DispatcherConfig) -> None:
         raise ValueError("STAGE2_BUILD_MAX_ATTEMPTS must be > 0")
     if config.stage2_forward_max_attempts <= 0:
         raise ValueError("STAGE2_FORWARD_MAX_ATTEMPTS must be > 0")
+    if config.user_summary_max_attempts <= 0:
+        raise ValueError("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS must be > 0")
     if config.stale_after_seconds <= 0:
         raise ValueError("WORKFLOW_TASK_STALE_AFTER_SECONDS must be > 0")
 
@@ -454,6 +549,10 @@ def main() -> None:
     logger.info(
         "Dispatch tasks | stage2_forward=%s",
         config.stage2_forward_dispatch_enabled,
+    )
+    logger.info(
+        "Dispatch tasks | user_summary=%s",
+        config.user_summary_dispatch_enabled,
     )
 
     next_full_scan_at = time.monotonic()
