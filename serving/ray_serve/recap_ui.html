@@ -108,8 +108,10 @@ async function fetchRecap(meetingId) {
     const res = await fetch(`${API_BASE}/recap/${meetingId}`);
     if (!res.ok) {
       // If the API isn't running yet, show demo data for development
-      if (res.status === 404 || res.status === 502) {
-        recapData = getDemoData();
+      if (res.status === 404) { 
+        document.getElementById('app').innerHTML = '<p class="error">No recap found for this meeting.</p>';
+        return;
+    }
         render(recapData);
         return;
       }
