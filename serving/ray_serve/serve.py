@@ -507,6 +507,7 @@ class SegmenterDeployment:
                 # ── Load model: MLflow registry → local path → base weights ──
         self.model = None
         self.model_version = "base"
+        self.current_mlflow_version = "unknown" 
 
         # 1. Try MLflow registry
         if MLFLOW_TRACKING_URI:
@@ -516,6 +517,9 @@ class SegmenterDeployment:
                 mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
                 self.model = mlflow.pytorch.load_model(mlflow_uri)
                 self.model_version = f"mlflow@{MODEL_ALIAS}"
+                _client = mlflow.tracking.MlflowClient()
+                _alias_mv = _client.get_model_version_by_alias(MLFLOW_MODEL_NAME, MODEL_ALIAS)
+                self.current_mlflow_version = str(_alias_mv.version)
                 print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
             except Exception as e:
                 print(f"[segmenter] MLflow @{MODEL_ALIAS} failed ({e}), trying @fallback")
@@ -542,6 +546,8 @@ class SegmenterDeployment:
 
         self.model.to(self.device)
         self.model.eval()
+        self._model_lock = threading.Lock()
+        threading.Thread(target=self._reload_loop, daemon=True).start()
 
         # Report model loaded
         self.metrics.record.remote({
@@ -551,6 +557,36 @@ class SegmenterDeployment:
         })
         print(f"[segmenter] Ready on {self.device}, version={self.model_version}, threshold={self.threshold}")
 
+    def _reload_loop(self):
+        import mlflow.pytorch
+        check_interval = int(os.getenv("MODEL_RELOAD_INTERVAL_SECONDS", "300"))
+        while True:
+            time.sleep(check_interval)
+            try:
+                mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+                client = mlflow.tracking.MlflowClient()
+                alias_mv = client.get_model_version_by_alias(MLFLOW_MODEL_NAME, MODEL_ALIAS)
+                new_version = alias_mv.version
+
+                if str(new_version) != str(self.current_mlflow_version):
+                    print(f"[segmenter] New model version detected: {new_version}, reloading...")
+                    new_model = mlflow.pytorch.load_model(
+                        f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
+                    )
+                    new_model.to(self.device)
+                    new_model.eval()
+                    with self._model_lock:
+                        self.model = new_model
+                        self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"  # ← consistent format
+                        self.current_mlflow_version = new_version
+                    print(f"[segmenter] Model reloaded: {new_version}")
+                    self.metrics.record.remote({
+                        "endpoint": "segment", "model_loaded": True,
+                        "model_name": "roberta_segmenter",
+                        "model_version": new_version
+                    })
+            except Exception as e:
+                print(f"[segmenter] Reload check failed: {e}")
 
     @serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)
     async def batch_predict(self, requests: list) -> list:
@@ -576,8 +612,10 @@ class SegmenterDeployment:
             max_length=512, padding="max_length"
         ).to(self.device)
 
+        with self._model_lock:
+            model = self.model
         with torch.no_grad():
-            logits = self.model(**inputs).logits
+            logits = model(**inputs).logits
             probs = torch.softmax(logits, dim=1)
             boundary_probs = probs[:, 1].cpu().tolist()
 

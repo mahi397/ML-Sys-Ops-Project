@@ -30,7 +30,8 @@ services:
       - MODEL_VERSION=roberta-base-v0
       - DATABASE_URL=postgresql://proj07_user:proj07@129.114.27.165:5432/proj07_sql_db
       - MLFLOW_TRACKING_URI=http://129.114.25.185:8000
-      - MODEL_ALIAS=production        # change to "fallback" to rollback, then: docker compose restart ray-serve
+      - MODEL_ALIAS=production 
+      - MODEL_RELOAD_INTERVAL_SECONDS=300     
 
     #Ray uses shared memory (/dev/shm) as its object store to pass data between actors without copying. Docker gives containers only 64MB by default. With 64MB, Ray falls back to /tmp (disk), which is much slower hurts batch inference performance
     #tell Docker to give the container 2GB of shared memory 
