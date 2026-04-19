@@ -820,6 +820,17 @@ def train_func(config: Dict):
     """
     import ray.train.torch
 
+    # VRAM pre-check — fail fast if GPU is too loaded (e.g. serving model is using it)
+    if torch.cuda.is_available():
+        free_vram_gb = torch.cuda.mem_get_info()[0] / 1e9
+        total_vram_gb = torch.cuda.mem_get_info()[1] / 1e9
+        log.info(f"VRAM: {free_vram_gb:.1f} GB free / {total_vram_gb:.1f} GB total")
+        if free_vram_gb < 8.0:
+            raise RuntimeError(
+                f"Insufficient VRAM: {free_vram_gb:.1f} GB free, need >= 8.0 GB. "
+                f"Serving model may be holding GPU memory."
+            )
+
     torch.manual_seed(config.get("seed", 42))
     np.random.seed(config.get("seed", 42))
 
