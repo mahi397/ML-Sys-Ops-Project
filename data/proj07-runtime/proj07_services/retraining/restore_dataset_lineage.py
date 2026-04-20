@@ -555,7 +555,11 @@ def normalize_parsed_jitsi_payload(
                 participants_rows.append(
                     {
                         "meeting_id": meeting_id,
-                        "user_id": str(speaker.get("user_id") or "").strip(),
+                        "user_id": (
+                            str(speaker.get("user_id")).strip()
+                            if speaker.get("user_id") is not None and str(speaker.get("user_id")).strip()
+                            else None
+                        ),
                         "external_key": str(speaker.get("external_key") or "").strip(),
                         "display_name": str(
                             speaker.get("display_name")
@@ -594,7 +598,11 @@ def normalize_parsed_jitsi_payload(
         normalized_participants.append(
             {
                 "meeting_id": str(participant.get("meeting_id") or meeting_id).strip(),
-                "user_id": str(participant.get("user_id") or "").strip(),
+                "user_id": (
+                    str(participant.get("user_id")).strip()
+                    if participant.get("user_id") is not None and str(participant.get("user_id")).strip()
+                    else None
+                ),
                 "external_key": str(participant.get("external_key") or "").strip(),
                 "display_name": str(participant.get("display_name") or "").strip(),
                 "email": str(participant.get("email") or "").strip(),
