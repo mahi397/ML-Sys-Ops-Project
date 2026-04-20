@@ -461,10 +461,6 @@ def normalize_parsed_jitsi_payload(
         )
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
-
-    # Backward-compatible fallback:
-    # older parsed payloads may not embed meeting_artifacts at all.
-    # In this system, artifact metadata is stored in the meeting_artifacts table.
     if not isinstance(artifact_rows, list):
         artifact_rows = fetch_meeting_artifacts_from_db(conn, meeting_id)
         if artifact_rows:
@@ -528,9 +524,35 @@ def normalize_parsed_jitsi_payload(
 
         verified_base_artifacts.append(normalized_artifact)
 
-    if not any(str(row.get("artifact_type")) == "parsed_transcript" for row in verified_base_artifacts):
-        raise RuntimeError(
-            f"Cannot restore historical Jitsi meeting {meeting_id} because the parsed_transcript artifact is unavailable"
+    # Critical fallback:
+    # if we already loaded the parsed payload from object storage, synthesize the
+    # parsed_transcript artifact row even when payload/DB metadata is missing.
+    has_parsed = any(
+        str(row.get("artifact_type") or "").strip() == "parsed_transcript"
+        for row in verified_base_artifacts
+    )
+
+    if not has_parsed:
+        if not parsed_object_key:
+            raise RuntimeError(
+                f"Cannot restore historical Jitsi meeting {meeting_id} because the parsed_transcript artifact is unavailable"
+            )
+
+        verified_base_artifacts.append(
+            {
+                "meeting_id": meeting_id,
+                "artifact_type": "parsed_transcript",
+                "object_key": parsed_object_key,
+                "content_type": content_type_for_artifact("parsed_transcript"),
+                "artifact_version": 1,
+            }
+        )
+        parsed_artifact_version = parsed_artifact_version or 1
+
+        logger.warning(
+            "Synthesized parsed_transcript artifact metadata during restore | meeting_id=%s object_key=%s",
+            meeting_id,
+            parsed_object_key,
         )
 
     normalized_payload["meeting_artifacts"] = verified_base_artifacts
