@@ -169,6 +169,7 @@ echo -e "\n${YELLOW}[6/10] ML models (RoBERTa + Mistral)...${NC}"
 MODELS_DIR="${REPO_DIR}/serving/models"
 mkdir -p "${MODELS_DIR}"
 
+python3 -m pip --version &>/dev/null || sudo apt-get install -y -qq python3-pip
 _pip() { python3 -m pip "$@" 2>/dev/null || python3 -m pip --break-system-packages "$@"; }
 
 if [[ ! -d "${MODELS_DIR}/roberta-seg" || ! -f "${MODELS_DIR}/roberta-seg/config.json" ]]; then
