@@ -14,10 +14,10 @@ You can place only `jitsi-deployment/` inside your own GitHub repo, clone that r
 
 The script follows the same flow you described, but automates it:
 
-1. fetches the latest upstream `docker-jitsi-meet` release zip from GitHub using the same idea as:
+1. fetches the latest upstream `docker-jitsi-meet` release zip from GitHub using the release API's `zipball_url`,
 
 ```bash
-wget $(wget -q -O - https://api.github.com/repos/jitsi/docker-jitsi-meet/releases/latest | grep zip | cut -d\" -f4)
+wget "$(wget -q -O - https://api.github.com/repos/jitsi/docker-jitsi-meet/releases/latest | sed -n 's/.*"zipball_url": "\(.*\)".*/\1/p' | head -n 1)"
 ```
 
 2. unzips it under `/mnt/block/jitsi`,
@@ -127,6 +127,23 @@ Or from inside this folder:
 sudo bash install-jitsi-vm.sh --env-file stack.env
 ```
 
+After the installer finishes, use the same overlay set for any follow-up `docker compose`
+command on the VM:
+
+```bash
+docker compose \
+  --project-name jitsi-vm \
+  -f docker-compose.yml \
+  -f jigasi.yml \
+  -f transcriber.yml \
+  -f jitsi-deployment/compose/vm-services.yml \
+  ps
+```
+
+Do not replace `jitsi-deployment/compose/vm-services.yml` with repo-root overlays such as
+`meeting-portal-app.yml`, `transcript-uploader.yml`, or `vosk.yml` on the VM install created by
+this bundle. The VM deployment folds those services into `vm-services.yml`.
+
 ## Services started
 
 - base Jitsi stack from upstream `docker-compose.yml`
@@ -135,6 +152,45 @@ sudo bash install-jitsi-vm.sh --env-file stack.env
 - `vosk`
 - `meeting-portal-app`
 - `transcript-uploader`
+
+## Troubleshooting
+
+If `docker logs` reports `No such container` for a transcriber or vosk container, first confirm the
+Compose project name and active services:
+
+```bash
+docker compose \
+  --project-name jitsi-vm \
+  -f docker-compose.yml \
+  -f jigasi.yml \
+  -f transcriber.yml \
+  -f jitsi-deployment/compose/vm-services.yml \
+  ps
+```
+
+By default the installer uses project name `jitsi-vm`, so the container names are typically
+`jitsi-vm-transcriber-1` and `jitsi-vm-vosk-1`.
+
+If meetings fail to start and the `vosk` service is restarting, inspect the Vosk and transcriber
+logs:
+
+```bash
+docker logs --tail=200 jitsi-vm-vosk-1
+docker logs --tail=200 jitsi-vm-transcriber-1
+```
+
+If the Vosk log says `/opt/vosk-model-en/model` does not contain model files, the Vosk model was
+not downloaded or mounted correctly. Rerun the installer so it can repopulate `VOSK_MODEL_PATH` and
+start the stack again:
+
+```bash
+sudo bash jitsi-deployment/install-jitsi-vm.sh --env-file jitsi-deployment/stack.env
+```
+
+If the installer stops immediately after printing `Fetching latest docker-jitsi-meet release metadata`,
+that step failed before the archive download started. With the current installer, the most common causes
+are outbound HTTPS access to `api.github.com`/`github.com` being blocked from the VM or an older copy of
+the installer that still looked for the wrong GitHub API field.
 
 ## Notes
 

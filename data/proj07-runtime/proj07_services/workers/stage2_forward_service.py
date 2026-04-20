@@ -389,15 +389,17 @@ def register_recap_outputs(
                 (int(segment["segment_id"]), cur.fetchone()["topic_segment_id"])
             )
 
+        created_at = datetime.now(timezone.utc)
+
         cur.execute(
             """
             INSERT INTO summaries (
-                meeting_id, summary_type, summary_object_key, created_by_user_id, version
+                meeting_id, summary_type, summary_object_key, created_by_user_id, version, created_at
             )
-            VALUES (%s, 'llm_generated', %s, NULL, %s)
+            VALUES (%s, 'llm_generated', %s, NULL, %s, %s)
             RETURNING summary_id
             """,
-            (meeting_id, recap_uri, version),
+            (meeting_id, recap_uri, version, created_at),
         )
         summary_id = cur.fetchone()["summary_id"]
 
@@ -408,9 +410,9 @@ def register_recap_outputs(
                 INSERT INTO segment_summaries (
                     meeting_id, topic_segment_id, summary_id, segment_index,
                     topic_label, summary_bullets, status,
-                    model_name, model_version, prompt_version
+                    model_name, model_version, prompt_version, created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     meeting_id,
@@ -423,6 +425,7 @@ def register_recap_outputs(
                     model_name or None,
                     model_version or None,
                     prompt_version or None,
+                    created_at,
                 ),
             )
 

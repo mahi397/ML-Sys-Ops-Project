@@ -709,6 +709,8 @@ class UserSummaryMaterializeService:
                 )
                 inserted_topic_segment_ids.append(int(cur.fetchone()["topic_segment_id"]))
 
+            created_at = datetime.now(timezone.utc)
+
             cur.execute(
                 """
                 INSERT INTO summaries (
@@ -716,9 +718,10 @@ class UserSummaryMaterializeService:
                     summary_type,
                     summary_object_key,
                     created_by_user_id,
-                    version
+                    version,
+                    created_at
                 )
-                VALUES (%s, 'user_edited', %s, %s, %s)
+                VALUES (%s, 'user_edited', %s, %s, %s, %s)
                 RETURNING summary_id
                 """,
                 (
@@ -726,6 +729,7 @@ class UserSummaryMaterializeService:
                     summary_uri,
                     event_rows[-1].get("created_by_user_id"),
                     next_version,
+                    created_at,
                 ),
             )
             summary_id = int(cur.fetchone()["summary_id"])
@@ -743,9 +747,10 @@ class UserSummaryMaterializeService:
                         status,
                         model_name,
                         model_version,
-                        prompt_version
+                        prompt_version,
+                        created_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         meeting_id,
@@ -758,6 +763,7 @@ class UserSummaryMaterializeService:
                         "user_editor",
                         f"session:{edit_session_id[:8]}",
                         base_summary_type,
+                        created_at,
                     ),
                 )
         conn.commit()

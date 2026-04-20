@@ -37,6 +37,37 @@ fatal() {
     exit 1
 }
 
+fetch_text_url() {
+    local url="$1"
+    local description="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'User-Agent: jitsi-deploy-installer' \
+            "$url" || fatal "Failed to ${description} from ${url}. Check outbound HTTPS access from the VM."
+        return 0
+    fi
+
+    wget -q -O - \
+        --header='Accept: application/vnd.github+json' \
+        --user-agent='jitsi-deploy-installer' \
+        "$url" || fatal "Failed to ${description} from ${url}. Check outbound HTTPS access from the VM."
+}
+
+download_file() {
+    local url="$1"
+    local destination="$2"
+    local description="$3"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL "$url" -o "$destination" || fatal "Failed to ${description} from ${url}."
+        return 0
+    fi
+
+    wget -O "$destination" "$url" || fatal "Failed to ${description} from ${url}."
+}
+
 strip_wrapping_quotes() {
     local value="$1"
 
@@ -448,7 +479,7 @@ create_directories() {
 }
 
 download_upstream_source() {
-    local api_url zip_url download_dir archive_path extract_dir extracted_source
+    local api_url zip_url download_dir archive_path extract_dir extracted_source metadata
 
     api_url="https://api.github.com/repos/jitsi/docker-jitsi-meet/releases/latest"
     download_dir="${INSTALL_ROOT}/downloads"
@@ -458,11 +489,12 @@ download_upstream_source() {
     mkdir -p "$download_dir"
 
     log "Fetching latest docker-jitsi-meet release metadata"
-    zip_url="$(wget -q -O - "$api_url" | grep browser_download_url | grep '\.zip"' | head -n 1 | cut -d'"' -f4)"
+    metadata="$(fetch_text_url "$api_url" "fetch docker-jitsi-meet release metadata")"
+    zip_url="$(printf '%s\n' "$metadata" | sed -n 's/.*"zipball_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
     [ -n "$zip_url" ] || fatal "Could not determine the latest docker-jitsi-meet release zip URL."
 
     log "Downloading upstream Jitsi source"
-    wget -O "$archive_path" "$zip_url"
+    download_file "$zip_url" "$archive_path" "download the upstream Jitsi source archive"
 
     rm -rf "$extract_dir"
     mkdir -p "$extract_dir"
@@ -649,7 +681,7 @@ download_vosk_model() {
 
     mkdir -p "$parent_dir"
     temp_dir="$(mktemp -d)"
-    curl -fL "$model_url" -o "${temp_dir}/model.zip"
+    download_file "$model_url" "${temp_dir}/model.zip" "download the Vosk model archive"
     unzip -q "${temp_dir}/model.zip" -d "$temp_dir"
     extracted_dir="$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     [ -n "$extracted_dir" ] || fatal "Failed to extract the Vosk model archive."
