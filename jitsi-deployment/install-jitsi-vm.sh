@@ -703,6 +703,7 @@ prepare_env() {
     generate_if_needed INGEST_TOKEN "$ENV_TARGET"
     generate_if_needed JITSI_HOST_EXTERNAL_KEY "$ENV_TARGET"
     generate_jitsi_passwords_if_needed
+    chmod 644 "$ENV_TARGET"
 
     validate_env
 }
