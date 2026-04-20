@@ -64,7 +64,7 @@ ok "Docker Compose: $(docker compose version)"
 
 # ── 2. NVIDIA Container Toolkit ───────────────────────────────────────────────
 echo -e "\n${YELLOW}[2/10] NVIDIA Container Toolkit...${NC}"
-if ! dpkg -l 2>/dev/null | grep -q nvidia-container-toolkit; then
+if ! command -v nvidia-ctk &>/dev/null && ! dpkg -s nvidia-container-toolkit &>/dev/null; then
     info "Installing nvidia-container-toolkit..."
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
         sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
