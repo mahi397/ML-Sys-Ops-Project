@@ -133,10 +133,7 @@ sudo mkdir -p \
     "${BLOCK_ROOT}/user-behaviour/reconstructed_segments" \
     "${BLOCK_ROOT}/user-behaviour/user_summary_edits"
 sudo chown -R "${USER}:${USER}" "${BLOCK_ROOT}"
-# Restore postgres ownership if data dir already exists
-if [[ -d "${BLOCK_ROOT}/postgres_data/global" ]]; then
-    sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
-fi
+# postgres_data ownership is fixed in step 7 (after stop, before start)
 ok "Block storage ready at ${BLOCK_ROOT}"
 
 # ── 5. Stage training datasets ────────────────────────────────────────────────
@@ -218,6 +215,9 @@ ls -lh "${MODELS_DIR}/"
 echo -e "\n${YELLOW}[7/10] Postgres + schema migrations...${NC}"
 
 cd "${REPO_DIR}"
+# Stop postgres first so it isn't running when we fix data dir ownership
+docker compose stop postgres 2>/dev/null || true
+sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
 docker compose up -d --remove-orphans postgres
 info "Waiting for postgres to be healthy..."
 until docker compose exec postgres pg_isready -U "${POSTGRES_USER:-proj07_user}" >/dev/null 2>&1; do
