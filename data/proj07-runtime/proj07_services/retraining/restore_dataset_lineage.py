@@ -566,6 +566,11 @@ def normalize_parsed_jitsi_payload(
                         ).strip(),
                         "email": str(speaker.get("email") or "").strip(),
                         "role": str(speaker.get("role") or "participant").strip(),
+                        "can_view_summary": True,
+                        "can_edit_summary": True,
+                        "joined_at": speaker.get("joined_at"),
+                        "left_at": speaker.get("left_at"),
+
                     }
                 )
 
@@ -593,22 +598,11 @@ def normalize_parsed_jitsi_payload(
                 "external_key": str(participant.get("external_key") or "").strip(),
                 "display_name": str(participant.get("display_name") or "").strip(),
                 "email": str(participant.get("email") or "").strip(),
-            }
-        )
-
-    normalized_participants: list[dict[str, Any]] = []
-    for participant in participants_rows:
-        if not isinstance(participant, dict):
-            continue
-
-        normalized_participants.append(
-            {
-                "meeting_id": str(participant.get("meeting_id") or meeting_id).strip(),
-                "user_id": str(participant.get("user_id") or "").strip(),
-                "external_key": str(participant.get("external_key") or "").strip(),
-                "display_name": str(participant.get("display_name") or "").strip(),
-                "email": str(participant.get("email") or "").strip(),
                 "role": str(participant.get("role") or "speaker").strip(),
+                "can_view_summary": bool(participant.get("can_view_summary", True)),
+                "can_edit_summary": bool(participant.get("can_edit_summary", True)),
+                "joined_at": participant.get("joined_at"),
+                "left_at": participant.get("left_at"),
             }
         )
 
@@ -617,7 +611,7 @@ def normalize_parsed_jitsi_payload(
     normalized_payload["participants"] = normalized_participants
     normalized_payload["meeting_participants"] = normalized_participants
 
-    
+
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
         artifact_rows = fetch_meeting_artifacts_from_db(conn, meeting_id)
