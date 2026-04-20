@@ -226,8 +226,8 @@ async def startup_event() -> None:
             STAGE1_SHORT_MEETING_MAX_UTTERANCES,
         )
 
-    if not INGEST_SCRIPT.exists():
-        raise RuntimeError(f"Ingest script not found: {INGEST_SCRIPT}")
+    # if not INGEST_SCRIPT.exists():
+    #     raise RuntimeError(f"Ingest script not found: {INGEST_SCRIPT}")
 
 
 @app.get("/health")
