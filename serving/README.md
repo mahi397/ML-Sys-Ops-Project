@@ -1,6 +1,6 @@
 # Jitsi ML Serving — NeuralOps
 
-End-to-end ML serving system for **topic segmentation + meeting summarization** built on Ray Serve 2.9.3 with GPU acceleration. Deployed on Chameleon Cloud (Quadro RTX 6000, 24 GB VRAM).
+End-to-end ML serving system for **topic segmentation + meeting summarization** built on Ray Serve 2.9.3 with GPU acceleration. Deployed on Chameleon Cloud (h100, Quadro RTX 6000, 24 GB VRAM(Ray serve)).
 
 ---
 
@@ -12,7 +12,7 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 | Recap UI | http://192.5.87.115:8000/ui | — |
 | Grafana | http://192.5.87.115:3000 | `admin` / `jitsi2026` |
 | Prometheus | http://192.5.87.115:9090 | — |
-| Alertmanager | http://192.5.87.115:9093| — |
+| Alertmanager | http://192.5.87.115:9093 | — |
 | Ray Dashboard | http://192.5.87.115:8265 | — |
 
 ---
@@ -20,21 +20,24 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [Directory Structure](#directory-structure)
-3. [Ray Serve (Primary)](#ray-serve-primary)
+2. [End-to-End Data Flow](#end-to-end-data-flow)
+3. [Directory Structure](#directory-structure)
+4. [Ray Serve (Primary)](#ray-serve-primary)
    - [Deployments](#deployments)
    - [API Endpoints](#api-endpoints)
    - [Request Flow](#request-flow)
    - [MLflow Integration](#mlflow-integration)
    - [Metrics & Monitoring](#metrics--monitoring)
-4. [FastAPI Baseline](#fastapi-baseline)
-5. [Docker Compose Services](#docker-compose-services)
-6. [Setup & Deployment](#setup--deployment)
-7. [Environment Variables](#environment-variables)
-8. [Benchmarking](#benchmarking)
-9. [Edge Cases & Validation](#edge-cases--validation)
-10. [Monitoring Stack](#monitoring-stack)
-11. [Troubleshooting](#troubleshooting)
+5. [Database & Persistence](#database--persistence)
+6. [FastAPI Baseline](#fastapi-baseline)
+7. [Docker Compose Services](#docker-compose-services)
+8. [Container Build](#container-build)
+9. [Setup & Deployment](#setup--deployment)
+10. [Environment Variables](#environment-variables)
+11. [Benchmarking](#benchmarking)
+12. [Edge Cases & Validation](#edge-cases--validation)
+13. [Monitoring Stack](#monitoring-stack)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -58,7 +61,21 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
                         │  /metrics  ► MetricsDeployment               │
                         │  /health   ► HealthDeployment                │
                         │  /ui       ► RecapUIDeployment               │
-                        └─────────────────────────────────────────────┘
+                        └──────────────────────┬──────────────────────┘
+                                               │  save_recap()
+                                               │  save_utterances()
+                                               ▼
+                                  ┌────────────────────────┐
+                                  │   SQLite Database       │
+                                  │   recaps.db             │
+                                  │   (RecapStore)          │
+                                  └────────────┬───────────┘
+                                               │  read via RecapDeployment
+                                               ▼
+                                  ┌────────────────────────┐
+                                  │   /api/* + /ui          │
+                                  │   (browser recap viewer)│
+                                  └────────────────────────┘
                                           │
                         ┌─────────────────▼──────────────────┐
                         │   Prometheus (Port 9090)            │
@@ -73,7 +90,138 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 
 **Two ML stages in sequence:**
 - **Stage A — RoBERTa** (`roberta-base` fine-tuned): Detects topic boundaries between utterance pairs
-- **Stage B — Mistral-7B** (`Q4_K_M` quantized GGUF): Generates topic labels + bullet-point summaries per segment
+- **Stage B — Mistral-7B** (`Q4_K_M` quantized GGUF via `llama-cpp-python`): Generates topic labels + bullet-point summaries per segment
+
+---
+
+## End-to-End Data Flow
+
+This section traces exactly what happens to data from the moment a client POSTs to `/recap` through to the stored result and the browser UI.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  1. CLIENT → POST /recap                                                     │
+│                                                                              │
+│     { meeting_id, utterances: [{speaker, text, t_start, t_end}, ...] }      │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  2. RecapPipelineDeployment — VALIDATION                                     │
+│                                                                              │
+│     • 0 utterances          → 400                                            │
+│     • all text < 20 chars   → 400                                            │
+│     • < 2 valid utterances  → 400                                            │
+│     • 2–6 utterances        → proceed + warning: short_meeting_low_confidence│
+│     • > 2000 utterances     → truncated to 2000 + warning                   │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  3. WINDOW CONSTRUCTION  (_build_windows, window_size=7)                     │
+│                                                                              │
+│     For every consecutive utterance pair (transition point i → i+1):        │
+│     • Slide a 7-utterance window centred on the transition                   │
+│     • Pad with empty utterances if near start/end of transcript              │
+│     • Each window carries: transition_index=3, meeting_offset_seconds        │
+│                                                                              │
+│     N utterances → N-1 windows                                               │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │  N-1 windows dispatched IN PARALLEL
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  4. STAGE A — SegmenterDeployment  (GPU fraction: 0.3)                       │
+│                                                                              │
+│     segmenter.predict_single.remote(window)  ×  N-1                         │
+│                                                                              │
+│     Inside batch_predict (@serve.batch, max_batch_size=8):                  │
+│     a. Format each window:                                                   │
+│        "[SPEAKER_A]: text  [SPEAKER_B]: text  ..."                           │
+│     b. Batch-tokenise  (RobertaTokenizer, max_length=512, padding)           │
+│     c. Single GPU forward pass → logits → softmax                            │
+│     d. boundary_probability = prob[:, 1]                                     │
+│     e. is_boundary = (prob >= BOUNDARY_THRESHOLD)                            │
+│                                                                              │
+│     Output per window:                                                       │
+│     { boundary_probability, is_boundary, t_boundary, transition_after_pos } │
+│                                                                              │
+│     Model load order (startup):                                              │
+│       MLflow @production → @fallback → /models/roberta-seg → roberta-base   │
+│     Hot-reload: background thread polls MLflow every 300 s                  │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │  N-1 boundary decisions
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  5. SEGMENT ASSEMBLY  (_assemble_segments)                                   │
+│                                                                              │
+│     Walk utterances; split whenever is_boundary=true                        │
+│     Each segment:  { segment_id, t_start, t_end, utterances[] }             │
+│                                                                              │
+│     M segments produced  (M >= 1)                                            │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │  M segments dispatched SEQUENTIALLY
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  6. STAGE B — SummarizerDeployment  (GPU fraction: 0.7)                      │
+│                                                                              │
+│     summarizer.__call__.remote(segment)  ×  M                               │
+│                                                                              │
+│     For each segment:                                                        │
+│     a. Take up to 200 utterances (MAX_SEGMENT_UTTERANCES)                   │
+│     b. Build prompt:                                                         │
+│        "Segment X of Y.\nTranscript:\n[SPEAKER_A]: ...\n..."                 │
+│        "Respond with JSON only: {topic_label, summary_bullets}"              │
+│     c. Mistral-7B Q4_K_M GGUF inference (n_gpu_layers=-1, n_ctx=4096)       │
+│        max_tokens=300, temperature=0.1                                       │
+│     d. Extract JSON from response (find first { … } block, up to 10 retries)│
+│     e. status="complete"  |  status="draft" if LLM not loaded               │
+│                                                                              │
+│     Output per segment:                                                      │
+│     { meeting_id, segment_id, t_start, t_end,                               │
+│       topic_label, summary_bullets[], status }                               │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  7. PERSISTENCE  (RecapStore → SQLite  recaps.db)                            │
+│                                                                              │
+│     store.save_recap(meeting_id, recap_json)                                 │
+│     store.save_utterances(meeting_id, utterances)                            │
+│                                                                              │
+│     Tables:  recaps(meeting_id PK, data JSON, created_at)                   │
+│              utterances(meeting_id, speaker, text, t_start, t_end)          │
+│                                                                              │
+│     Duplicate meeting_id → overwrites previous entry                        │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  8. RESPONSE → CLIENT                                                        │
+│                                                                              │
+│     { meeting_id, generated_at, total_segments,                              │
+│       processing_time_seconds, warnings[], recap[] }                         │
+└──────────────────────────────┬───────────────────────────────────────────────┘
+                               │  later, via browser
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  9. UI RETRIEVAL  (RecapDeployment → SQLite read)                            │
+│                                                                              │
+│     GET /api/meetings              → list all stored meeting_ids             │
+│     GET /api/recap/{meeting_id}    → full recap JSON from DB                 │
+│     GET /ui?meeting_id=<id>        → serves recap_ui.html (no-cache)        │
+│     POST /api/feedback             → stores boundary correction in DB        │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**GPU time-sharing summary:**
+
+| Stage | Deployment | GPU Fraction | Concurrency |
+|---|---|---|---|
+| A — Boundary detection | SegmenterDeployment | 0.3 | up to 10 (batched 8/pass) |
+| B — Summarization | SummarizerDeployment | 0.7 | up to 3 |
+| Total | — | 1.0 (exactly fills RTX 6000) | — |
+
+Stages A and B share the single Quadro RTX 6000 via Ray's fractional GPU allocation. Stage A windows run in parallel (fanned out via `predict_single.remote()`); Stage B segments run sequentially because Mistral holds 70% of VRAM and cannot safely batch multiple 7B inference calls simultaneously.
 
 ---
 
@@ -83,11 +231,11 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 serving/
 ├── ray_serve/                   # PRIMARY: Ray Serve distributed system
 │   ├── serve.py                 # All deployments, endpoints, MLflow integration
-│   ├── storage.py               # SQLite-backed recap & utterance store
+│   ├── storage.py               # SQLite-backed recap & utterance store (RecapStore)
 │   ├── metrics_server.py        # Standalone metrics probe (port 9091)
 │   ├── benchmark_ray.py         # Load testing for Ray endpoints
 │   ├── recap_ui.html            # Browser UI for viewing meeting recaps
-│   ├── Dockerfile.ray           # Container build (NGC PyTorch base + CUDA)
+│   ├── Dockerfile.ray           # Container build (PyTorch 2.1 + CUDA 12.1)
 │   └── requirements_ray.txt     # Ray-specific Python dependencies
 │
 ├── app/                         # BASELINE: FastAPI serving (non-distributed)
@@ -141,22 +289,9 @@ serving/
 
 ### Deployments
 
-`serve.py` defines **7 Ray Serve deployments** wired together via deployment handles:
+`serve.py` defines **4 active Ray Serve deployments** wired together via deployment handles:
 
-#### 1. `MetricsDeployment` — `/metrics`
-Prometheus metrics registry exposed at `/metrics`. Tracks:
-- `jitsi_requests_total` — counter by endpoint + status
-- `jitsi_request_latency_seconds` — histogram by endpoint
-- `jitsi_batch_size` — Ray Serve batch sizes
-- `jitsi_boundary_confidence` — RoBERTa confidence scores
-- `jitsi_segments_detected_total` — boundary count
-- `jitsi_recap_duration_seconds` — full pipeline latency
-- `jitsi_recap_segments_per_meeting` — segments per recap
-- `jitsi_gpu_memory_used_mb` / `jitsi_gpu_memory_total_mb` — GPU stats
-- `jitsi_sla_violations_total` — latency SLA breaches
-- `jitsi_feedback_corrections_total` — user boundary corrections
-
-#### 2. `SegmenterDeployment` — `/segment`
+#### 1. `SegmenterDeployment` — `/segment`
 RoBERTa-based topic boundary detector.
 
 | Config | Value |
@@ -166,13 +301,13 @@ RoBERTa-based topic boundary detector.
 | Max concurrent requests | 10 |
 | Batching | `@serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)` |
 | Model | `RobertaForSequenceClassification` (2-class) |
-| Input format | 7-utterance sliding window |
+| Input format | 7-utterance sliding window, formatted as `[SPEAKER_X]: text` |
 | Threshold | `BOUNDARY_THRESHOLD` env var (default: 0.5) |
 
-**MLflow loading chain (in order):**
+**Model load order (startup):**
 1. `models:/jitsi-topic-segmenter@production` from MLflow registry
 2. `models:/jitsi-topic-segmenter@fallback` if production fails
-3. `/models/roberta-seg` local fine-tuned checkpoint
+3. `MODEL_PATH` env var — local fine-tuned checkpoint (default: `roberta-base`)
 4. `roberta-base` pretrained weights as last resort
 
 **Hot-reload:** Polls MLflow every `MODEL_RELOAD_INTERVAL_SECONDS` (default 300s). Swaps model in-place under a threading lock without restarting the actor.
@@ -190,29 +325,20 @@ RoBERTa-based topic boundary detector.
 }
 ```
 
-**Batch input (multiple windows at once):**
-```json
-{
-  "meeting_id": "meeting_123",
-  "requests": [
-    {"window": [...], "transition_index": 3, "meeting_offset_seconds": 0, "request_id": "t0"},
-    {"window": [...], "transition_index": 3, "meeting_offset_seconds": 5, "request_id": "t1"}
-  ]
-}
-```
-
 **Output:**
 ```json
 {
+  "meeting_id": "meeting_123",
+  "transition_after_position": 3,
   "boundary_probability": 0.87,
   "is_boundary": true,
   "t_boundary": 30.0,
-  "model_version": "mlflow@production_v1"
+  "segment_so_far": { "t_start": 0.0, "t_end": 30.0 }
 }
 ```
 
-#### 3. `SummarizerDeployment` — `/summarize`
-Mistral-7B-Instruct meeting summarizer via `llama-cpp-python`.
+#### 2. `SummarizerDeployment` — `/summarize`
+Mistral-7B-Instruct meeting summarizer via `llama-cpp-python` (CUDA build, `CMAKE_ARGS="-DLLAMA_CUBLAS=on"`).
 
 | Config | Value |
 |---|---|
@@ -220,9 +346,11 @@ Mistral-7B-Instruct meeting summarizer via `llama-cpp-python`.
 | Replicas | 1 |
 | Max concurrent requests | 3 |
 | Model | Mistral-7B-Instruct Q4_K_M GGUF |
-| Max retries | 10 (with JSON validation each attempt) |
+| Context window | 4096 tokens (`n_ctx`) |
+| GPU layers | All (`n_gpu_layers=-1`) |
 | Max tokens | 300 |
 | Temperature | 0.1 |
+| JSON extraction | Finds first `{…}` block in response; up to 10 retries |
 
 **Input:**
 ```json
@@ -259,12 +387,22 @@ Mistral-7B-Instruct meeting summarizer via `llama-cpp-python`.
 }
 ```
 
-> `status: "draft"` is returned if Mistral is not loaded. All other response fields will be empty strings/lists.
+> `status: "draft"` is returned if Mistral is not loaded (`LLM_MODEL_PATH` missing or file absent). All other response fields will be empty strings/lists.
+
+#### 3. `HealthDeployment` — `/health`
+
+```json
+{
+  "status": "ok",
+  "mode": "ray_serve",
+  "device": "cuda"
+}
+```
 
 #### 4. `RecapPipelineDeployment` — `/recap`
-Full pipeline orchestrator. Takes raw utterances, runs both stages, returns consolidated recap.
+Full pipeline orchestrator. Takes raw utterances, runs both stages, persists to SQLite, returns consolidated recap.
 
-**Input validation rules** (from `training_assumptions.pdf`):
+**Input validation rules:**
 - 0 utterances → 400 error
 - All utterances under 20 chars after cleaning → 400 error
 - Fewer than 2 valid utterances → 400 error
@@ -305,38 +443,21 @@ Full pipeline orchestrator. Takes raw utterances, runs both stages, returns cons
 }
 ```
 
-#### 5. `HealthDeployment` — `/health`
-```json
-{
-  "status": "ok",
-  "mode": "ray_serve",
-  "device": "cuda",
-  "gpu": "Quadro RTX 6000",
-  "gpu_memory_gb": 24.0
-}
-```
-
-#### 6. `RecapUIDeployment` — `/ui?meeting_id=<id>`
-Serves `recap_ui.html` — a browser-based meeting recap viewer. Reads the HTML file from disk on every request (no caching) with `Cache-Control: no-store`.
-
-#### 7. `RecapDeployment` — `/api/*`
-REST API for the UI. Reads persisted recaps from SQLite via `RecapStore`.
-
 ---
 
 ### API Endpoints
 
 | Method | Path | Handler | Description |
 |---|---|---|---|
-| `GET` | `/health` | HealthDeployment | System health + GPU info |
-| `POST` | `/segment` | SegmenterDeployment | Raw boundary detection (single window or batch) |
+| `GET` | `/health` | HealthDeployment | System health + device info |
+| `POST` | `/segment` | SegmenterDeployment | Raw boundary detection (single window) |
 | `POST` | `/summarize` | SummarizerDeployment | Raw segment summarization |
-| `POST` | `/recap` | RecapPipelineDeployment | Full pipeline: utterances → segmented recap |
+| `POST` | `/recap` | RecapPipelineDeployment | Full pipeline: utterances → segmented recap + DB write |
 | `GET` | `/metrics` | MetricsDeployment | Prometheus metrics |
-| `GET` | `/ui` | RecapUIDeployment | Browser recap viewer |
-| `GET` | `/api/meetings` | RecapDeployment | List all processed meetings |
-| `GET` | `/api/recap/{meeting_id}` | RecapDeployment | Get recap for a meeting |
-| `POST` | `/api/feedback` | RecapDeployment | Submit boundary correction feedback |
+| `GET` | `/ui` | RecapUIDeployment | Browser recap viewer (reads from DB) |
+| `GET` | `/api/meetings` | RecapDeployment | List all processed meetings from DB |
+| `GET` | `/api/recap/{meeting_id}` | RecapDeployment | Get recap for a meeting from DB |
+| `POST` | `/api/feedback` | RecapDeployment | Submit boundary correction (written to DB) |
 
 ---
 
@@ -351,21 +472,26 @@ POST /recap
   │    └─ < 2 valid → 400
   │
   ├─ _build_windows(utterances, window_size=7)
-  │    └─ Sliding windows centered on each transition point
+  │    └─ Sliding 7-utterance windows centred on each transition point
+  │       "[SPEAKER_X]: text ..." formatted string per window
   │
-  ├─ [parallel] segmenter.predict_single.remote(window) × N windows
+  ├─ [parallel] segmenter.predict_single.remote(window) × N-1 windows
   │    └─ @serve.batch groups up to 8 simultaneous calls → 1 GPU forward pass
+  │       Returns: { is_boundary, boundary_probability, t_boundary }
   │
   ├─ _assemble_segments(utterances, decisions)
-  │    └─ Groups utterances between detected boundaries
+  │    └─ Splits utterance list at every is_boundary=true position
+  │       Produces M segments with t_start, t_end, utterances[]
   │
-  ├─ [sequential] summarizer.summarize_dict.remote(segment) × M segments
-  │    └─ One Mistral call per segment (10 retries with JSON validation)
+  ├─ [sequential] summarizer.__call__.remote(segment) × M segments
+  │    └─ One Mistral call per segment (JSON extraction, up to 10 retries)
+  │       Returns: { topic_label, summary_bullets[], status }
   │
-  ├─ store.save_recap()     → SQLite
-  ├─ store.save_utterances() → SQLite
+  ├─ store.save_recap(meeting_id, recap)    → SQLite recaps table
+  ├─ store.save_utterances(meeting_id, ..)  → SQLite utterances table
   │
-  └─ JSONResponse (recap + timing + warnings)
+  └─ JSONResponse: { meeting_id, generated_at, total_segments,
+                     processing_time_seconds, warnings[], recap[] }
 ```
 
 ---
@@ -386,7 +512,7 @@ MODEL_RELOAD_INTERVAL_SECONDS=300
 
 **Fallback chain on startup:**
 ```
-@production → @fallback → /models/roberta-seg → roberta-base
+MLflow @production → MLflow @fallback → /models/roberta-seg (local) → roberta-base (HuggingFace)
 ```
 
 **Hot-reload:** Background thread wakes every 300s, checks MLflow version, swaps model under `_model_lock` without actor restart.
@@ -434,6 +560,83 @@ Prometheus scrapes `ray-serve:8000/metrics` every 5 seconds.
 
 ---
 
+## Database & Persistence
+
+### Overview
+
+All meeting data is persisted in a **SQLite database** managed by `RecapStore` in `ray_serve/storage.py`. The database file lives inside the container at the path configured by `DB_PATH` (default: `recaps.db` in the working directory `/app`). To survive container restarts, mount it as a volume (see below).
+
+### Schema
+
+```
+recaps
+┌──────────────┬──────────────┬───────────────────────┐
+│ meeting_id   │ data         │ created_at             │
+│ TEXT (PK)    │ TEXT (JSON)  │ TEXT (ISO timestamp)   │
+└──────────────┴──────────────┴───────────────────────┘
+
+utterances
+┌──────────────┬─────────┬──────────────┬─────────┬───────┐
+│ meeting_id   │ speaker │ text         │ t_start │ t_end │
+│ TEXT         │ TEXT    │ TEXT         │ REAL    │ REAL  │
+└──────────────┴─────────┴──────────────┴─────────┴───────┘
+```
+
+### RecapStore operations
+
+| Method | Description |
+|---|---|
+| `save_recap(meeting_id, recap_json)` | Upserts full recap blob. Duplicate `meeting_id` overwrites. |
+| `save_utterances(meeting_id, utterances)` | Inserts all utterances for a meeting. |
+| `get_recap(meeting_id)` | Returns the recap JSON for a given meeting, or `None`. |
+| `list_meetings()` | Returns all `meeting_id` values with their `created_at` timestamps. |
+
+### Who reads and writes the DB
+
+```
+RecapPipelineDeployment (/recap)
+    └── WRITES → save_recap() + save_utterances()   on every successful recap
+
+RecapDeployment (/api/*)
+    └── READS  → get_recap(), list_meetings()
+    └── WRITES → feedback corrections via /api/feedback
+
+RecapUIDeployment (/ui)
+    └── serves recap_ui.html; browser JS fetches /api/recap/{id} to display data
+```
+
+### Persisting the database across container restarts
+
+By default `recaps.db` lives inside the container and is lost on restart. To persist it, add a bind-mount in `docker-compose.yml`:
+
+```yaml
+ray-serve:
+  volumes:
+    - ./models:/models
+    - ./recaps.db:/app/recaps.db    # add this line
+```
+
+Or point to a custom path via environment variable:
+
+```bash
+DB_PATH=/data/recaps.db
+```
+
+### Connecting to the database directly
+
+```bash
+# Open an interactive SQLite shell inside the running container
+docker exec -it jitsi-ray-serve sqlite3 recaps.db
+
+# Useful queries
+.tables
+SELECT meeting_id, created_at FROM recaps ORDER BY created_at DESC LIMIT 10;
+SELECT COUNT(*) FROM utterances WHERE meeting_id = 'meeting_123';
+SELECT data FROM recaps WHERE meeting_id = 'meeting_123';
+```
+
+---
+
 ## What We Tried & Why We Use Ray Serve
 
 ### Approach 1 — FastAPI (baseline)
@@ -456,9 +659,8 @@ Ray Serve solves all of this in one framework:
 | Fractional GPU sharing (0.3 + 0.7) | ❌ | ❌ | ✅ |
 | MLflow model registry + hot-reload | ❌ | ❌ | ✅ |
 | Built-in Prometheus metrics | ❌ | Partial | ✅ |
+| SQLite persistence | ❌ | ❌ | ✅ |
 | Single container, single port | ❌ | ❌ | ✅ |
-
-From the project perspective — Jitsi sends a full meeting transcript and expects a complete recap back in one call. Ray Serve's deployment handle system (`segmenter.predict_single.remote()`) lets `RecapPipelineDeployment` fan out all window predictions to the GPU-batched segmenter in parallel, then sequentially call the summarizer per segment, all within a single `/recap` request. No orchestration glue code, no separate services, no extra HTTP hops between Stage A and B.
 
 ---
 
@@ -486,11 +688,12 @@ cd serving
 docker compose up -d ray-serve prometheus grafana alertmanager node-exporter
 
 # FastAPI baselines for comparison
-docker compose up -d api_pytorch_gpu    # Port 8000
-docker compose up -d api_onnx_cpu       # Port 8001
-docker compose up -d api_pytorch_cpu    # Port 8002
+docker compose up -d api_pytorch_gpu          # Port 8000
+docker compose up -d api_onnx_cpu             # Port 8001
+docker compose up -d api_pytorch_cpu          # Port 8002
+docker compose up -d api_pytorch_multiworker  # Port 8004 (4 uvicorn workers)
 
-# With Triton (optional)
+# With Triton (optional — requires --profile triton)
 docker compose --profile triton up -d
 ```
 
@@ -505,10 +708,46 @@ docker compose --profile triton up -d
 | `alertmanager` | 9093 | Alert routing |
 | `node-exporter` | 9100 | Host system metrics |
 | `api_pytorch_gpu` | 8000 | FastAPI PyTorch GPU |
-| `api_pytorch_cpu` | 8002 | FastAPI PyTorch CPU |
+| `api_pytorch_cpu` | 8002 | FastAPI PyTorch CPU (CUDA disabled) |
 | `api_onnx_cpu` | 8001 | FastAPI ONNX CPU |
 | `api_onnx_gpu` | 8003 | FastAPI ONNX GPU |
+| `api_pytorch_multiworker` | 8004 | FastAPI 4-worker GPU |
 | `triton` | 8100–8102 | Triton Inference Server |
+
+**Service notes:**
+- `api_pytorch_cpu` — forces `CUDA_VISIBLE_DEVICES=""` to disable GPU
+- `api_pytorch_multiworker` — runs `uvicorn --workers 4` for parallel GPU utilisation testing
+- `worker` — async background recap processor (`recap_worker.py`), depends on `api_pytorch`
+- `triton` — only starts with `--profile triton`; uses `nvcr.io/nvidia/tritonserver:23.10-py3`
+
+---
+
+## Container Build
+
+The Ray Serve container is built from `ray_serve/Dockerfile.ray`:
+
+```
+Base image:  pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+```
+
+**Build steps:**
+1. System packages: `curl`, `git`, `build-essential`, `cmake` (required to compile llama-cpp with CUDA)
+2. `pip install -r requirements_ray.txt`
+3. `llama-cpp-python==0.2.56` compiled with `CMAKE_ARGS="-DLLAMA_CUBLAS=on"` (enables full GPU offload)
+4. Copies `ray_serve/` into `/app/ray_serve/`
+5. Exposes port `8000`
+6. Entrypoint: `python3 ray_serve/serve.py`
+
+> `llama-cpp-python` compiles from source during build (~5 min). The `cmake` + `build-essential` packages are required for this step — do not remove them from the Dockerfile.
+
+**Rebuild after code changes:**
+```bash
+cd ML-Sys-Ops-Project
+git pull
+cd serving
+docker compose build ray-serve
+docker compose up -d --force-recreate ray-serve
+```
 
 ---
 
@@ -535,16 +774,6 @@ pip3 install transformers torch --quiet
 python3 -c "from transformers import RobertaTokenizer; RobertaTokenizer.from_pretrained('roberta-base')"
 ```
 
-### Rebuild after code changes
-
-```bash
-cd ML-Sys-Ops-Project
-git pull
-cd serving
-docker compose build ray-serve
-docker compose up -d --force-recreate ray-serve
-```
-
 ### Verify deployment
 
 ```bash
@@ -562,9 +791,11 @@ curl http://192.5.87.115:9090/api/v1/targets   # Prometheus targets
 | `MLFLOW_MODEL_NAME` | `jitsi-topic-segmenter` | Registered model name |
 | `MODEL_ALIAS` | `production` | MLflow alias to load (`production` or `fallback`) |
 | `MODEL_RELOAD_INTERVAL_SECONDS` | `300` | Hot-reload poll interval (seconds) |
-| `BOUNDARY_THRESHOLD` | `0.5` | RoBERTa decision threshold |
+| `MODEL_PATH` | `roberta-base` | Local path to fine-tuned RoBERTa checkpoint |
+| `BOUNDARY_THRESHOLD` | `0.5` | RoBERTa boundary decision threshold |
 | `LLM_MODEL_PATH` | `/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf` | Mistral GGUF path |
-| `MAX_SEGMENT_UTTERANCES` | `200` | Max utterances per segment passed to LLM |
+| `MAX_SEGMENT_UTTERANCES` | `200` | Max utterances per segment sent to LLM |
+| `DB_PATH` | `recaps.db` | SQLite database file path |
 | `SERVING_MODE` | `pytorch` | FastAPI only: `pytorch` / `onnx_cpu` / `onnx_gpu` |
 | `FLOATING_IP` | `` | Public IP of Chameleon serving node |
 
@@ -631,7 +862,6 @@ monitoring/
             └── prometheus.yml        # Datasource: http://prometheus:9090
 ```
 
----
 
 ## Troubleshooting
 
@@ -639,7 +869,7 @@ monitoring/
 ```bash
 docker logs jitsi-ray-serve 2>&1 | tail -50
 ```
-Common cause: `max_ongoing_requests` in serve.py (Ray 2.9.3 uses `max_concurrent_queries`).
+Common cause: `max_ongoing_requests` in serve.py — Ray 2.9.3 uses `max_concurrent_queries` instead.
 
 ### MLflow model not loading
 ```bash
@@ -669,10 +899,36 @@ sed -i 's/ray-serve:9091/ray-serve:8000/' monitoring/prometheus.yml
 docker compose restart prometheus
 ```
 
+### Database issues
+```bash
+# Inspect the SQLite database directly
+docker exec -it jitsi-ray-serve sqlite3 recaps.db ".tables"
+docker exec -it jitsi-ray-serve sqlite3 recaps.db \
+  "SELECT meeting_id, created_at FROM recaps ORDER BY created_at DESC LIMIT 5;"
+
+# Database lost after restart? Add a volume mount in docker-compose.yml:
+#   volumes:
+#     - ./models:/models
+#     - ./recaps.db:/app/recaps.db
+
+# Check which DB path the container is using
+docker exec jitsi-ray-serve env | grep DB_PATH
+```
+
 ### UI showing "Failed to fetch" or wrong IP
 ```bash
 grep "API_BASE" ray_serve/recap_ui.html
 # Must show: const API_BASE = '';  (relative URL, no hardcoded IP)
+```
+
+### LLM returning draft status
+```bash
+# Check model file exists
+docker exec jitsi-ray-serve ls -lh /models/*.gguf
+# If missing, re-download:
+bash setup.sh
+# Verify path matches env var
+docker exec jitsi-ray-serve env | grep LLM_MODEL_PATH
 ```
 
 ### Models directory empty after setup
