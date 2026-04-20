@@ -101,7 +101,7 @@ Recommended values:
 - `JVB_ADVERTISE_IPS`
 - `JITSI_HOST_EXTERNAL_KEY`
 
-Also replace the demo `JIGASI_SIP_*` values with real SIP provider details if you want Jigasi to start successfully. The installer now validates those fields and will stop if they are still left at the sample `sip2sip.info` defaults.
+For transcription-only installs, leave `JIGASI_DISABLE_SIP=1`. Only set `JIGASI_DISABLE_SIP=0` and replace the demo `JIGASI_SIP_*` values if you want the SIP/PSTN gateway itself.
 
 If `PUBLIC_URL` or `JVB_ADVERTISE_IPS` are left blank, the installer will try to infer them from the VM IP.
 

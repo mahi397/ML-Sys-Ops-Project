@@ -240,6 +240,23 @@ require_env_boolean() {
     require_env_regex "$key" '^(1|0|true|false|yes|no|on|off)$' "a boolean value"
 }
 
+env_key_is_truthy() {
+    local key="$1"
+    local file="$2"
+    local value
+
+    value="$(strip_wrapping_quotes "$(read_env_value "$key" "$file")")"
+
+    case "$value" in
+        1|true|yes|on)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 require_env_integer() {
     local key="$1"
 
@@ -312,6 +329,17 @@ validate_auth_and_prosody_env() {
 }
 
 validate_jigasi_env() {
+    local disable_sip
+
+    disable_sip="$(strip_wrapping_quotes "$(read_env_value JIGASI_DISABLE_SIP "$ENV_TARGET")")"
+    if [ -n "$disable_sip" ]; then
+        require_env_boolean JIGASI_DISABLE_SIP
+    fi
+
+    if env_key_is_truthy JIGASI_DISABLE_SIP "$ENV_TARGET"; then
+        return 0
+    fi
+
     require_env_value JIGASI_SIP_URI
     require_env_value JIGASI_SIP_PASSWORD
     require_env_value JIGASI_SIP_SERVER
@@ -650,6 +678,9 @@ prepare_env() {
     merge_env_file "$ENV_SOURCE" "$ENV_TARGET"
 
     set_env_value CONFIG "$CONFIG_ROOT" "$ENV_TARGET"
+    if [ -z "$(strip_wrapping_quotes "$(read_env_value JIGASI_DISABLE_SIP "$ENV_TARGET")")" ]; then
+        set_env_value JIGASI_DISABLE_SIP 1 "$ENV_TARGET"
+    fi
     set_inferred_network_values
     set_vosk_paths
 
