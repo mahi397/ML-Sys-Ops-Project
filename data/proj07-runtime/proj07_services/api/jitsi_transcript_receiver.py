@@ -11,6 +11,7 @@ import sys
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 
@@ -106,7 +107,31 @@ def sanitize_host_key(value: str) -> str:
     return cleaned
 
 
-def parse_room_participants_json(value: str | None) -> list[dict[str, str]] | None:
+def normalize_display_names(raw_display_names: Any, fallback_display_name: str = "") -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(value: Any) -> None:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return
+
+        key = text_value.casefold()
+        if key in seen:
+            return
+
+        seen.add(key)
+        normalized.append(text_value)
+
+    if isinstance(raw_display_names, list):
+        for display_name in raw_display_names:
+            add_name(display_name)
+
+    add_name(fallback_display_name)
+    return normalized
+
+
+def parse_room_participants_json(value: str | None) -> list[dict[str, Any]] | None:
     raw_value = (value or "").strip()
     if not raw_value:
         return None
@@ -119,22 +144,29 @@ def parse_room_participants_json(value: str | None) -> list[dict[str, str]] | No
     if not isinstance(payload, list):
         raise HTTPException(status_code=400, detail="room_participants_json must be a JSON array")
 
-    normalized_participants: list[dict[str, str]] = []
+    normalized_participants: list[dict[str, Any]] = []
     for raw_participant in payload:
         if not isinstance(raw_participant, dict):
             continue
 
         user_id = str(raw_participant.get("user_id") or "").strip()
         display_name = str(raw_participant.get("display_name") or "").strip()
+        display_names = normalize_display_names(
+            raw_participant.get("display_names"),
+            display_name,
+        )
         email = str(raw_participant.get("email") or "").strip().lower()
-        if not user_id and not display_name and not email:
+        resolved_display_name = display_name or (display_names[-1] if display_names else "")
+        if not user_id and not resolved_display_name and not email:
             continue
 
-        participant: dict[str, str] = {}
+        participant: dict[str, Any] = {}
         if user_id:
             participant["user_id"] = user_id
-        if display_name:
-            participant["display_name"] = display_name
+        if resolved_display_name:
+            participant["display_name"] = resolved_display_name
+        if display_names:
+            participant["display_names"] = display_names
         if email:
             participant["email"] = email
 

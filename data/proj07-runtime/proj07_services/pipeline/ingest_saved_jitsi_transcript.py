@@ -210,6 +210,30 @@ def make_clean_text(raw_text: str) -> str:
     return normalize_whitespace(lowered)
 
 
+def normalize_display_names(raw_display_names: Any, fallback_display_name: str = "") -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(value: Any) -> None:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return
+
+        key = text_value.casefold()
+        if key in seen:
+            return
+
+        seen.add(key)
+        normalized.append(text_value)
+
+    if isinstance(raw_display_names, list):
+        for display_name in raw_display_names:
+            add_name(display_name)
+
+    add_name(fallback_display_name)
+    return normalized
+
+
 def parse_date(date_str: str) -> date:
     return datetime.strptime(date_str.strip(), "%b %d, %Y").date()
 
@@ -458,7 +482,12 @@ def load_uploaded_room_participants(metadata: dict[str, Any]) -> list[dict[str, 
         if not user_id:
             continue
 
-        display_name = str(raw_participant.get("display_name", "") or "").strip() or user_id
+        display_name = str(raw_participant.get("display_name", "") or "").strip()
+        display_names = normalize_display_names(
+            raw_participant.get("display_names"),
+            display_name,
+        )
+        resolved_display_name = display_name or (display_names[-1] if display_names else user_id)
         email = str(raw_participant.get("email", "") or "").strip().lower() or None
         identity_source = (
             str(raw_participant.get("identity_source", "") or "").strip()
@@ -469,7 +498,8 @@ def load_uploaded_room_participants(metadata: dict[str, Any]) -> list[dict[str, 
         participants.append(
             {
                 "user_id": user_id,
-                "display_name": display_name,
+                "display_name": resolved_display_name,
+                "display_names": display_names or [resolved_display_name],
                 "email": email,
                 "identity_source": identity_source,
                 "written_at": written_at,
@@ -500,6 +530,10 @@ def build_meeting_participants(
             "meeting_id": meeting_id,
             "user_id": normalized_user_id,
             "display_name": str(participant.get("display_name", "") or "").strip() or normalized_user_id,
+            "display_names": normalize_display_names(
+                participant.get("display_names"),
+                str(participant.get("display_name", "") or "").strip() or normalized_user_id,
+            ),
             "email": str(participant.get("email", "") or "").strip().lower() or None,
             "identity_source": str(participant.get("identity_source", "") or "").strip() or None,
             "role": role,
@@ -514,6 +548,10 @@ def build_meeting_participants(
             return
 
         existing["display_name"] = payload["display_name"] or existing["display_name"]
+        existing["display_names"] = normalize_display_names(
+            list(existing.get("display_names") or []) + list(payload.get("display_names") or []),
+            existing["display_name"],
+        )
         existing["email"] = existing["email"] or payload["email"]
         existing["identity_source"] = existing["identity_source"] or payload["identity_source"]
         if role == "host":
@@ -543,10 +581,13 @@ def build_speaker_user_lookup(participants: list[dict[str, Any]]) -> dict[str, s
         if not user_id:
             continue
 
-        candidate_keys = {
-            user_id.casefold(),
-            str(participant.get("display_name", "") or "").strip().casefold(),
-        }
+        candidate_keys = {user_id.casefold()}
+        display_names = normalize_display_names(
+            participant.get("display_names"),
+            str(participant.get("display_name", "") or "").strip(),
+        )
+        for display_name in display_names:
+            candidate_keys.add(display_name.casefold())
         for candidate_key in candidate_keys:
             if not candidate_key:
                 continue
@@ -681,7 +722,7 @@ def build_parsed_payload(
             f"Meeting participants loaded from upload metadata: {len(uploaded_participants)}",
             "meeting_participants includes the host uploader identity plus uploaded authenticated participants.",
             "meeting_speakers contains transcript-level spoken identities only.",
-            "meeting_speakers.user_id is populated when a speaker name uniquely matches an uploaded participant display name or user_id.",
+            "meeting_speakers.user_id is populated when a speaker name uniquely matches an uploaded participant display name, alias, or user_id.",
             "Raw and parsed transcript artifacts are uploaded to object storage.",
             "Utterance end time is assumed to be just before the next utterance start time.",
         ],
