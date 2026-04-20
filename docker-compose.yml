@@ -274,6 +274,8 @@ services:
       MINIO_USER: ${MINIO_USER:-minioadmin}
       MINIO_PASSWORD: ${MINIO_PASSWORD}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      TOKENIZERS_PARALLELISM: "false"
+      DATASET_VERSION: "2"
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
     networks:
       - recap-net
@@ -346,6 +348,8 @@ services:
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      TOKENIZERS_PARALLELISM: "false"
+      DATASET_VERSION: "2"
     volumes:
       - /mnt/block:/mnt/block
       - /home/cc/.config/rclone:/root/.config/rclone:ro
@@ -384,6 +388,8 @@ services:
       MLFLOW_AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       MLFLOW_AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      TOKENIZERS_PARALLELISM: "false"
+      DATASET_VERSION: "2"
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
     volumes:
       - /mnt/block:/mnt/block
