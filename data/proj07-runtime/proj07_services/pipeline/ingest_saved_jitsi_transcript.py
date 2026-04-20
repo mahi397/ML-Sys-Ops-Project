@@ -745,13 +745,19 @@ def _row_value(row, key: str, index: int):
 def upsert_host_user(
     cur,
     *,
-    user_id: str,
-    display_name: str,
+    user_id: str | None,
+    display_name: str | None,
     email: str | None,
 ) -> None:
-    normalized_user_id = user_id.strip()
-    normalized_display_name = display_name.strip() or normalized_user_id
+    normalized_user_id = (user_id or "").strip()
+    normalized_display_name = (display_name or "").strip()
     normalized_email = email.strip().lower() if email and email.strip() else None
+
+    # Historical meetings may not have host identity. That is acceptable.
+    if not normalized_user_id:
+        return
+
+    normalized_display_name = normalized_display_name or normalized_user_id
 
     cur.execute(
         "SELECT user_id, display_name, email FROM users WHERE user_id = %s",
@@ -786,7 +792,6 @@ def upsert_host_user(
         """,
         (normalized_display_name, normalized_email, normalized_user_id),
     )
-
 
 def fetch_returning_id(cur, key: str) -> int:
     row = cur.fetchone()

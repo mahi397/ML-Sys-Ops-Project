@@ -463,42 +463,39 @@ def normalize_parsed_jitsi_payload(
     # Backward-compatible host normalization:
     # historical meetings may not have host metadata.
     # The ingester expects string fields here, not None.
-    if not isinstance(normalized_payload.get("host"), dict):
-        nested_host = meeting.get("host") if isinstance(meeting.get("host"), dict) else {}
+    host_row = normalized_payload.get("host")
+    if not isinstance(host_row, dict):
+        host_row = {}
 
-        normalized_payload["host"] = {
-            "external_key": str(
-                nested_host.get("external_key")
-                or meeting.get("host_external_key")
-                or ""
-            ).strip(),
-            "user_id": str(
-                nested_host.get("user_id")
-                or meeting.get("host_user_id")
-                or ""
-            ).strip(),
-            "display_name": str(
-                nested_host.get("display_name")
-                or meeting.get("host_display_name")
-                or ""
-            ).strip(),
-            "email": str(
-                nested_host.get("email")
-                or meeting.get("host_email")
-                or ""
-            ).strip(),
-        }
+    nested_host = meeting.get("host") if isinstance(meeting.get("host"), dict) else {}
 
-        if any(normalized_payload["host"].values()):
-            logger.warning(
-                "Synthesized partial host metadata during restore | meeting_id=%s",
-                meeting_id,
-            )
-        else:
-            logger.warning(
-                "No host metadata found for historical meeting; restoring with blank host fields | meeting_id=%s",
-                meeting_id,
-            )
+    normalized_payload["host"] = {
+        "external_key": str(
+            host_row.get("external_key")
+            or nested_host.get("external_key")
+            or meeting.get("host_external_key")
+            or ""
+        ).strip(),
+        "user_id": str(
+            host_row.get("user_id")
+            or nested_host.get("user_id")
+            or meeting.get("host_user_id")
+            or ""
+        ).strip(),
+        "display_name": str(
+            host_row.get("display_name")
+            or nested_host.get("display_name")
+            or meeting.get("host_display_name")
+            or ""
+        ).strip(),
+        "email": str(
+            host_row.get("email")
+            or nested_host.get("email")
+            or meeting.get("host_email")
+            or ""
+        ).strip(),
+    }
+    
 
     # Backward-compatible participants normalization:
     # historical meetings may not have explicit participant records.
