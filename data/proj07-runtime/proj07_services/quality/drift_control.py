@@ -398,10 +398,12 @@ def compare_feature_columns_to_reference(
         drifted_feature_count / compared_feature_count if compared_feature_count else 0.0
     )
     status = "failed" if compared_feature_count and share_drifted > gate.max_drift_share else "passed"
+    reason = None
     if compared_feature_count == 0:
         status = "skipped"
+        reason = "no_comparable_features"
 
-    return {
+    report = {
         "status": status,
         "gate": {
             "psi_threshold": gate.psi_threshold,
@@ -415,6 +417,9 @@ def compare_feature_columns_to_reference(
         "total_feature_count": compared_feature_count,
         "share_drifted_features": round(share_drifted, 6),
     }
+    if reason is not None:
+        report["reason"] = reason
+    return report
 
 
 def load_reference_profile(path: Path) -> dict[str, Any] | None:

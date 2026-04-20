@@ -119,6 +119,17 @@ def quality_gate_config(config: RetrainingBuildConfig) -> DriftGateConfig:
     )
 
 
+def quality_report_allows_publish(report: dict[str, Any], *, reference_version: int | None) -> bool:
+    status = str(report.get("status") or "")
+    if status == "passed":
+        return True
+    return (
+        status == "skipped"
+        and report.get("reason") == "missing_reference_profile"
+        and reference_version is None
+    )
+
+
 def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
     version = latest_version(root)
     if version is None:
@@ -332,6 +343,7 @@ def build_stage1_feedback_pool(
         "rows": label_counts(dataset_rows),
         "quality_gate": {
             "status": quality_report["status"],
+            "reason": quality_report.get("reason"),
             "reference_version": reference_version,
             "share_drifted_features": quality_report["share_drifted_features"],
             "drifted_feature_count": quality_report["drifted_feature_count"],
@@ -354,7 +366,10 @@ def build_stage1_feedback_pool(
     write_json(staging_root / "quality_report.json", quality_report)
     write_json(staging_root / "manifest.json", manifest)
 
-    publish_allowed = quality_report["status"] != "failed"
+    publish_allowed = quality_report_allows_publish(
+        quality_report,
+        reference_version=reference_version,
+    )
     if publish_allowed:
         out_root = config.feedback_pool_root / f"v{version}"
         move_tree(staging_root, out_root)
@@ -391,9 +406,11 @@ def build_stage1_feedback_pool(
 
     if not publish_allowed:
         logger.warning(
-            "Feedback pool candidate failed quality gate and was quarantined | candidate_version=v%s reference=v%s share_drifted=%.3f",
+            "Feedback pool candidate did not pass quality gate and was quarantined | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
             version,
             reference_version if reference_version is not None else "none",
+            quality_report["status"],
+            quality_report.get("reason", "n/a"),
             quality_report["share_drifted_features"],
         )
         return None
@@ -530,6 +547,7 @@ def build_retraining_snapshot(
         "meetings": split_info,
         "quality_gate": {
             "status": quality_report["status"],
+            "reason": quality_report.get("reason"),
             "reference_version": reference_version,
             "share_drifted_features": quality_report["share_drifted_features"],
             "drifted_feature_count": quality_report["drifted_feature_count"],
@@ -555,7 +573,10 @@ def build_retraining_snapshot(
     write_json(staging_root / "quality_report.json", quality_report)
     write_json(staging_root / "manifest.json", manifest)
 
-    publish_allowed = quality_report["status"] != "failed"
+    publish_allowed = quality_report_allows_publish(
+        quality_report,
+        reference_version=reference_version,
+    )
     if publish_allowed:
         out_root = config.dataset_root / f"v{snapshot_version}"
         move_tree(staging_root, out_root)
@@ -593,13 +614,15 @@ def build_retraining_snapshot(
 
     if not publish_allowed:
         logger.warning(
-            "Retraining snapshot candidate failed quality gate and was quarantined | candidate_version=v%s reference=v%s share_drifted=%.3f",
+            "Retraining snapshot candidate did not pass quality gate and was quarantined | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
             snapshot_version,
             reference_version if reference_version is not None else "none",
+            quality_report["status"],
+            quality_report.get("reason", "n/a"),
             quality_report["share_drifted_features"],
         )
         raise RuntimeError(
-            f"Retraining snapshot v{snapshot_version} failed drift gate and was quarantined"
+            f"Retraining snapshot v{snapshot_version} did not pass the quality gate and was quarantined"
         )
 
     row_counts = {

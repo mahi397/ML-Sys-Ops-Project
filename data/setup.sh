@@ -48,6 +48,7 @@ RUNTIME_CONTAINER_NAMES=(
   stage2_forward_service
   user_summary_materialize_service
   retraining_dataset_service
+  production_drift_monitor
 )
 
 function banner() {
@@ -411,6 +412,7 @@ function apply_runtime_schema_updates() {
   apply_sql_file "${PROJ07_DB_DIR}/init_sql/003_workflow_tasks.sql"
   apply_sql_file "${PROJ07_DB_DIR}/init_sql/004_retrain_audit_logs.sql"
   apply_sql_file "${PROJ07_DB_DIR}/init_sql/005_meeting_validity.sql"
+  apply_sql_file "${PROJ07_DB_DIR}/init_sql/006_dataset_quality_reports.sql"
 }
 
 function start_runtime_stack() {
