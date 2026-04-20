@@ -185,6 +185,7 @@ def load_room_context(room_context_root: Path, room_name: str | None) -> dict[st
         "host_display_name",
         "host_email",
         "identity_source",
+        "written_at",
     )
     context: dict[str, str] = {}
     for key in allowed_keys:
@@ -268,9 +269,16 @@ def upload_transcript(
     request = Request(ingest_url, data=body, headers=headers, method="POST")
     with urlopen(request, timeout=timeout_seconds) as response:
         response_text = response.read().decode("utf-8", errors="replace")
+        participants_json = room_context.get("room_participants_json", "")
         print(
-            f"Uploaded {path.name} for host_external_key={host_external_key}"
-            f"{' host_user_id=' + room_context.get('host_user_id', '') if room_context.get('host_user_id') else ''}: "
+            f"Uploaded {path.name}: "
+            f"room_name={room_name or ''} "
+            f"host_external_key={host_external_key} "
+            f"host_user_id={room_context.get('host_user_id', '')} "
+            f"host_display_name={room_context.get('host_display_name', '')} "
+            f"host_email={room_context.get('host_email', '')} "
+            f"written_at={room_context.get('written_at', '')} "
+            f"participants={participants_json} "
             f"HTTP {response.status} {response_text}"
         )
 
