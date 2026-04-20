@@ -1,0 +1,753 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel recap-shell recap-ui-page">
+  <div class="page-topbar">
+    <a class="back-link" href="{{ app_prefix }}/recaps">← Back to recaps</a>
+    <div class="user-chip">Signed in as {{ user.display_name if user else "user" }}</div>
+  </div>
+
+  <div id="app" class="recap-stage">
+    <div class="loading">Loading recap...</div>
+  </div>
+</section>
+<div class="toast recap-ui-toast" id="toast"></div>
+
+<style>
+  .recap-ui-page .source-tabs,
+  .recap-ui-page .edit-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin: 1rem 0;
+  }
+
+  .recap-ui-page .source-tab {
+    border: 1px solid #d5dbe3;
+    background: #fff;
+    color: #35507a;
+    border-radius: 999px;
+    padding: 0.42rem 0.85rem;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .recap-ui-page .source-tab.active {
+    background: #edf4ff;
+    border-color: #b7cef7;
+    color: #224d94;
+    font-weight: 600;
+  }
+
+  .recap-ui-page .source-tab:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .recap-ui-page .source-note {
+    margin: 0.75rem 0 0;
+    color: #5b6778;
+    font-size: 0.96rem;
+  }
+
+  .recap-ui-page .edit-toolbar .muted-inline {
+    color: #738299;
+    font-size: 0.92rem;
+  }
+
+  .recap-ui-page .seg-topic-input,
+  .recap-ui-page .seg-summary-input {
+    width: 100%;
+    border: 1px solid #d7dee8;
+    border-radius: 12px;
+    padding: 0.72rem 0.85rem;
+    font: inherit;
+    background: #fff;
+    color: #243146;
+  }
+
+  .recap-ui-page .seg-topic-input {
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+  }
+
+  .recap-ui-page .seg-summary-input {
+    min-height: 7.5rem;
+    line-height: 1.5;
+    resize: vertical;
+  }
+
+  .recap-ui-page .seg-bullets {
+    margin: 0.9rem 0 0;
+    padding-left: 1.2rem;
+    color: #49576b;
+  }
+
+  .recap-ui-page .seg-bullets li + li {
+    margin-top: 0.3rem;
+  }
+
+  .recap-ui-page .segment.is-editing .utt {
+    cursor: pointer;
+  }
+
+  .recap-ui-page .segment.is-editing .utt:hover {
+    background: #f6f9ff;
+  }
+
+  .recap-ui-page .boundary-visual {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: #7a8797;
+    font-size: 0.92rem;
+  }
+
+  .recap-ui-page .segment-status {
+    color: #9aa6b5;
+    font-size: 0.9rem;
+  }
+</style>
+
+<script>
+  const API_BASE = {{ (app_prefix ~ "/api") | tojson }};
+  const MEETING_ID = {{ meeting_id | tojson }};
+
+  let recapData = null;
+  let draftRecap = null;
+  let selectedSource = null;
+  let isSaving = false;
+  let pollTimer = null;
+
+  document.addEventListener('DOMContentLoaded', () => {
+    fetchRecap(MEETING_ID);
+  });
+
+  function cloneRecap(data) {
+    return JSON.parse(JSON.stringify(data));
+  }
+
+  function currentRecap() {
+    return draftRecap || recapData;
+  }
+
+  function findUtterance(utterances, utteranceIdx) {
+    return utterances.find((item) => item.utterance_idx === utteranceIdx) || null;
+  }
+
+  function buildFallbackTopic(segUtterances, fallback = 'Edited segment') {
+    const firstText = (segUtterances[0]?.text || '').trim();
+    if (!firstText) {
+      return fallback;
+    }
+    const words = firstText.split(/\s+/).slice(0, 5).join(' ');
+    if (!words) {
+      return fallback;
+    }
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
+
+  function buildFallbackBullets(topicLabel, segUtterances) {
+    const speakers = [];
+    segUtterances.forEach((utt) => {
+      if (utt.speaker && !speakers.includes(utt.speaker)) {
+        speakers.push(utt.speaker);
+      }
+    });
+
+    const bullets = [];
+    if (topicLabel) {
+      bullets.push(`The discussion focused on ${topicLabel}.`);
+    } else {
+      bullets.push('The discussion focused on this portion of the meeting.');
+    }
+
+    if (speakers.length === 1) {
+      bullets.push(`Speaker ${speakers[0]} led this part of the conversation.`);
+    } else if (speakers.length === 2) {
+      bullets.push(`Speakers ${speakers[0]} and ${speakers[1]} both contributed to this segment.`);
+    } else if (speakers.length > 2) {
+      bullets.push(`Multiple speakers contributed, including ${speakers.slice(0, 3).join(', ')}.`);
+    } else {
+      bullets.push('The segment contains a short exchange with limited speaker turns.');
+    }
+
+    if (segUtterances.length >= 8) {
+      bullets.push('The topic developed through an extended multi-turn exchange.');
+    } else if (segUtterances.length >= 4) {
+      bullets.push('The topic was covered through a short focused exchange.');
+    } else {
+      bullets.push('The topic was discussed briefly before the meeting moved on.');
+    }
+
+    return bullets.slice(0, 3);
+  }
+
+  function updateDraftIndexes(segments) {
+    return segments.map((segment, index) => ({
+      ...segment,
+      segment_idx: index,
+      segment_index: index + 1
+    }));
+  }
+
+  async function fetchRecap(meetingId, source = null) {
+    try {
+      const url = new URL(`${window.location.origin}${API_BASE}/recap/${encodeURIComponent(meetingId)}`);
+      if (source) {
+        url.searchParams.set('source', source);
+      }
+
+      const res = await fetch(url.toString(), {
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+
+      const payload = await res.json();
+
+      if (res.status === 404) {
+        renderNoRecap(payload.message || 'No recap summary found.');
+        return;
+      }
+
+      if (!res.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${res.status}`);
+      }
+
+      recapData = payload.recap;
+      selectedSource = recapData.summary_type;
+      draftRecap = null;
+
+      if (!recapData.segments?.length && !recapData.utterances?.length) {
+        renderNoRecap(recapData.message || 'No recap summary found.');
+        return;
+      }
+
+      render();
+    } catch (err) {
+      renderNoRecap('No recap summary found.');
+    }
+  }
+
+  function renderNoRecap(message) {
+    const app = document.getElementById('app');
+    app.innerHTML = `
+      <div class="page-intro compact">
+        <div class="eyebrow">Recap detail</div>
+        <h1>Meeting recap</h1>
+      </div>
+      <div class="error">${message}</div>
+    `;
+  }
+
+  function render() {
+    const app = document.getElementById('app');
+    const data = currentRecap();
+    if (!data) {
+      renderNoRecap('No recap summary found.');
+      return;
+    }
+
+    const segments = data.segments || [];
+    const utterances = data.utterances || [];
+    const canEdit = !!data.can_edit_summary;
+    const isEditing = !!draftRecap;
+    const availableSources = data.available_sources || [];
+    const hasUserEdited = availableSources.some((item) => item.summary_type === 'user_edited');
+    const sourceNote = data.summary_type === 'llm_generated'
+      ? 'You can edit this LLM-generated summary here. Saving creates or refreshes the shared user-edited summary while keeping the original LLM version unchanged.'
+      : 'This is the shared user-edited summary. Saving edits updates the editable version and keeps the original LLM summary unchanged.';
+    const editButtonLabel = data.summary_type === 'llm_generated'
+      ? 'Edit to create user-edited summary'
+      : 'Edit user-edited summary';
+    const hintText = isEditing
+      ? 'Edit topic labels and summary bullets directly. Click an utterance to split a segment, or remove a boundary to merge two segments.'
+      : (canEdit
+        ? 'Click the edit button to change text, add a boundary by clicking an utterance, or remove an existing boundary between segments.'
+        : 'Switch between the original LLM summary and the shared user-edited summary.');
+
+    let html = `
+      <div class="page-intro compact">
+        <div class="eyebrow">Recap detail</div>
+        <div class="page-title-row">
+          <div>
+            <h1>Meeting recap</h1>
+            <p class="muted">${data.meeting_title || 'Untitled meeting'}</p>
+          </div>
+          <span class="model-badge">${data.summary_type_label || 'Summary'}</span>
+        </div>
+        <p class="recap-meta">
+          <span>${data.meeting_duration || 'Duration unavailable'}</span>
+          <span>${data.participant_count || '?'} participants</span>
+          <span>${segments.length} segment${segments.length !== 1 ? 's' : ''}</span>
+        </p>
+      </div>
+
+      <div class="source-tabs">
+        ${availableSources.map((source) => `
+          <button
+            class="source-tab ${source.summary_type === data.summary_type ? 'active' : ''}"
+            onclick="switchSource('${source.summary_type}')"
+            ${isSaving ? 'disabled' : ''}
+          >
+            ${source.summary_type_label}
+          </button>
+        `).join('')}
+        ${!hasUserEdited ? '<button class="source-tab" disabled>User edited</button>' : ''}
+      </div>
+    `;
+
+    if (canEdit) {
+      html += `
+        <div class="edit-toolbar">
+          ${isEditing ? `
+            <button class="btn" onclick="saveDraftSummary()" ${isSaving ? 'disabled' : ''}>Save changes</button>
+            <button class="btn" onclick="discardDraftSummary()" ${isSaving ? 'disabled' : ''}>Discard</button>
+            <span class="muted-inline">${sourceNote}</span>
+          ` : `
+            <button class="btn" onclick="startEditing()" ${isSaving ? 'disabled' : ''}>${editButtonLabel}</button>
+            <span class="muted-inline">${sourceNote}</span>
+          `}
+        </div>
+      `;
+    } else {
+      html += '<p class="source-note">Only meeting editors can modify this summary.</p>';
+    }
+
+    html += `
+      <p class="hint">
+        ${hintText}
+      </p>
+    `;
+
+    segments.forEach((seg, segIdx) => {
+      const segUtterances = utterances.filter(
+        (u) => u.utterance_idx >= seg.start_utt && u.utterance_idx <= seg.end_utt
+      );
+      const transcriptId = `transcript-${segIdx}`;
+      const topicValue = escapeHtml(seg.topic_label || '');
+      const summaryValue = escapeHtml((seg.summary_bullets || []).join('\n'));
+      const summaryList = (seg.summary_bullets || []).length
+        ? `<ul class="seg-bullets">${seg.summary_bullets.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+        : `<p class="seg-summary">${escapeHtml(seg.summary || 'No summary available.')}</p>`;
+
+      html += `
+        <div class="segment ${isEditing ? 'is-editing' : ''}">
+          <div class="seg-head">
+            <span class="seg-title">Segment ${segIdx + 1}</span>
+            <span class="seg-time">${formatTime(seg.t_start)} - ${formatTime(seg.t_end)}</span>
+          </div>
+          ${isEditing ? `
+            <input
+              class="seg-topic-input"
+              value="${topicValue}"
+              placeholder="Topic label"
+              oninput="updateDraftTopic(${segIdx}, this.value)"
+            />
+            <textarea
+              class="seg-summary-input"
+              placeholder="One bullet per line"
+              oninput="updateDraftSummaryBullets(${segIdx}, this.value)"
+            >${summaryValue}</textarea>
+          ` : `
+            <p class="seg-summary"><strong>${topicValue || 'Untitled segment'}</strong></p>
+            ${summaryList}
+          `}
+          <button class="toggle-btn" onclick="toggleTranscript('${transcriptId}', this)">Show transcript</button>
+          <div class="transcript" id="${transcriptId}">
+            ${segUtterances.map((u) => `
+              <div
+                class="utt"
+                ${isEditing ? `onclick="draftSplitAtUtterance(${u.utterance_idx})" title="Split before this utterance"` : ''}
+              >
+                <span class="speaker">${escapeHtml(u.speaker || 'Speaker')}:</span> ${escapeHtml(u.text || '')}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+
+      if (segIdx < segments.length - 1) {
+        const conf = (seg.boundary_confidence != null) ? Number(seg.boundary_confidence) : null;
+        const confDisplay = Number.isFinite(conf) ? conf.toFixed(2) : 'N/A';
+        html += `
+          <div class="boundary" id="boundary-${segIdx}">
+            <div class="boundary-line"></div>
+            <span class="boundary-visual">confidence: ${confDisplay}</span>
+            ${isEditing ? `
+              <button class="btn" onclick="draftMergeBoundary(${segIdx})">Remove boundary</button>
+            ` : `
+              <span class="segment-status">${seg.status || ''}</span>
+            `}
+            <div class="boundary-line"></div>
+          </div>
+        `;
+      }
+    });
+
+    html += `
+      <div class="overall-feedback">
+        <span>Was this recap helpful?</span>
+        <button class="btn" onclick="overallFeedback('${data.meeting_id}', 'positive', this)">Looks good</button>
+        <button class="btn" onclick="overallFeedback('${data.meeting_id}', 'negative', this)">Needs work</button>
+      </div>
+    `;
+
+    app.innerHTML = html;
+  }
+
+  function startEditing() {
+    if (!recapData || !recapData.can_edit_summary) {
+      return;
+    }
+    draftRecap = cloneRecap(recapData);
+    draftRecap.segments = updateDraftIndexes((draftRecap.segments || []).map((segment) => ({
+      ...segment,
+      summary_bullets: [...(segment.summary_bullets || [])],
+      _topicTouched: false,
+      _summaryTouched: false
+    })));
+    render();
+  }
+
+  function discardDraftSummary() {
+    draftRecap = null;
+    render();
+  }
+
+  function switchSource(source) {
+    if (draftRecap) {
+      showToast('Save or discard your current edits before switching summaries.');
+      return;
+    }
+    if (selectedSource === source) {
+      return;
+    }
+    fetchRecap(MEETING_ID, source);
+  }
+
+  function updateDraftTopic(segIdx, value) {
+    if (!draftRecap) {
+      return;
+    }
+    const segment = draftRecap.segments?.[segIdx];
+    if (!segment) {
+      return;
+    }
+    segment.topic_label = value.trim();
+    segment._topicTouched = true;
+  }
+
+  function updateDraftSummaryBullets(segIdx, value) {
+    if (!draftRecap) {
+      return;
+    }
+    const segment = draftRecap.segments?.[segIdx];
+    if (!segment) {
+      return;
+    }
+    segment.summary_bullets = value
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    segment.summary = segment.summary_bullets.join('. ');
+    segment._summaryTouched = true;
+  }
+
+  function draftSplitAtUtterance(utteranceIdx) {
+    if (!draftRecap) {
+      return;
+    }
+
+    const segments = draftRecap.segments || [];
+    const segmentIndex = segments.findIndex(
+      (segment) => utteranceIdx > segment.start_utt && utteranceIdx <= segment.end_utt
+    );
+    if (segmentIndex < 0) {
+      showToast('Choose an utterance inside a segment to add a boundary.');
+      return;
+    }
+
+    if (!window.confirm('Add a boundary before this utterance?')) {
+      return;
+    }
+
+    const segment = segments[segmentIndex];
+    const firstPart = { ...segment };
+    const secondPart = { ...segment };
+    firstPart.end_utt = utteranceIdx - 1;
+    secondPart.start_utt = utteranceIdx;
+    firstPart.t_end = findUtterance(draftRecap.utterances, firstPart.end_utt)?.t_end ?? firstPart.t_end;
+    secondPart.t_start = findUtterance(draftRecap.utterances, secondPart.start_utt)?.t_start ?? secondPart.t_start;
+
+    const firstUtterances = draftRecap.utterances.filter(
+      (utt) => utt.utterance_idx >= firstPart.start_utt && utt.utterance_idx <= firstPart.end_utt
+    );
+    const secondUtterances = draftRecap.utterances.filter(
+      (utt) => utt.utterance_idx >= secondPart.start_utt && utt.utterance_idx <= secondPart.end_utt
+    );
+    firstPart.topic_label = buildFallbackTopic(firstUtterances, firstPart.topic_label || 'Edited segment');
+    firstPart.summary_bullets = buildFallbackBullets(firstPart.topic_label, firstUtterances);
+    firstPart.summary = firstPart.summary_bullets.join('. ');
+    firstPart.segment_summary_id = null;
+    firstPart._topicTouched = false;
+    firstPart._summaryTouched = false;
+
+    secondPart.topic_label = buildFallbackTopic(secondUtterances, secondPart.topic_label || 'Edited segment');
+    secondPart.summary_bullets = buildFallbackBullets(secondPart.topic_label, secondUtterances);
+    secondPart.summary = secondPart.summary_bullets.join('. ');
+    secondPart.segment_summary_id = null;
+    secondPart._topicTouched = false;
+    secondPart._summaryTouched = false;
+
+    const nextSegments = [...segments];
+    nextSegments.splice(segmentIndex, 1, firstPart, secondPart);
+    draftRecap.segments = updateDraftIndexes(nextSegments);
+    render();
+    showToast('Boundary added locally');
+  }
+
+  function draftMergeBoundary(segIdx) {
+    if (!draftRecap) {
+      return;
+    }
+    const segments = draftRecap.segments || [];
+    if (segIdx < 0 || segIdx >= segments.length - 1) {
+      return;
+    }
+    const current = segments[segIdx];
+    const next = segments[segIdx + 1];
+    const merged = {
+      ...current,
+      end_utt: next.end_utt,
+      t_end: next.t_end,
+      topic_label: current.topic_label || next.topic_label || 'Edited segment',
+      summary_bullets: [],
+      segment_summary_id: null,
+      _topicTouched: false,
+      _summaryTouched: false
+    };
+
+    const mergedUtterances = draftRecap.utterances.filter(
+      (utt) => utt.utterance_idx >= merged.start_utt && utt.utterance_idx <= merged.end_utt
+    );
+    merged.topic_label = buildFallbackTopic(mergedUtterances, merged.topic_label || 'Edited segment');
+    merged.summary_bullets = buildFallbackBullets(merged.topic_label, mergedUtterances);
+    merged.summary = merged.summary_bullets.join('. ');
+
+    const nextSegments = [...segments];
+    nextSegments.splice(segIdx, 2, merged);
+    draftRecap.segments = updateDraftIndexes(nextSegments);
+    render();
+    showToast('Boundary removed locally');
+  }
+
+  function buildSegmentSnapshot(segment) {
+    return {
+      segment_summary_id: segment.segment_summary_id ?? null,
+      segment_index: segment.segment_idx + 1,
+      start_utt: segment.start_utt,
+      end_utt: segment.end_utt,
+      topic_label: segment.topic_label || '',
+      summary_bullets: [...(segment.summary_bullets || [])]
+    };
+  }
+
+  function buildSummaryEditPayload() {
+    if (!draftRecap || !recapData) {
+      return null;
+    }
+
+    const originalSegments = recapData.segments || [];
+    const currentSegments = draftRecap.segments || [];
+    const edits = [];
+
+    const originalBoundaries = new Set(originalSegments.slice(0, -1).map((segment) => segment.end_utt));
+    const currentBoundaries = new Set(currentSegments.slice(0, -1).map((segment) => segment.end_utt));
+
+    [...originalBoundaries]
+      .filter((utteranceIdx) => !currentBoundaries.has(utteranceIdx))
+      .sort((left, right) => left - right)
+      .forEach((utteranceIdx) => {
+        edits.push({
+          action: 'remove_boundary',
+          utterance_idx: utteranceIdx
+        });
+      });
+
+    [...currentBoundaries]
+      .filter((utteranceIdx) => !originalBoundaries.has(utteranceIdx))
+      .sort((left, right) => left - right)
+      .forEach((utteranceIdx) => {
+        edits.push({
+          action: 'add_boundary',
+          utterance_idx: utteranceIdx
+        });
+      });
+
+    currentSegments.forEach((segment) => {
+      const snapshot = buildSegmentSnapshot(segment);
+      if (segment._topicTouched) {
+        edits.push({
+          action: 'edit_topic_label',
+          segment_summary_id: segment.segment_summary_id ?? null,
+          segment: snapshot,
+          topic_label: segment.topic_label || ''
+        });
+      }
+      if (segment._summaryTouched) {
+        edits.push({
+          action: 'edit_summary_bullets',
+          segment_summary_id: segment.segment_summary_id ?? null,
+          segment: snapshot,
+          summary_bullets: [...(segment.summary_bullets || [])]
+        });
+      }
+    });
+
+    if (!edits.length) {
+      return null;
+    }
+
+    return {
+      meeting_id: draftRecap.meeting_id,
+      source_summary_id: draftRecap.summary_id,
+      source_summary_type: draftRecap.summary_type,
+      edits
+    };
+  }
+
+  async function saveDraftSummary() {
+    const payload = buildSummaryEditPayload();
+    if (!payload) {
+      showToast('No changes to save');
+      return;
+    }
+
+    isSaving = true;
+    render();
+
+    const previousUserEditedId = recapData.available_sources?.find(
+      (item) => item.summary_type === 'user_edited'
+    )?.summary_id ?? null;
+
+    try {
+      const res = await fetch(`${API_BASE}/summary-edits`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const responsePayload = await res.json();
+      if (!res.ok || !responsePayload.ok) {
+        throw new Error(responsePayload.detail || responsePayload.error || `HTTP ${res.status}`);
+      }
+
+      draftRecap = null;
+      showToast('Edits saved. Waiting for updated summary...');
+      const refreshed = await waitForUserEditedSummary(previousUserEditedId);
+      if (!refreshed) {
+        showToast('Edits were saved. The updated user-edited summary will appear after the worker finishes.');
+      }
+    } catch (error) {
+      showToast('Could not save your edits');
+    } finally {
+      isSaving = false;
+      render();
+    }
+  }
+
+  async function waitForUserEditedSummary(previousUserEditedId) {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => {
+        pollTimer = setTimeout(resolve, 1500);
+      });
+
+      try {
+        const url = new URL(`${window.location.origin}${API_BASE}/recap/${encodeURIComponent(MEETING_ID)}`);
+        url.searchParams.set('source', 'user_edited');
+        const res = await fetch(url.toString(), {
+          credentials: 'same-origin',
+          cache: 'no-store'
+        });
+        const payload = await res.json();
+        if (!res.ok || !payload.ok || !payload.recap) {
+          continue;
+        }
+
+        const nextRecap = payload.recap;
+        if (
+          nextRecap.summary_type === 'user_edited' &&
+          (previousUserEditedId === null || Number(nextRecap.summary_id) !== Number(previousUserEditedId))
+        ) {
+          recapData = nextRecap;
+          selectedSource = nextRecap.summary_type;
+          render();
+          showToast('Updated user-edited summary loaded');
+          return true;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return false;
+  }
+
+  function toggleTranscript(id, btn) {
+    const el = document.getElementById(id);
+    el.classList.toggle('open');
+    btn.textContent = el.classList.contains('open') ? 'Hide transcript' : 'Show transcript';
+  }
+
+  function overallFeedback(meetingId, type, btn) {
+    fetch(`${API_BASE}/feedback`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        meeting_id: meetingId,
+        action: 'overall_' + type,
+        summary_id: recapData?.summary_id ?? null,
+        summary_source: recapData?.summary_type ?? null
+      })
+    }).catch(() => {});
+    btn.textContent = type === 'positive' ? 'Thanks!' : 'Noted - thanks';
+    btn.disabled = true;
+  }
+
+  function formatTime(t) {
+    if (t == null) {
+      return '';
+    }
+    if (typeof t === 'number') {
+      const m = Math.floor(t / 60);
+      const s = Math.floor(t % 60);
+      return `${m}:${String(s).padStart(2, '0')}`;
+    }
+    return t;
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 2500);
+  }
+</script>
+{% endblock %}

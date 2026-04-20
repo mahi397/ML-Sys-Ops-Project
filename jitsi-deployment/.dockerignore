@@ -1,0 +1,7 @@
+.git
+.env
+.env.bak
+stack.env
+.DS_Store
+**/__pycache__/
+**/*.pyc

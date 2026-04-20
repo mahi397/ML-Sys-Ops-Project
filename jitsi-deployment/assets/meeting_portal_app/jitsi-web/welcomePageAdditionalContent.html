@@ -1,0 +1,80 @@
+<template id="welcome-page-additional-content-template">
+  <section id="meeting-portal-shell" data-view="loading">
+    <aside id="meeting-portal-status" hidden>
+      <div class="meeting-portal-status-copy">
+        <span class="meeting-portal-status-kicker">Account status</span>
+        <strong class="meeting-portal-status-title">Checking access</strong>
+        <span class="meeting-portal-status-subtitle"></span>
+      </div>
+      <div class="meeting-portal-status-actions">
+        <button type="button" class="meeting-portal-button secondary" data-action="open-login">Log in</button>
+        <button type="button" class="meeting-portal-button secondary" data-action="logout" hidden>Log out</button>
+      </div>
+      <div class="meeting-portal-status-message" hidden></div>
+    </aside>
+
+    <div id="meeting-portal-gate">
+      <div class="meeting-portal-backdrop"></div>
+      <section class="meeting-portal-card" role="dialog" aria-modal="true" aria-labelledby="meeting-portal-title">
+        <span class="meeting-portal-kicker">Meeting access</span>
+        <h2 id="meeting-portal-title">Checking your Jitsi session</h2>
+        <p id="meeting-portal-subtitle">Loading account access options.</p>
+        <div id="meeting-portal-error" hidden></div>
+
+        <div class="meeting-portal-panel" data-panel="loading">
+          <div class="meeting-portal-loading-mark" aria-hidden="true"></div>
+          <p>Checking whether an authenticated user session is already active.</p>
+        </div>
+
+        <div class="meeting-portal-panel" data-panel="choice" hidden>
+          <div class="meeting-portal-choice-actions">
+            <button type="button" class="meeting-portal-button primary" data-action="open-login">Log in</button>
+            <button type="button" class="meeting-portal-button secondary" data-action="open-signup">Create account</button>
+            <button type="button" class="meeting-portal-button ghost" data-action="continue-guest">Guest log in</button>
+          </div>
+          <p class="meeting-portal-choice-note">
+            Guests can join an existing room after the authenticated host has entered first.
+          </p>
+        </div>
+
+        <form class="meeting-portal-panel meeting-portal-form" data-panel="login" data-form-kind="login" hidden>
+          <label>
+            Username or email
+            <input type="text" name="login_name" autocomplete="username" required>
+          </label>
+          <label>
+            Password
+            <input type="password" name="password" autocomplete="current-password" required>
+          </label>
+          <div class="meeting-portal-form-actions">
+            <button type="submit" class="meeting-portal-button primary">Log in</button>
+            <button type="button" class="meeting-portal-button ghost" data-action="back-to-choice">Back</button>
+          </div>
+        </form>
+
+        <form class="meeting-portal-panel meeting-portal-form" data-panel="signup" data-form-kind="signup" hidden>
+          <label>
+            Username
+            <input type="text" name="user_id" autocomplete="username" required>
+          </label>
+          <label>
+            Display name
+            <input type="text" name="display_name" autocomplete="name" required>
+          </label>
+          <label>
+            Email
+            <input type="email" name="email" autocomplete="email" required>
+          </label>
+          <label>
+            Password
+            <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+          </label>
+          <div class="meeting-portal-form-actions">
+            <button type="submit" class="meeting-portal-button primary">Create account</button>
+            <button type="button" class="meeting-portal-button ghost" data-action="back-to-choice">Back</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </section>
+</template>

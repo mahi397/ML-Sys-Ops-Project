@@ -1,0 +1,26 @@
+#!/usr/bin/with-contenv bash
+set -eu
+
+CFG="/config/conf.d/jitsi-meet.cfg.lua"
+
+if [ ! -f "$CFG" ]; then
+    exit 0
+fi
+
+if grep -q '"muc_wait_for_host";' "$CFG"; then
+    exit 0
+fi
+
+awk '
+/"token_verification";/ && !done {
+    print
+    print "        \"muc_wait_for_host\";"
+    done = 1
+    next
+}
+{
+    print
+}
+' "$CFG" > "${CFG}.tmp"
+
+mv "${CFG}.tmp" "$CFG"

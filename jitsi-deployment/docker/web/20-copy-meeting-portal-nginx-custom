@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv bash
+set -eu
+
+install -d -m 0755 /config/nginx-custom
+install -m 0644 /usr/local/share/jitsi-custom/meeting-portal.conf /config/nginx-custom/meeting-portal.conf

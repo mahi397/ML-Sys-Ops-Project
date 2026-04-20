@@ -1,0 +1,85 @@
+services:
+  web:
+    image: local/jitsi-web-custom:${JITSI_IMAGE_VERSION:-stable-10741}
+    build:
+      context: ..
+      dockerfile: docker/web/Dockerfile
+      args:
+        JITSI_IMAGE_VERSION: ${JITSI_IMAGE_VERSION:-stable-10741}
+
+  prosody:
+    image: local/jitsi-prosody-custom:${JITSI_IMAGE_VERSION:-stable-10741}
+    build:
+      context: ..
+      dockerfile: docker/prosody/Dockerfile
+      args:
+        JITSI_IMAGE_VERSION: ${JITSI_IMAGE_VERSION:-stable-10741}
+
+  meeting-portal-app:
+    image: local/meeting-portal-app:${DEPLOYMENT_IMAGE_TAG:-vm}
+    build:
+      context: ..
+      dockerfile: docker/meeting-portal-app/Dockerfile
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - ${CONFIG}/meeting-portal-app:/data:Z
+      - ${CONFIG}/rclone:/root/.config/rclone:ro
+    environment:
+      MEETING_PORTAL_DATABASE_URL: ${MEETING_PORTAL_DATABASE_URL}
+      MEETING_PORTAL_HTTPS_ONLY: ${MEETING_PORTAL_HTTPS_ONLY}
+      MEETING_PORTAL_RCLONE_BUCKET: ${MEETING_PORTAL_RCLONE_BUCKET}
+      MEETING_PORTAL_RCLONE_REMOTE: ${MEETING_PORTAL_RCLONE_REMOTE}
+      MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS: ${MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS}
+      MEETING_PORTAL_SESSION_SECRET: ${MEETING_PORTAL_SESSION_SECRET}
+      MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED: ${MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED}
+      MEETING_PORTAL_TOKEN_TTL_SECONDS: ${MEETING_PORTAL_TOKEN_TTL_SECONDS}
+      JWT_ACCEPTED_AUDIENCES: ${JWT_ACCEPTED_AUDIENCES}
+      JWT_APP_ID: ${JWT_APP_ID}
+      JWT_APP_SECRET: ${JWT_APP_SECRET}
+      PUBLIC_URL: ${PUBLIC_URL}
+      TZ: ${TZ}
+      XMPP_DOMAIN: ${XMPP_DOMAIN:-meet.jitsi}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks:
+      meet.jitsi:
+
+  transcript-uploader:
+    image: local/transcript-uploader:${DEPLOYMENT_IMAGE_TAG:-vm}
+    build:
+      context: ..
+      dockerfile: docker/transcript-uploader/Dockerfile
+    restart: ${RESTART_POLICY:-unless-stopped}
+    depends_on:
+      - meeting-portal-app
+    volumes:
+      - ${CONFIG}/transcripts:/transcripts:ro
+      - ${CONFIG}/transcript-uploader:/state:rw
+      - ${CONFIG}/meeting-portal-app/room-contexts:/room-contexts:ro
+    environment:
+      JITSI_TRANSCRIPT_ROOT: /transcripts
+      JITSI_TRANSCRIPT_SENDER_STATE: /state/sent.json
+      JITSI_ROOM_CONTEXT_ROOT: /room-contexts
+      JITSI_TRANSCRIPT_INGEST_URL: ${JITSI_TRANSCRIPT_INGEST_URL}
+      JITSI_HOST_EXTERNAL_KEY: ${JITSI_HOST_EXTERNAL_KEY}
+      INGEST_TOKEN: ${INGEST_TOKEN}
+      JITSI_TRANSCRIPT_POLL_SECONDS: ${JITSI_TRANSCRIPT_POLL_SECONDS:-5}
+      JITSI_TRANSCRIPT_SETTLE_SECONDS: ${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}
+      JITSI_TRANSCRIPT_UPLOAD_TIMEOUT: ${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}
+    networks:
+      meet.jitsi:
+
+  transcriber:
+    depends_on:
+      - prosody
+      - vosk
+    environment:
+      JIGASI_TRANSCRIBER_VOSK_URL: ${JIGASI_TRANSCRIBER_VOSK_URL:-ws://vosk:2700}
+
+  vosk:
+    image: alphacep/kaldi-en:latest
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - ${VOSK_MODEL_PATH}:/opt/vosk-model-en/model:ro
+    networks:
+      meet.jitsi:

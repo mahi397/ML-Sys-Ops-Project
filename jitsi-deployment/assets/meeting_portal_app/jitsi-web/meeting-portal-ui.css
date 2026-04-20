@@ -1,0 +1,309 @@
+#meeting-portal-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 2500;
+    pointer-events: none;
+    font-family: inherit;
+}
+
+#meeting-portal-shell[hidden],
+#meeting-portal-shell [hidden] {
+    display: none !important;
+}
+
+#meeting-portal-shell * {
+    box-sizing: border-box;
+}
+
+#meeting-portal-gate {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+}
+
+#meeting-portal-shell #meeting-portal-gate {
+    pointer-events: none;
+}
+
+#meeting-portal-shell #meeting-portal-gate>* {
+    pointer-events: auto;
+}
+
+.meeting-portal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 16, 28, 0.54);
+    backdrop-filter: blur(16px);
+}
+
+.meeting-portal-card {
+    position: relative;
+    width: min(29rem, calc(100vw - 2rem));
+    padding: 1.4rem;
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(11, 18, 33, 0.92);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+    color: #f8fafc;
+}
+
+.meeting-portal-kicker,
+.meeting-portal-status-kicker {
+    display: inline-block;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8fc4ff;
+}
+
+#meeting-portal-title {
+    margin: 0.55rem 0 0;
+    font-size: 1.9rem;
+    line-height: 1.08;
+    color: #ffffff;
+}
+
+#meeting-portal-subtitle {
+    margin: 0.65rem 0 0;
+    color: rgba(225, 234, 245, 0.86);
+    line-height: 1.5;
+}
+
+#meeting-portal-error {
+    margin-top: 0.95rem;
+    padding: 0.85rem 0.95rem;
+    border-radius: 16px;
+    background: rgba(185, 28, 28, 0.24);
+    border: 1px solid rgba(252, 165, 165, 0.26);
+    color: #fee2e2;
+    line-height: 1.4;
+}
+
+.meeting-portal-panel {
+    margin-top: 1.2rem;
+}
+
+.meeting-portal-choice-actions,
+.meeting-portal-form-actions,
+.meeting-portal-status-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.7rem;
+}
+
+.meeting-portal-choice-actions {
+    flex-direction: column;
+}
+
+.meeting-portal-choice-note {
+    margin: 1rem 0 0;
+    color: rgba(225, 234, 245, 0.75);
+    line-height: 1.45;
+}
+
+.meeting-portal-form {
+    display: grid;
+    gap: 0.9rem;
+}
+
+.meeting-portal-form label {
+    display: grid;
+    gap: 0.35rem;
+    color: rgba(230, 239, 249, 0.92);
+    font-weight: 600;
+}
+
+.meeting-portal-form input {
+    width: 100%;
+    min-height: 3rem;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+    font: inherit;
+}
+
+.meeting-portal-form input:focus {
+    outline: 2px solid rgba(120, 190, 255, 0.88);
+    outline-offset: 2px;
+    border-color: rgba(120, 190, 255, 0.88);
+}
+
+.meeting-portal-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.85rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 700;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.meeting-portal-button.primary {
+    background: #0b69ff;
+    color: #ffffff;
+}
+
+.meeting-portal-button.secondary {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.14);
+    color: #ffffff;
+}
+
+.meeting-portal-button.ghost {
+    border-color: rgba(255, 255, 255, 0.18);
+    color: #dbe7f5;
+}
+
+.meeting-portal-loading-mark {
+    width: 2.9rem;
+    height: 2.9rem;
+    border-radius: 999px;
+    border: 3px solid rgba(255, 255, 255, 0.12);
+    border-top-color: #7ab7ff;
+    animation: meeting-portal-spin 0.9s linear infinite;
+}
+
+#meeting-portal-status {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    display: grid;
+    gap: 0.75rem;
+    width: min(22rem, calc(100vw - 2rem));
+    padding: 1rem;
+    border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(11, 18, 33, 0.88);
+    color: #f8fafc;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(12px);
+    pointer-events: auto;
+}
+
+.meeting-portal-status-copy {
+    display: grid;
+    gap: 0.25rem;
+}
+
+.meeting-portal-status-title {
+    font-size: 1rem;
+    color: #ffffff;
+}
+
+.meeting-portal-status-subtitle,
+.meeting-portal-status-message {
+    color: rgba(226, 236, 248, 0.82);
+    line-height: 1.45;
+}
+
+.meeting-portal-status-message {
+    padding-top: 0.2rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* recap changes */
+#meeting-portal-recaps-link {
+    position: fixed;
+    top: clamp(29rem, 53vh, 32rem);
+    right: clamp(4.5rem, 10vw, 8.5rem);
+    z-index: 2400;
+
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+
+    padding: 0.72rem 1rem;
+    border-radius: 999px;
+    border: 1px solid rgba(239, 68, 68, 0.18);
+
+    background: rgba(255, 255, 255, 0.94);
+    backdrop-filter: blur(10px);
+
+    color: #ef4444;
+    text-decoration: none;
+    font-size: 0.96rem;
+    font-weight: 700;
+    line-height: 1;
+
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.14);
+    transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+#meeting-portal-recaps-link::before {
+    content: "";
+    width: 0.52rem;
+    height: 0.52rem;
+    border-radius: 999px;
+    background: #ef4444;
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.10);
+    flex: 0 0 auto;
+}
+
+#meeting-portal-recaps-link:hover {
+    transform: translateY(-1px);
+    background: #ffffff;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.18);
+}
+
+#meeting-portal-recaps-link:active {
+    transform: translateY(0);
+}
+
+@media (max-width: 900px) {
+    #meeting-portal-recaps-link {
+        top: auto;
+        bottom: 7.5rem;
+        right: 1.2rem;
+        padding: 0.68rem 0.95rem;
+    }
+}
+
+/* recap changes */
+
+
+@keyframes meeting-portal-spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (max-width: 900px) {
+    #meeting-portal-gate {
+        align-items: flex-start;
+        padding: 4.5rem 1rem 1rem;
+    }
+
+    .meeting-portal-card {
+        width: min(100%, 30rem);
+    }
+
+    #meeting-portal-status {
+        left: 1rem;
+        right: 1rem;
+        width: auto;
+    }
+}
+
+/* recap changes */
+/* #meeting-portal-recaps-link {
+    right: 1.2rem;
+    top: auto;
+    bottom: 8.5rem;
+} */
+/* recap changes */

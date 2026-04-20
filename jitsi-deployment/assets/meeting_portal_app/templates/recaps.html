@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel recap-shell recap-ui-page">
+    <div class="page-intro">
+        <div class="eyebrow">Recaps</div>
+        <div class="page-title-row">
+            <h1>Meeting recaps</h1>
+        </div>
+        <p class="muted">Summaries from meetings you joined and are allowed to review.</p>
+    </div>
+
+    {% if not recaps %}
+    <p class="muted">No recap summaries are available for this account yet.</p>
+    {% else %}
+    <div class="room-list">
+        {% for item in recaps %}
+        <article class="room-card">
+            <div class="page-title-row">
+                <div>
+                    <h3>{{ item.meeting_title }}</h3>
+                    <p class="muted">Meeting ID: {{ item.meeting_id }}</p>
+                </div>
+                <span class="status-pill {{ item.recap_status }}">
+                    {{ item.recap_status }}
+                </span>
+            </div>
+            <p class="recap-meta">
+                <span>{{ item.segment_count }} segment{{ "" if item.segment_count == 1 else "s" }}</span>
+                <span>{{ item.role | title }}</span>
+                {% if item.model_version %}
+                <span>{{ item.model_version }}</span>
+                {% endif %}
+            </p>
+            {% if item.started_at %}
+            <p class="muted">Started: {{ item.started_at }}</p>
+            {% endif %}
+            {% if item.summary_updated_at %}
+            <p class="muted">Latest summary update: {{ item.summary_updated_at }}</p>
+            {% elif item.summary_created_at %}
+            <p class="muted">Summary created: {{ item.summary_created_at }}</p>
+            {% endif %}
+            {% if item.has_recap %}
+            <div class="row" style="margin-top:0.9rem;">
+                <a class="btn" href="{{ item.recap_url }}">Open recap</a>
+            </div>
+            {% else %}
+            <p class="muted">No recap summary found.</p>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
