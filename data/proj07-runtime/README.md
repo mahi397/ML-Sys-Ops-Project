@@ -11,7 +11,7 @@ Database-specific source assets stay under `../proj07-db/`, but this folder owns
 - `proj07_services/api/`
   - HTTP entrypoints such as `jitsi_transcript_receiver.py`
 - `proj07_services/pipeline/`
-  - ingest and payload-building flows
+  - ingest and payload-building flows, including the AMI corpus bootstrap modules that backfill canonical AMI meetings into Postgres from object storage
 - `proj07_services/workers/`
   - long-running task workers
 - `proj07_services/common/`
@@ -35,6 +35,8 @@ The canonical shared config file is `../.env`. `../setup.sh` keeps this folder's
   - directly reused from the original runtime bundle
 - `proj07_services/pipeline/build_online_inference_payloads.py` and `proj07_services/pipeline/ingest_saved_jitsi_transcript.py`
   - service-oriented evolutions of the original online-inference scripts
+- `proj07_services/pipeline/bootstrap_ami_corpus.py` and `proj07_services/pipeline/ingest_ami_meeting.py`
+  - runtime-owned reproduction of the archived AMI ingest flow, updated to write the current `proj07-db` schema instead of relying on the legacy bundle
 - `proj07_services/workers/stage1_forward_service.py`, `proj07_services/workers/stage2_forward_service.py`, and `proj07_services/workers/user_summary_materialize_service.py`
   - reproduce the older batch flow as durable worker services
 - `proj07_services/workers/db_task_worker.py`, `proj07_services/common/task_service_common.py`, `proj07_services/common/workflow_task_common.py`, `proj07_services/workers/stage1_payload_service.py`, and `proj07_services/workers/stage2_input_service.py`
@@ -63,6 +65,27 @@ The canonical shared config file is `../.env`. `../setup.sh` keeps this folder's
 The key split is:
 - `meeting_artifacts` describes durable data outputs
 - `workflow_tasks` and `workflow_task_attempts` describe operational state and retry history
+
+## AMI bootstrap
+
+The runtime also owns the AMI historical-data bootstrap path used by `../setup.sh`.
+
+- `bootstrap_ami_corpus.py`
+  - discovers AMI meetings from object storage, compares them against fully-ingested `source_type = 'ami'` rows in Postgres, stages missing raw XML locally, and invokes the per-meeting ingester only when coverage is incomplete
+- `ingest_ami_meeting.py`
+  - parses one staged AMI meeting, uploads processed transcript/summary artifacts, inserts `meetings`, `users`, `meeting_participants`, `meeting_speakers`, `utterances`, `topic_segments`, `utterance_transitions`, `meeting_artifacts`, and `summaries`, and repairs partial AMI rows by replacing the existing meeting when needed
+- `restore_dataset_lineage.py`
+  - restores historical `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` directories from block storage or object storage, upserts their `dataset_versions` manifests, and replays per-meeting `dataset_version` / `dataset_split` stamps only when every referenced meeting is already present in Postgres
+
+Manual trigger:
+
+```bash
+cd proj07-runtime
+python -m proj07_services.pipeline.bootstrap_ami_corpus
+python -m proj07_services.retraining.restore_dataset_lineage
+```
+
+`restore_dataset_lineage.py` is intentionally conservative. If stored dataset versions point at meetings that are missing from Postgres, it fails instead of silently restamping the wrong lineage. For a truly fresh environment, clear those stored dataset prefixes or disable `BOOTSTRAP_DATASET_LINEAGE_ENABLED` before running `../setup.sh`.
 
 ## Core DB tables
 

@@ -145,7 +145,7 @@ def stable_split_70_15_15(meeting_ids: list[str]) -> dict[str, list[str]]:
     return {"train": train, "val": val, "test": test}
 
 
-def insert_dataset_version(
+def ensure_dataset_version_record(
     conn,
     dataset_name: str,
     stage: str,
@@ -156,6 +156,32 @@ def insert_dataset_version(
     with conn.cursor() as cur:
         cur.execute(
             """
+            SELECT dataset_version_id
+            FROM dataset_versions
+            WHERE dataset_name = %s
+              AND stage = %s
+              AND object_key = %s
+            ORDER BY dataset_version_id DESC
+            LIMIT 1
+            """,
+            (dataset_name, stage, object_key),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            cur.execute(
+                """
+                UPDATE dataset_versions
+                SET source_type = %s,
+                    manifest_json = %s
+                WHERE dataset_version_id = %s
+                """,
+                (source_type, Json(manifest_json), row["dataset_version_id"]),
+            )
+            conn.commit()
+            return
+
+        cur.execute(
+            """
             INSERT INTO dataset_versions (
                 dataset_name, stage, source_type, object_key, manifest_json
             )
@@ -164,6 +190,24 @@ def insert_dataset_version(
             (dataset_name, stage, source_type, object_key, Json(manifest_json)),
         )
     conn.commit()
+
+
+def insert_dataset_version(
+    conn,
+    dataset_name: str,
+    stage: str,
+    source_type: str,
+    object_key: str,
+    manifest_json: dict[str, Any],
+) -> None:
+    ensure_dataset_version_record(
+        conn=conn,
+        dataset_name=dataset_name,
+        stage=stage,
+        source_type=source_type,
+        object_key=object_key,
+        manifest_json=manifest_json,
+    )
 
 
 def insert_dataset_quality_report(

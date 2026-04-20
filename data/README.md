@@ -32,7 +32,7 @@ This bundle assumes:
   - copy it to `.env` and use that one file as the main place to update DB, object-store, Stage 1, and Stage 2 settings
 - `setup.sh`
   - global bootstrap for the modern stack
-  - creates the Python environment, copies the shared `.env` template if needed, prepares block-storage folders, uploads the raw AMI corpus to object storage if needed, bootstraps synthetic Stage 1 inputs if missing, checks for existing runtime containers and Postgres data, applies idempotent DB migrations, and starts the integrated runtime stack only when needed
+  - creates the Python environment, copies the shared `.env` template if needed, prepares block-storage folders, uploads the raw AMI corpus to object storage if needed, bootstraps synthetic Stage 1 inputs if missing, checks for existing runtime containers and Postgres data, applies idempotent DB migrations, starts the integrated runtime stack only when needed, backfills AMI meetings into Postgres through the modern `proj07-runtime` pipeline when the object-store corpus exists but the DB is missing fully-ingested AMI rows, and replays stored Stage 1 dataset lineage into block storage and Postgres when historical dataset versions still exist
 
 ## Lineage map
 
@@ -111,6 +111,10 @@ source .venv/bin/activate
 The SQL files under `proj07-db/init_sql/` are mounted by `proj07-runtime/docker-compose.yml`. On a fresh Postgres data volume they are applied automatically during container initialization, and `data/setup.sh` also reapplies the idempotent post-bootstrap migrations so existing volumes can pick up newer schema changes such as `meetings.is_valid` and `dataset_quality_reports`.
 
 When you rerun `data/setup.sh`, it now detects whether the runtime services are already running and whether `${POSTGRES_DATA_DIR:-/mnt/block/postgres-data}` already contains a Postgres data directory, so repeated setup runs are more predictable.
+
+If the AMI raw corpus is already present in object storage but Postgres is empty or only partially populated for `source_type = 'ami'`, `data/setup.sh` now runs the modern `proj07-runtime` AMI bootstrap pipeline automatically and lets that flow fill or repair any missing AMI meetings before setup finishes.
+
+If historical `roberta_stage1_feedback_pool/vN` or `roberta_stage1/vN` artifacts still exist in block storage or object storage, `data/setup.sh` now also restores that lineage before finishing so retraining does not accidentally reuse the wrong base version or restart version numbering from `v1`. If you intentionally want a clean-room test run, either clear those stored dataset prefixes first or set `BOOTSTRAP_DATASET_LINEAGE_ENABLED=false` in `data/.env`.
 
 `data/.env` is the canonical shared configuration file. `setup.sh` keeps `proj07-runtime/.env` pointed at that shared file so that updating `data/.env` and then running `docker compose` from `proj07-runtime/` uses the same values.
 

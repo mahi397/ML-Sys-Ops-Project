@@ -37,6 +37,8 @@ BOOTSTRAP_SYNTHETIC_STAGE1_ENABLED="${BOOTSTRAP_SYNTHETIC_STAGE1_ENABLED:-true}"
 BOOTSTRAP_SYNTHETIC_STAGE1_VERSION="${BOOTSTRAP_SYNTHETIC_STAGE1_VERSION:-1}"
 BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT="${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT:-3}"
 BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
+BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
+BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
 RUNTIME_CONTAINER_NAMES=(
   postgres
   adminer
@@ -260,6 +262,8 @@ function load_runtime_env() {
   BOOTSTRAP_SYNTHETIC_STAGE1_VERSION="${BOOTSTRAP_SYNTHETIC_STAGE1_VERSION:-1}"
   BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT="${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT:-3}"
   BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
+  BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
+  BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
 }
 
 function postgres_data_initialized() {
@@ -489,6 +493,46 @@ function start_runtime_stack() {
   fi
 }
 
+function bootstrap_ami_corpus_into_db() {
+  if ! is_truthy "${BOOTSTRAP_AMI_DB_ENABLED}"; then
+    banner "Skipping AMI DB bootstrap because BOOTSTRAP_AMI_DB_ENABLED=${BOOTSTRAP_AMI_DB_ENABLED}"
+    return
+  fi
+
+  if ! ami_corpus_uploaded; then
+    echo "AMI raw corpus is not available in object storage, so DB bootstrap cannot continue." >&2
+    exit 1
+  fi
+
+  banner "Ensuring AMI corpus is fully ingested into Postgres via proj07-runtime"
+  (
+    cd "${PROJ07_RUNTIME_DIR}"
+    python -m proj07_services.pipeline.bootstrap_ami_corpus \
+      --rclone-remote "${RCLONE_REMOTE}" \
+      --bucket "${OBJECT_BUCKET}" \
+      --prefix "${AMI_OBJECT_PREFIX}" \
+      --raw-root "${BLOCK_ROOT}/staging/current_job/raw" \
+      --processed-root "${BLOCK_ROOT}/staging/current_job/processed" \
+      --log-file "${BLOCK_ROOT}/ingest_logs/ami_corpus_bootstrap.log"
+  )
+}
+
+function restore_dataset_lineage() {
+  if ! is_truthy "${BOOTSTRAP_DATASET_LINEAGE_ENABLED}"; then
+    banner "Skipping dataset lineage restore because BOOTSTRAP_DATASET_LINEAGE_ENABLED=${BOOTSTRAP_DATASET_LINEAGE_ENABLED}"
+    return
+  fi
+
+  banner "Restoring retraining dataset lineage from block storage and object storage when available"
+  (
+    cd "${PROJ07_RUNTIME_DIR}"
+    python -m proj07_services.retraining.restore_dataset_lineage \
+      --rclone-remote "${RCLONE_REMOTE}" \
+      --bucket "${OBJECT_BUCKET}" \
+      --log-file "${BLOCK_ROOT}/ingest_logs/retraining_dataset_lineage_restore.log"
+  )
+}
+
 function seed_mock_transcripts() {
   local transcript=""
   local seeded_any=0
@@ -595,6 +639,8 @@ mkdir -p \
 stage_ami_corpus_to_object_store
 bootstrap_synthetic_stage1_inputs
 start_runtime_stack
+bootstrap_ami_corpus_into_db
+restore_dataset_lineage
 
 seed_mock_transcripts
 
