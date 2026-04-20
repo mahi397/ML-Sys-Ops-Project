@@ -960,7 +960,50 @@ def main() -> None:
 
     metadata_payload = load_metadata_sidecar(args.metadata_path, logger)
     host_identity = build_host_identity(metadata_payload, host_external_key)
-    parsed = parse_transcript(transcript_path, args.timezone)
+    # parsed = parse_transcript(transcript_path, args.timezone)
+
+
+    try:
+        parsed = parse_transcript(transcript_path, args.timezone)
+    except ValueError as exc:
+        if str(exc) == "No spoken utterances were found in transcript":
+            logger.warning(
+                "Skipping transcript with no spoken utterances | meeting_id=%s | file=%s",
+                meeting_id,
+                transcript_path,
+            )
+
+            if args.metadata_path is not None:
+                try:
+                    metadata_payload["meeting_id"] = meeting_id
+                    metadata_payload["ingest_status"] = "skipped_no_utterances"
+                    metadata_payload["stage1_build_status"] = "not_requested"
+                    metadata_payload["stage1_build_error"] = None
+                    args.metadata_path.write_text(
+                        json.dumps(metadata_payload, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed updating metadata sidecar for skipped transcript: %s",
+                        args.metadata_path,
+                    )
+
+            print(
+                json.dumps(
+                    {
+                        "meeting_id": meeting_id,
+                        "status": "skipped_no_utterances",
+                        "stage1_build_status": "not_requested",
+                        "stage1_build_error": None,
+                        "parsed_json_path": None,
+                        "utterances": 0,
+                        "transitions": 0,
+                    }
+                )
+            )
+            return
+        raise
 
     payload = build_parsed_payload(
         meeting_id=meeting_id,
