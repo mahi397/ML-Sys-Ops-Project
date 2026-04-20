@@ -213,7 +213,7 @@ ls -lh "${MODELS_DIR}/"
 echo -e "\n${YELLOW}[7/10] Postgres + schema migrations...${NC}"
 
 cd "${REPO_DIR}"
-docker compose up -d postgres
+docker compose up -d --remove-orphans postgres
 info "Waiting for postgres to be healthy..."
 until docker compose exec postgres pg_isready -U "${POSTGRES_USER:-proj07_user}" >/dev/null 2>&1; do
     sleep 2
@@ -247,7 +247,7 @@ fi
 echo -e "\n${YELLOW}[8/10] Starting MinIO, MLflow, and full stack...${NC}"
 
 cd "${REPO_DIR}"
-docker compose up -d minio minio-create-buckets mlflow
+docker compose up -d --remove-orphans minio minio-create-buckets mlflow
 
 info "Waiting for MLflow to be ready..."
 for i in {1..30}; do
@@ -317,7 +317,7 @@ WHERE NOT EXISTS (
 
 # Bring up remaining services
 info "Bringing up full stack..."
-docker compose up -d
+docker compose up -d --remove-orphans
 ok "Full stack started"
 
 # ── 9. Monitoring infra dirs ───────────────────────────────────────────────────
@@ -398,7 +398,7 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     ok "Jitsi deployment complete"
 
     echo ""
-    echo "  Jitsi web:    https://${_IP}:${_JP}"
+    echo "  Jitsi web:    https://${_IP}:${_HP}"
     echo "  After install, copy generated secrets back to root .env:"
     echo "    grep -E 'JWT_APP_SECRET|MEETING_PORTAL_SESSION_SECRET|JITSI_HOST_EXTERNAL_KEY' /mnt/block/jitsi/jitsi-docker-jitsi-meet/.env"
     echo "  Then re-run to persist them: DEPLOY_JITSI=true bash setup.sh"
