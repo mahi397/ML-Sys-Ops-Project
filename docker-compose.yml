@@ -7,12 +7,13 @@
 #   docker compose logs -f      # watch logs
 #
 # Services are grouped:
-#   1. Jitsi stack       — official images, config only
-#   2. Platform          — MLflow, Postgres, MinIO (shared infra)
-#   3. Data pipeline     — Aneesh's containers
-#   4. Serving + UI      — Shruti's containers + Mahima's recap UI
-#   5. Training/MLOps    — Mahima's containers
-#   6. Monitoring        — Prometheus + Grafana
+#   1. Platform          — Postgres, MinIO, MLflow (shared infra)
+#   2. Data pipeline     — ingest, workflow workers, drift monitor
+#   3. Serving           — Ray Serve (RoBERTa + Mistral), single Ray cluster
+#   4. Training/MLOps    — retrain watcher + job (standalone Ray, GPU via nvidia runtime)
+#   5. Monitoring        — Prometheus, Grafana, AlertManager, Node Exporter
+#
+# Jitsi stack is a separate compose project: bash jitsi-deployment/install-jitsi-vm.sh
 #
 # Single docker compose up brings up the entire system.
 # Profiles:
@@ -21,14 +22,11 @@
 ###############################################################################
 
 volumes:
-  jitsi_web_config:
-  jitsi_jvb_config:
-  jitsi_prosody_config:
-  jitsi_jicofo_config:
-  jigasi_config:
   prometheus_data:
   grafana_data:
+  alertmanager_data:
   ray_tmp:
+  recap_data:
   # NOTE: postgres and minio use bind mounts to /mnt/block for persistence
   # across VM restarts. Named volumes would be lost if VM is deleted.
 
@@ -39,79 +37,25 @@ networks:
 services:
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # 1. JITSI STACK — official images
+  # NOTE: Jitsi Meet stack (web, prosody, jicofo, jvb, jigasi, vosk,
+  # meeting-portal-app, transcript-uploader) is managed as a SEPARATE compose
+  # project installed by: bash jitsi-deployment/install-jitsi-vm.sh
+  #
+  # It lives in /mnt/block/jitsi/ and uses the meet.jitsi Docker network.
+  # It connects to this ML stack via FLOATING_IP:
+  #   - transcript-uploader  → http://FLOATING_IP:9099/ingest/jitsi-transcript
+  #   - meeting-portal-app   → postgresql://FLOATING_IP:5432/proj07_sql_db
+  #
+  # Set DEPLOY_JITSI=true in setup.sh to auto-install it.
   # ═══════════════════════════════════════════════════════════════════════════
 
-  jitsi-web:
-    image: jitsi/web:stable-9823
-    restart: unless-stopped
-    ports:
-      - "${JITSI_PORT:-8443}:443"
-      - "8080:80"
-    environment:
-      - ENABLE_GUESTS=1
-      - ENABLE_TRANSCRIPTIONS=1
-      - PUBLIC_URL=https://${FLOATING_IP}:${JITSI_PORT:-8443}
-      - TZ=UTC
-    volumes:
-      - jitsi_web_config:/config
-      - ./jitsi/custom-config.js:/config/custom-config.js:ro
-    networks:
-      - recap-net
-
-  jitsi-prosody:
-    image: jitsi/prosody:stable-9823
-    restart: unless-stopped
-    environment:
-      - ENABLE_GUESTS=1
-      - PUBLIC_URL=https://${FLOATING_IP}:${JITSI_PORT:-8443}
-      - TZ=UTC
-    volumes:
-      - jitsi_prosody_config:/config
-    networks:
-      - recap-net
-
-  jitsi-jicofo:
-    image: jitsi/jicofo:stable-9823
-    restart: unless-stopped
-    environment:
-      - TZ=UTC
-    volumes:
-      - jitsi_jicofo_config:/config
-    networks:
-      - recap-net
-
-  jitsi-jvb:
-    image: jitsi/jvb:stable-9823
-    restart: unless-stopped
-    ports:
-      - "${JVB_PORT:-10000}:10000/udp"
-    environment:
-      - JVB_ADVERTISE_IPS=${FLOATING_IP}
-      - JVB_PORT=${JVB_PORT:-10000}
-      - TZ=UTC
-    volumes:
-      - jitsi_jvb_config:/config
-    networks:
-      - recap-net
-
-  jigasi:
-    image: jitsi/jigasi:stable-9823
-    restart: unless-stopped
-    environment:
-      - ENABLE_TRANSCRIPTIONS=1
-      - TZ=UTC
-    volumes:
-      - jigasi_config:/config
-    networks:
-      - recap-net
-
   # ═══════════════════════════════════════════════════════════════════════════
-  # 2. PLATFORM — shared infrastructure (single instance, everyone uses)
+  # 1. PLATFORM — shared infrastructure (single instance, everyone uses)
   # ═══════════════════════════════════════════════════════════════════════════
 
   postgres:
     image: postgres:16-alpine
+    container_name: postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-proj07_user}
@@ -176,30 +120,6 @@ services:
     networks:
       - recap-net
 
-  # Add after minio-create-buckets — Ray head
-  ray-head:
-    image: rayproject/ray:2.54.0
-    restart: unless-stopped
-    command: ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --block --num-cpus=4
-    ports:
-      - "6379:6379"
-      - "8265:8265"
-      - "10001:10001"
-    shm_size: '4g'
-    volumes:
-      - /mnt/block/ray-checkpoints:/tmp/ray-checkpoints  # ← bind mount like postgres/minio
-    environment:
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_ENDPOINT_URL=https://chi.tacc.chameleoncloud.org:7480
-    depends_on:
-      minio:
-        condition: service_healthy
-      minio-create-buckets:
-        condition: service_completed_successfully
-    networks:
-      - recap-net
-
   mlflow:
     # Using v3.9.0 to match the lab setup that has historical training runs
     image: ghcr.io/mlflow/mlflow:v3.9.0
@@ -228,66 +148,364 @@ services:
       - recap-net
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # 3. DATA PIPELINE — Aneesh's containers
+  # 3. DATA PIPELINE — ingest, workflow workers, retraining, drift monitor
   # ═══════════════════════════════════════════════════════════════════════════
 
-  data-pipeline:
-    build: ./data-pipeline
+  adminer:
+    image: adminer:4.8.1
+    container_name: adminer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${ADMINER_PORT:-5050}:8080"
+    networks:
+      - recap-net
+
+  jitsi_transcript_receiver:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: jitsi_transcript_receiver
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_USER: ${MINIO_USER:-minioadmin}
-      MINIO_PASSWORD: ${MINIO_PASSWORD}
+      INGEST_TOKEN: ${INGEST_TOKEN:-}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      JITSI_SAVE_DIR: /mnt/block/user-behaviour/received_transcripts
+      JITSI_LOG_DIR: /mnt/block/ingest_logs/jitsi_transcript
+      JITSI_BUILD_STAGE1_AFTER_INGEST: ${JITSI_BUILD_STAGE1_AFTER_INGEST:-false}
+      JITSI_STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      JITSI_STAGE1_WINDOW_SIZE: ${JITSI_STAGE1_WINDOW_SIZE:-7}
+      JITSI_STAGE1_TRANSITION_INDEX: ${JITSI_STAGE1_TRANSITION_INDEX:-3}
+      JITSI_STAGE1_MIN_UTTERANCE_CHARS: ${JITSI_STAGE1_MIN_UTTERANCE_CHARS:-20}
+      JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE: ${JITSI_STAGE1_MAX_WORDS_PER_UTTERANCE:-50}
+      JITSI_STAGE1_MIN_INFERENCE_UTTERANCES: ${JITSI_STAGE1_MIN_INFERENCE_UTTERANCES:-2}
+      JITSI_STAGE1_SHORT_MEETING_MAX_UTTERANCES: ${JITSI_STAGE1_SHORT_MEETING_MAX_UTTERANCES:-6}
+      JITSI_UPLOAD_STAGE1_ARTIFACTS: ${JITSI_UPLOAD_STAGE1_ARTIFACTS:-true}
+      JITSI_STAGE1_OBJECT_PREFIX: ${JITSI_STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    ports:
+      - "${INGEST_PORT:-9099}:9000"
+    volumes:
+      - /mnt/block/user-behaviour/received_transcripts:/mnt/block/user-behaviour/received_transcripts
+      - /mnt/block/user-behaviour/parsed_transcripts:/mnt/block/user-behaviour/parsed_transcripts
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/ingest_logs/jitsi_transcript:/mnt/block/ingest_logs/jitsi_transcript
+      - ${HOME}/.config/rclone:/config/rclone:ro
     networks:
       - recap-net
 
-  data-generator:
-    build: ./data-pipeline
-    command: python data_generator.py
+  db_task_worker:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: db_task_worker
     restart: unless-stopped
-    depends_on:
-      - serving-api
-      - postgres
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      SERVING_API_URL: http://serving-api:8000
-    networks:
-      - recap-net
-    profiles:
-      - emulated-traffic   # docker compose --profile emulated-traffic up -d data-generator
-
-  batch-pipeline:
-    build: ./data-pipeline
-    command: python batch_compile.py
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_USER: ${MINIO_USER:-minioadmin}
-      MINIO_PASSWORD: ${MINIO_PASSWORD}
-      OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
-      TOKENIZERS_PARALLELISM: "false"
-      DATASET_VERSION: "2"
-      RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DB_TASK_LOG_DIR: /mnt/block/ingest_logs/db_task_worker
+      DB_TASK_POLL_INTERVAL_SECONDS: ${DB_TASK_POLL_INTERVAL_SECONDS:-5}
+      DB_TASK_FULL_SCAN_INTERVAL_SECONDS: ${DB_TASK_FULL_SCAN_INTERVAL_SECONDS:-300}
+      DB_TASK_BATCH_SIZE: ${DB_TASK_BATCH_SIZE:-25}
+      DB_TASK_FULL_SCAN_LIMIT: ${DB_TASK_FULL_SCAN_LIMIT:-0}
+      DB_TASK_STAGE1_BUILD_ENABLED: ${DB_TASK_STAGE1_BUILD_ENABLED:-true}
+      DB_TASK_STAGE1_FORWARD_ENABLED: ${DB_TASK_STAGE1_FORWARD_ENABLED:-true}
+      DB_TASK_STAGE2_BUILD_ENABLED: ${DB_TASK_STAGE2_BUILD_ENABLED:-true}
+      DB_TASK_STAGE2_FORWARD_ENABLED: ${DB_TASK_STAGE2_FORWARD_ENABLED:-true}
+      DB_TASK_USER_SUMMARY_ENABLED: ${DB_TASK_USER_SUMMARY_ENABLED:-true}
+      DB_TASK_MEETING_VALIDITY_ENABLED: ${DB_TASK_MEETING_VALIDITY_ENABLED:-true}
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE1_BUILD_MAX_ATTEMPTS: ${STAGE1_BUILD_MAX_ATTEMPTS:-8}
+      STAGE1_FORWARD_MAX_ATTEMPTS: ${STAGE1_FORWARD_MAX_ATTEMPTS:-8}
+      STAGE2_BUILD_MAX_ATTEMPTS: ${STAGE2_BUILD_MAX_ATTEMPTS:-8}
+      STAGE2_FORWARD_MAX_ATTEMPTS: ${STAGE2_FORWARD_MAX_ATTEMPTS:-8}
+      USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS: ${USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_STALE_AFTER_SECONDS: ${WORKFLOW_TASK_STALE_AFTER_SECONDS:-600}
+    command: ["python", "-m", "proj07_services.workers.db_task_worker"]
+    volumes:
+      - /mnt/block/ingest_logs/db_task_worker:/mnt/block/ingest_logs/db_task_worker
     networks:
       - recap-net
-    profiles:
-      - retrain   # docker compose --profile retrain run batch-pipeline
+
+  stage1_payload_service:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: stage1_payload_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      STAGE1_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_payload_service
+      STAGE1_BUILD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE1_BUILD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      STAGE1_WINDOW_SIZE: ${STAGE1_WINDOW_SIZE:-7}
+      STAGE1_TRANSITION_INDEX: ${STAGE1_TRANSITION_INDEX:-3}
+      STAGE1_MIN_UTTERANCE_CHARS: ${STAGE1_MIN_UTTERANCE_CHARS:-20}
+      STAGE1_MAX_WORDS_PER_UTTERANCE: ${STAGE1_MAX_WORDS_PER_UTTERANCE:-50}
+      STAGE1_MIN_INFERENCE_UTTERANCES: ${STAGE1_MIN_INFERENCE_UTTERANCES:-2}
+      STAGE1_SHORT_MEETING_MAX_UTTERANCES: ${STAGE1_SHORT_MEETING_MAX_UTTERANCES:-6}
+      STAGE1_UPLOAD_ARTIFACTS: ${STAGE1_UPLOAD_ARTIFACTS:-true}
+      STAGE1_OBJECT_PREFIX: ${STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE1_BUILD_TIMEOUT_SECONDS: ${STAGE1_BUILD_TIMEOUT_SECONDS:-300}
+      STAGE1_FORWARD_MAX_ATTEMPTS: ${STAGE1_FORWARD_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "-m", "proj07_services.workers.stage1_payload_service"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/ingest_logs/stage1_payload_service:/mnt/block/ingest_logs/stage1_payload_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - recap-net
+
+  stage1_forward_service:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: stage1_forward_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      STAGE1_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_forward_service
+      STAGE1_FORWARD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE1_FORWARD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      STAGE1_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage1
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE1_FORWARD_URL: ${STAGE1_FORWARD_URL:-http://serving-api:8000/segment}
+      STAGE1_FORWARD_PAYLOAD_FORMAT: ${STAGE1_FORWARD_PAYLOAD_FORMAT:-requests_json}
+      STAGE1_FORWARD_TIMEOUT_SECONDS: ${STAGE1_FORWARD_TIMEOUT_SECONDS:-300}
+      STAGE1_RESPONSE_PREFIX: ${STAGE1_RESPONSE_PREFIX:-production/inference_responses/stage1}
+      STAGE1_FORWARD_UPLOAD_ARTIFACTS: ${STAGE1_FORWARD_UPLOAD_ARTIFACTS:-true}
+      STAGE2_BUILD_MAX_ATTEMPTS: ${STAGE2_BUILD_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "-m", "proj07_services.workers.stage1_forward_service"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/user-behaviour/inference_responses/stage1:/mnt/block/user-behaviour/inference_responses/stage1
+      - /mnt/block/ingest_logs/stage1_forward_service:/mnt/block/ingest_logs/stage1_forward_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - recap-net
+
+  stage2_input_service:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: stage2_input_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      STAGE2_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_input_service
+      STAGE2_BUILD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE2_BUILD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
+      STAGE1_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage1
+      STAGE2_INPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage2
+      SEGMENTS_ROOT: /mnt/block/user-behaviour/reconstructed_segments
+      STAGE2_BOUNDARY_THRESHOLD: ${STAGE2_BOUNDARY_THRESHOLD:-0.5}
+      STAGE2_UPLOAD_ARTIFACTS: ${STAGE2_UPLOAD_ARTIFACTS:-true}
+      STAGE2_OBJECT_PREFIX: ${STAGE2_OBJECT_PREFIX:-production/inference_requests/stage2}
+      SEGMENTS_PREFIX: ${SEGMENTS_PREFIX:-production/reconstructed_segments}
+      STAGE2_FORWARD_MAX_ATTEMPTS: ${STAGE2_FORWARD_MAX_ATTEMPTS:-8}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "-m", "proj07_services.workers.stage2_input_service"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
+      - /mnt/block/user-behaviour/inference_responses/stage1:/mnt/block/user-behaviour/inference_responses/stage1
+      - /mnt/block/user-behaviour/inference_requests/stage2:/mnt/block/user-behaviour/inference_requests/stage2
+      - /mnt/block/user-behaviour/reconstructed_segments:/mnt/block/user-behaviour/reconstructed_segments
+      - /mnt/block/ingest_logs/stage2_input_service:/mnt/block/ingest_logs/stage2_input_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - recap-net
+
+  stage2_forward_service:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: stage2_forward_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      STAGE2_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_forward_service
+      STAGE2_FORWARD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE2_FORWARD_WORKER_POLL_INTERVAL_SECONDS:-5}
+      STAGE2_INPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage2
+      STAGE2_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage2
+      STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
+      STAGE2_FORWARD_URL: ${STAGE2_FORWARD_URL:-http://serving-api:8000/summarize}
+      STAGE2_FORWARD_PAYLOAD_FORMAT: ${STAGE2_FORWARD_PAYLOAD_FORMAT:-segment_json}
+      STAGE2_FORWARD_TIMEOUT_SECONDS: ${STAGE2_FORWARD_TIMEOUT_SECONDS:-300}
+      STAGE2_RESPONSE_PREFIX: ${STAGE2_RESPONSE_PREFIX:-production/inference_responses/stage2}
+      STAGE2_MODEL_NAME: ${STAGE2_MODEL_NAME:-stage2-summarizer}
+      STAGE2_MODEL_VERSION: ${STAGE2_MODEL_VERSION:-}
+      STAGE2_PROMPT_VERSION: ${STAGE2_PROMPT_VERSION:-}
+      STAGE2_FORWARD_UPLOAD_ARTIFACTS: ${STAGE2_FORWARD_UPLOAD_ARTIFACTS:-true}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "-m", "proj07_services.workers.stage2_forward_service"]
+    volumes:
+      - /mnt/block/user-behaviour/inference_requests/stage2:/mnt/block/user-behaviour/inference_requests/stage2
+      - /mnt/block/user-behaviour/inference_responses/stage2:/mnt/block/user-behaviour/inference_responses/stage2
+      - /mnt/block/ingest_logs/stage2_forward_service:/mnt/block/ingest_logs/stage2_forward_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - recap-net
+
+  user_summary_materialize_service:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: user_summary_materialize_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      USER_SUMMARY_WORKER_LOG_DIR: /mnt/block/ingest_logs/user_summary_materialize_service
+      USER_SUMMARY_WORKER_POLL_INTERVAL_SECONDS: ${USER_SUMMARY_WORKER_POLL_INTERVAL_SECONDS:-5}
+      USER_SUMMARY_OUTPUT_ROOT: /mnt/block/user-behaviour/user_summary_edits
+      USER_SUMMARY_OBJECT_PREFIX: ${USER_SUMMARY_OBJECT_PREFIX:-production/summary_edits}
+      USER_SUMMARY_UPLOAD_ARTIFACTS: ${USER_SUMMARY_UPLOAD_ARTIFACTS:-true}
+      WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS: ${WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_BASE_SECONDS: ${WORKFLOW_TASK_BACKOFF_BASE_SECONDS:-15}
+      WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "-m", "proj07_services.workers.user_summary_materialize_service"]
+    volumes:
+      - /mnt/block/user-behaviour/user_summary_edits:/mnt/block/user-behaviour/user_summary_edits
+      - /mnt/block/ingest_logs/user_summary_materialize_service:/mnt/block/ingest_logs/user_summary_materialize_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - recap-net
+
+  retraining_dataset_service:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: retraining_dataset_service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      RETRAINING_DATASET_WORKER_LOG_DIR: /mnt/block/ingest_logs/retraining_dataset_service
+      RETRAINING_DATASET_WORKER_POLL_INTERVAL_SECONDS: ${RETRAINING_DATASET_WORKER_POLL_INTERVAL_SECONDS:-300}
+      RETRAINING_DATASET_VALID_MEETING_THRESHOLD: ${RETRAINING_DATASET_VALID_MEETING_THRESHOLD:-50}
+      RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD: ${RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD:-500}
+      RETRAINING_DATASET_ADVISORY_LOCK_KEY: ${RETRAINING_DATASET_ADVISORY_LOCK_KEY:-700507}
+      RETRAINING_DATASET_UPLOAD_ARTIFACTS: ${RETRAINING_DATASET_UPLOAD_ARTIFACTS:-true}
+      RETRAINING_DATASET_NAME: ${RETRAINING_DATASET_NAME:-roberta_stage1}
+      RETRAINING_DATASET_ROOT: ${RETRAINING_DATASET_ROOT:-/mnt/block/roberta_stage1}
+      RETRAINING_LOCAL_TMP_ROOT: ${RETRAINING_LOCAL_TMP_ROOT:-/mnt/block/staging/feedback_loop}
+      RETRAINING_FEEDBACK_POOL_PREFIX: ${RETRAINING_FEEDBACK_POOL_PREFIX:-datasets/roberta_stage1_feedback_pool}
+      RETRAINING_DATASET_OBJECT_PREFIX: ${RETRAINING_DATASET_OBJECT_PREFIX:-datasets/roberta_stage1}
+      RETRAINING_DATASET_WINDOW_SIZE: ${RETRAINING_DATASET_WINDOW_SIZE:-7}
+      RETRAINING_DATASET_TRANSITION_INDEX: ${RETRAINING_DATASET_TRANSITION_INDEX:-3}
+      RETRAINING_DATASET_MIN_UTTERANCE_CHARS: ${RETRAINING_DATASET_MIN_UTTERANCE_CHARS:-20}
+      RETRAINING_DATASET_MAX_WORDS_PER_UTTERANCE: ${RETRAINING_DATASET_MAX_WORDS_PER_UTTERANCE:-50}
+      RETRAINING_DATASET_QUALITY_PSI_THRESHOLD: ${RETRAINING_DATASET_QUALITY_PSI_THRESHOLD:-0.2}
+      RETRAINING_DATASET_QUALITY_MAX_DRIFT_SHARE: ${RETRAINING_DATASET_QUALITY_MAX_DRIFT_SHARE:-0.35}
+      RETRAINING_DATASET_QUALITY_MIN_FEATURE_SAMPLES: ${RETRAINING_DATASET_QUALITY_MIN_FEATURE_SAMPLES:-25}
+      RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT: ${RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT:-10}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${BUCKET:-objstore-proj07}
+    command: ["python", "-m", "proj07_services.workers.retraining_dataset_service"]
+    volumes:
+      - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
+      - /mnt/block/roberta_stage1:/mnt/block/roberta_stage1
+      - /mnt/block/ingest_logs/retraining_dataset_service:/mnt/block/ingest_logs/retraining_dataset_service
+      - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - recap-net
+
+  production_drift_monitor:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: production_drift_monitor
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      PRODUCTION_DRIFT_MONITOR_LOG_DIR: /mnt/block/ingest_logs/production_drift_monitor
+      PRODUCTION_DRIFT_MONITOR_REPORT_ROOT: /mnt/block/staging/feedback_loop/production_drift_reports
+      PRODUCTION_DRIFT_MONITOR_POLL_INTERVAL_SECONDS: ${PRODUCTION_DRIFT_MONITOR_POLL_INTERVAL_SECONDS:-900}
+      PRODUCTION_DRIFT_MONITOR_LOOKBACK_HOURS: ${PRODUCTION_DRIFT_MONITOR_LOOKBACK_HOURS:-24}
+      PRODUCTION_DRIFT_MONITOR_MIN_VALID_MEETINGS: ${PRODUCTION_DRIFT_MONITOR_MIN_VALID_MEETINGS:-5}
+      PRODUCTION_DRIFT_MONITOR_DATASET_NAME: ${PRODUCTION_DRIFT_MONITOR_DATASET_NAME:-roberta_stage1}
+      PRODUCTION_DRIFT_MONITOR_DATASET_ROOT: ${PRODUCTION_DRIFT_MONITOR_DATASET_ROOT:-/mnt/block/roberta_stage1}
+      PRODUCTION_DRIFT_MONITOR_WINDOW_SIZE: ${PRODUCTION_DRIFT_MONITOR_WINDOW_SIZE:-7}
+      PRODUCTION_DRIFT_MONITOR_TRANSITION_INDEX: ${PRODUCTION_DRIFT_MONITOR_TRANSITION_INDEX:-3}
+      PRODUCTION_DRIFT_MONITOR_MIN_UTTERANCE_CHARS: ${PRODUCTION_DRIFT_MONITOR_MIN_UTTERANCE_CHARS:-20}
+      PRODUCTION_DRIFT_MONITOR_MAX_WORDS_PER_UTTERANCE: ${PRODUCTION_DRIFT_MONITOR_MAX_WORDS_PER_UTTERANCE:-50}
+      PRODUCTION_DRIFT_MONITOR_PSI_THRESHOLD: ${PRODUCTION_DRIFT_MONITOR_PSI_THRESHOLD:-0.2}
+      PRODUCTION_DRIFT_MONITOR_MAX_DRIFT_SHARE: ${PRODUCTION_DRIFT_MONITOR_MAX_DRIFT_SHARE:-0.35}
+      PRODUCTION_DRIFT_MONITOR_MIN_FEATURE_SAMPLES: ${PRODUCTION_DRIFT_MONITOR_MIN_FEATURE_SAMPLES:-25}
+      PRODUCTION_DRIFT_MONITOR_NUMERIC_BIN_COUNT: ${PRODUCTION_DRIFT_MONITOR_NUMERIC_BIN_COUNT:-10}
+    command: ["python", "-m", "proj07_services.workers.production_drift_monitor"]
+    volumes:
+      - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
+      - /mnt/block/roberta_stage1:/mnt/block/roberta_stage1
+      - /mnt/block/ingest_logs/production_drift_monitor:/mnt/block/ingest_logs/production_drift_monitor
+    networks:
+      - recap-net
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # 4. SERVING + UI — Shruti's API + Mahima's Recap UI
+  # 4. SERVING — Ray Serve (RoBERTa segmenter + Mistral summarizer)
+  # UI served at http://<ip>:8000/ui by Ray Serve itself
   # ═══════════════════════════════════════════════════════════════════════════
 
   serving-api:
-    build: ./serving
+    build:
+      context: ./serving/ray_serve
+      dockerfile: Dockerfile.ray
+    container_name: jitsi-ray-serve
     restart: unless-stopped
     depends_on:
       postgres:
@@ -295,30 +513,41 @@ services:
       mlflow:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      # MLflow for model loading — port 5000
+      MODEL_PATH: /models/roberta-seg
+      LLM_MODEL_PATH: /models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+      BOUNDARY_THRESHOLD: "0.5"
+      MAX_SEGMENT_UTTERANCES: "200"
+      RAY_DEDUP_LOGS: "0"
+      MODEL_VERSION: roberta-base-v0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      MODEL_NAME: jitsi-topic-segmenter
       MODEL_ALIAS: production
-      # MinIO for local artifact cache
-      AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      MODEL_RELOAD_INTERVAL_SECONDS: "300"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
     ports:
-      - "8001:8000"
-    networks:
-      - recap-net
-
-  recap-ui:
-    image: nginx:alpine
-    restart: unless-stopped
+      - "8000:8000"    # API: /health /segment /summarize /recap /ui /metrics
+      - "8265:8265"    # Ray Dashboard
+      - "9091:9091"    # Metrics probe
+    shm_size: '2gb'
     volumes:
-      - ./recap-ui/index.html:/usr/share/nginx/html/index.html:ro
-      - ./recap-ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    ports:
-      - "8085:80"
-    depends_on:
-      - serving-api
+      - ./serving/models:/models
+      - ray_tmp:/tmp/ray
+      - recap_data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
     networks:
       - recap-net
 
@@ -335,19 +564,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ray-head:
-        condition: service_started
+      serving-api:
+        condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
+      RAY_STORAGE: /mnt/block/ray-checkpoints
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
       MLFLOW_TRACKING_URI: http://mlflow:5000
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_ENDPOINT_URL: http://minio:9000
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      MODEL_NAME: jitsi-topic-segmenter
       TOKENIZERS_PARALLELISM: "false"
       DATASET_VERSION: "2"
     volumes:
@@ -381,8 +613,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID} # TACC — for MLflow artifacts
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY} # TACC
       AWS_ENDPOINT_URL: http://minio:9000
-      RAY_ADDRESS: ray-head:6379
-      RAY_STORAGE: /mnt/block/ray-checkpoints # block volume - no S3 needed
+      RAY_STORAGE: /mnt/block/ray-checkpoints
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       MODEL_NAME: jitsi-topic-segmenter
       MLFLOW_AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
@@ -400,33 +631,113 @@ services:
     profiles:
       - retrain   # docker compose --profile retrain run retrain-job
 
+  # Runs online_eval.py hourly — logs correction rate / FPR / FNR to MLflow.
+  # Keeps the online-evaluation experiment current for the demo.
+  # Start with: docker compose --profile monitoring up -d online-eval
+  online-eval:
+    build: ./train
+    container_name: online-eval
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "while true; do
+        python /app/online_eval.py --days 7;
+        echo '[online-eval] run complete, sleeping 3600s';
+        sleep 3600;
+      done"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
+    volumes:
+      - /mnt/block:/mnt/block
+    networks:
+      - recap-net
+    profiles:
+      - monitoring  # docker compose --profile monitoring up -d online-eval
+
   # ═══════════════════════════════════════════════════════════════════════════
-  # 6. MONITORING — Prometheus + Grafana
+  # 6. MONITORING — Prometheus + Grafana + Alertmanager + Node Exporter
   # ═══════════════════════════════════════════════════════════════════════════
 
   prometheus:
-    image: prom/prometheus:v2.53.0
+    image: prom/prometheus:v2.50.1
+    container_name: jitsi-prometheus
     restart: unless-stopped
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
     ports:
       - "9090:9090"
+    volumes:
+      - ./serving/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./serving/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    depends_on:
+      - serving-api
     networks:
       - recap-net
 
   grafana:
-    image: grafana/grafana:11.1.0
+    image: grafana/grafana:10.3.3
+    container_name: jitsi-grafana
     restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - grafana_data:/var/lib/grafana
     ports:
       - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-jitsi2026}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/jitsi-serving.json
+    volumes:
+      - ./serving/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./serving/monitoring/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+    networks:
+      - recap-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: jitsi-alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./serving/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - recap-net
+
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: jitsi-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
     networks:
       - recap-net
 

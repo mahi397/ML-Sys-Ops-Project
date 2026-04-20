@@ -163,12 +163,12 @@ cd ML-Sys-Ops-Project
 cp .env.example .env
 # edit .env: FLOATING_IP, AWS keys, POSTGRES_PASSWORD, MINIO_PASSWORD
 
-# 2. Run training setup script
-chmod +x train/setup_train.sh
-bash train/setup_train.sh
+# 2. Run unified setup script (from repo root)
+chmod +x setup.sh
+bash setup.sh
 ```
 
-`setup_train.sh` handles: Docker install, rclone install + validation, NVIDIA toolkit, block storage layout, data staging from object storage, Postgres init + schema migrations, `dataset_versions` seeding, MLflow startup + model registry restore, Ray head + retrain-watcher startup.
+`setup.sh` handles: Docker install, rclone install + validation, NVIDIA toolkit, block storage layout, data staging from object storage, ML model downloads (RoBERTa + Mistral), Postgres init + schema migrations, `dataset_versions` seeding, MLflow startup + model registry restore, full `docker compose up -d`. Optionally deploys Jitsi with `DEPLOY_JITSI=true bash setup.sh`.
 
 **Prerequisites before running setup:**
 - `~/.config/rclone/rclone.conf` configured with `chi_tacc` remote (CHI@TACC S3)
@@ -418,4 +418,11 @@ docker compose exec retrain-watcher python /app/online_eval.py \
     --since 2026-04-01 --until 2026-04-20
 ```
 
-Run `online_eval.py` on a schedule (e.g. daily) to track model quality over time. If alerts are raised, consider triggering a manual retrain or rolling back to `fallback`.
+**As a persistent service (runs every hour, logs to MLflow automatically):**
+```bash
+docker compose --profile monitoring up -d online-eval
+docker compose logs online-eval -f
+```
+Results appear in MLflow under the `online-evaluation` experiment at `http://<IP>:5000`.
+
+Run `online_eval.py` on demand or keep `online-eval` service running to track model quality over time. If `online_correction_rate > 0.15`, consider triggering a manual retrain or rolling back to `fallback`.
