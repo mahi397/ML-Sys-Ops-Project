@@ -170,7 +170,11 @@ MODELS_DIR="${REPO_DIR}/serving/models"
 mkdir -p "${MODELS_DIR}"
 
 python3 -m pip --version &>/dev/null || sudo apt-get install -y -qq python3-pip
-_pip() { python3 -m pip "$@" 2>/dev/null || python3 -m pip --break-system-packages "$@"; }
+_pip() {
+    local sub="$1"; shift
+    python3 -m pip "$sub" "$@" 2>/dev/null || \
+    python3 -m pip "$sub" --break-system-packages "$@"
+}
 
 if [[ ! -d "${MODELS_DIR}/roberta-seg" || ! -f "${MODELS_DIR}/roberta-seg/config.json" ]]; then
     info "Downloading RoBERTa base weights (~500MB)..."
