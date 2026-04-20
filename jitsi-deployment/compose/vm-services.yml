@@ -2,7 +2,7 @@ services:
   web:
     image: local/jitsi-web-custom:${JITSI_IMAGE_VERSION:-stable-10741}
     build:
-      context: ..
+      context: ./jitsi-deployment
       dockerfile: docker/web/Dockerfile
       args:
         JITSI_IMAGE_VERSION: ${JITSI_IMAGE_VERSION:-stable-10741}
@@ -10,7 +10,7 @@ services:
   prosody:
     image: local/jitsi-prosody-custom:${JITSI_IMAGE_VERSION:-stable-10741}
     build:
-      context: ..
+      context: ./jitsi-deployment
       dockerfile: docker/prosody/Dockerfile
       args:
         JITSI_IMAGE_VERSION: ${JITSI_IMAGE_VERSION:-stable-10741}
@@ -18,7 +18,7 @@ services:
   meeting-portal-app:
     image: local/meeting-portal-app:${DEPLOYMENT_IMAGE_TAG:-vm}
     build:
-      context: ..
+      context: ./jitsi-deployment
       dockerfile: docker/meeting-portal-app/Dockerfile
     restart: ${RESTART_POLICY:-unless-stopped}
     volumes:
@@ -47,7 +47,7 @@ services:
   transcript-uploader:
     image: local/transcript-uploader:${DEPLOYMENT_IMAGE_TAG:-vm}
     build:
-      context: ..
+      context: ./jitsi-deployment
       dockerfile: docker/transcript-uploader/Dockerfile
     restart: ${RESTART_POLICY:-unless-stopped}
     depends_on:

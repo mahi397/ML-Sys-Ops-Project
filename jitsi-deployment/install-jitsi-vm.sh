@@ -37,6 +37,20 @@ fatal() {
     exit 1
 }
 
+get_user_home() {
+    local user_name="$1"
+    local user_home
+
+    if [ -z "$user_name" ]; then
+        return 1
+    fi
+
+    user_home="$(eval "printf '%s' ~$user_name" 2>/dev/null || true)"
+    [ -n "$user_home" ] || return 1
+
+    printf '%s\n' "$user_home"
+}
+
 fetch_text_url() {
     local url="$1"
     local description="$2"
@@ -722,6 +736,29 @@ download_vosk_model() {
 }
 
 warn_if_optional_files_missing() {
+    local target source source_home
+
+    target="${CONFIG_ROOT}/rclone/rclone.conf"
+    if [ ! -f "$target" ]; then
+        source=""
+
+        if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+            source_home="$(get_user_home "${SUDO_USER}" || true)"
+            if [ -n "$source_home" ] && [ -f "${source_home}/.config/rclone/rclone.conf" ]; then
+                source="${source_home}/.config/rclone/rclone.conf"
+            fi
+        fi
+
+        if [ -z "$source" ] && [ -f "${HOME}/.config/rclone/rclone.conf" ]; then
+            source="${HOME}/.config/rclone/rclone.conf"
+        fi
+
+        if [ -n "$source" ]; then
+            log "Copying detected rclone config into ${target}"
+            install -D -m 600 "$source" "$target"
+        fi
+    fi
+
     if [ ! -f "${CONFIG_ROOT}/rclone/rclone.conf" ]; then
         warn "No rclone config found at ${CONFIG_ROOT}/rclone/rclone.conf. Meeting portal recap artifact fetches that depend on rclone will fail until it is added."
     fi

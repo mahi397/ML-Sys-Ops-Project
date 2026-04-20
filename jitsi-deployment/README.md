@@ -111,7 +111,7 @@ If `PUBLIC_URL` or `JVB_ADVERTISE_IPS` are left blank, the installer will try to
 /mnt/block/jitsi/config/rclone/rclone.conf
 ```
 
-The app can still start without it, but artifact lookups that depend on `rclone` will fail until it exists.
+If you run the installer with `sudo` and already have `~/.config/rclone/rclone.conf` for that user on the VM, the installer will copy it into the deployed config root automatically. The app can still start without it, but artifact lookups that depend on `rclone` will fail until it exists.
 
 ## One command
 
