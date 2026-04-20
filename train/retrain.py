@@ -64,6 +64,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 #from nltk.metrics.segmentation import windowdiff, pk as pk_metric
 
 import ray
+import pyarrow.fs as pafs
 from ray import train
 from ray.train import RunConfig, FailureConfig, CheckpointConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
@@ -1220,6 +1221,31 @@ def _log_to_audit_db(event_type: str, details: dict):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Ray storage resolution — MinIO S3 via pyarrow (separate from MLflow/chi.tacc)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _resolve_storage(storage_path: str):
+    """Return (path, filesystem) for Ray RunConfig.
+
+    If RAY_STORAGE is s3:// and MINIO_ENDPOINT_URL is set, builds a pyarrow
+    S3FileSystem pointed at MinIO using MINIO_ACCESS_KEY / MINIO_SECRET_KEY.
+    MLflow artifact ops are unaffected — they use AWS_ACCESS_KEY_ID / chi.tacc.
+    """
+    endpoint_url = os.environ.get("MINIO_ENDPOINT_URL", "")
+    if not (storage_path.startswith("s3://") and endpoint_url):
+        return storage_path, None
+    scheme = "https" if endpoint_url.startswith("https") else "http"
+    endpoint = endpoint_url.replace("https://", "").replace("http://", "")
+    fs = pafs.S3FileSystem(
+        access_key=os.environ.get("MINIO_ACCESS_KEY", ""),
+        secret_key=os.environ.get("MINIO_SECRET_KEY", ""),
+        endpoint_override=endpoint,
+        scheme=scheme,
+    )
+    return storage_path[len("s3://"):], fs
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1261,6 +1287,11 @@ def main():
     else:
         ray.init(ignore_reinit_error=True, log_to_driver=True)
 
+    ray_storage_path, ray_storage_fs = _resolve_storage(cfg["ray_storage_path"])
+    run_cfg_kwargs = {"storage_path": ray_storage_path}
+    if ray_storage_fs is not None:
+        run_cfg_kwargs["storage_filesystem"] = ray_storage_fs
+
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,
         train_loop_config=cfg,
@@ -1271,9 +1302,9 @@ def main():
         ),
         run_config=RunConfig(
             name=f"retrain-{int(time.time())}",
-            storage_path=cfg["ray_storage_path"],
             failure_config=FailureConfig(max_failures=cfg["ray_max_failures"]),
             checkpoint_config=CheckpointConfig(num_to_keep=2),
+            **run_cfg_kwargs,
         ),
     )
 

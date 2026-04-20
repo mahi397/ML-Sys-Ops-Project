@@ -572,15 +572,19 @@ services:
         condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
-      RAY_STORAGE: /mnt/block/ray-checkpoints
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # chi.tacc credentials — MLflow run/model logging goes through http://mlflow:5000 proxy
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_ENDPOINT_URL: http://minio:9000
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
+      # MinIO credentials — Ray checkpoint storage only (read by _resolve_storage() in retrain.py)
+      RAY_STORAGE: s3://ray-checkpoints
+      MINIO_ACCESS_KEY: ${MINIO_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_PASSWORD}
+      MINIO_ENDPOINT_URL: http://minio:9000
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       MODEL_NAME: jitsi-topic-segmenter
@@ -611,18 +615,16 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      MINIO_ENDPOINT: http://minio:9000
-      # MinIO creds only for MLflow server proxy
-      MINIO_USER: ${MINIO_USER:-minioadmin}
-      MINIO_PASSWORD: ${MINIO_PASSWORD}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID} # TACC — for MLflow artifacts
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY} # TACC
-      AWS_ENDPOINT_URL: http://minio:9000
-      RAY_STORAGE: /mnt/block/ray-checkpoints
+      # chi.tacc credentials — MLflow run/model logging goes through http://mlflow:5000 proxy
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
+      # MinIO credentials — Ray checkpoint storage only (read by _resolve_storage() in retrain.py)
+      RAY_STORAGE: s3://ray-checkpoints
+      MINIO_ACCESS_KEY: ${MINIO_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_PASSWORD}
+      MINIO_ENDPOINT_URL: http://minio:9000
       MODEL_NAME: jitsi-topic-segmenter
-      MLFLOW_AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      MLFLOW_AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       TOKENIZERS_PARALLELISM: "false"
       DATASET_VERSION: "2"
