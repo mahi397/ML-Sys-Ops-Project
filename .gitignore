@@ -12,3 +12,9 @@ __pycache__/
 .idea/
 
 ref/
+
+# ML model weights — downloaded by setup.sh, too large for git
+serving/models/roberta-seg/
+serving/models/*.gguf
+serving/models/*.bin
+serving/models/*.safetensors
