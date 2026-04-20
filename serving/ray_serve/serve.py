@@ -448,12 +448,11 @@ class MetricsDeployment:
             self.gpu_mem_used.set(info.used / 1024 / 1024)
             self.gpu_mem_total.set(info.total / 1024 / 1024)
         except Exception:
-            # fallback to torch (only sees current process)
             try:
                 if torch.cuda.is_available():
                     self.gpu_mem_used.set(torch.cuda.memory_allocated(0) / 1024 / 1024)
                     self.gpu_mem_total.set(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024)
-            except:
+            except Exception:
                 pass
         self.cpu_util.set(psutil.cpu_percent())
         self.ram_used.set(psutil.virtual_memory().used / 1024 / 1024)

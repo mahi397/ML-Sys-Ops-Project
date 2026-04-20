@@ -44,13 +44,13 @@ groups:
 
       - alert: ServiceDown
         expr: >
-          absent(rate(jitsi_requests_total{status="success"}[2m]))
-          or rate(jitsi_requests_total{status="success"}[2m]) == 0
-        for: 2m
+          absent(jitsi_requests_total{status="success"})
+        for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "No successful requests in 2 minutes"
+          summary: "jitsi_requests_total metric absent — Ray Serve may be down"
+          description: "Metric disappeared entirely. Service is likely crashed or not exporting metrics."
 
   - name: resources
     rules:
@@ -91,14 +91,14 @@ groups:
           summary: "Median boundary confidence < 0.3 — possible data drift"
 
       - alert: RetrainingThresholdReached
-        expr: jitsi_pending_corrections >= 50
+        expr: jitsi_pending_corrections >= 500
         for: 5m
         labels:
           severity: warning
           action: retrain
         annotations:
           summary: "500 corrections accumulated — trigger retraining"
-
+          
   - name: user_feedback_drift
     rules:
       - alert: HighBoundaryCorrections
