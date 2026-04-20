@@ -67,6 +67,7 @@ import ray
 from ray import train
 from ray.train import RunConfig, FailureConfig, CheckpointConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
+import pyarrow.fs as pafs
 
 from transformers import (
     AutoTokenizer,
@@ -1219,6 +1220,30 @@ def _log_to_audit_db(event_type: str, details: dict):
         log.warning(f"Audit log write failed (run add_mlops_tables.sql if missing): {e}")
 
 
+def _resolve_storage(storage_path: str):
+    """Return (path, filesystem) for RunConfig.
+
+    For s3:// URIs with a custom AWS_ENDPOINT_URL (e.g. MinIO), pyarrow does
+    not pick up AWS_ENDPOINT_URL automatically.  Build an explicit S3FileSystem
+    so Ray writes checkpoints to the right endpoint instead of real AWS S3.
+    Falls back to (path, None) for local paths or real AWS S3.
+    """
+    endpoint_url = os.environ.get("AWS_ENDPOINT_URL", "")
+    if not (storage_path.startswith("s3://") and endpoint_url):
+        return storage_path, None
+
+    scheme = "https" if endpoint_url.startswith("https") else "http"
+    endpoint = endpoint_url.replace("https://", "").replace("http://", "")
+    fs = pafs.S3FileSystem(
+        access_key=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+        secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+        endpoint_override=endpoint,
+        scheme=scheme,
+    )
+    # RunConfig expects path without s3:// when filesystem is explicit
+    return storage_path[len("s3://"):], fs
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1261,6 +1286,8 @@ def main():
     else:
         ray.init(ignore_reinit_error=True, log_to_driver=True)
 
+    storage_path, storage_fs = _resolve_storage(cfg["ray_storage_path"])
+
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,
         train_loop_config=cfg,
@@ -1271,7 +1298,8 @@ def main():
         ),
         run_config=RunConfig(
             name=f"retrain-{int(time.time())}",
-            storage_path=cfg["ray_storage_path"],
+            storage_path=storage_path,
+            storage_filesystem=storage_fs,
             failure_config=FailureConfig(max_failures=cfg["ray_max_failures"]),
             checkpoint_config=CheckpointConfig(num_to_keep=2),
         ),

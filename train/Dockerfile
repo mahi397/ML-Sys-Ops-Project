@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir \
     accelerate==0.30.0 \
     nltk==3.8.1 \
     "ray[train,default]==2.54.0" \
+    # pyarrow>=14.0.0 \
     psycopg2-binary==2.9.9
 
 # RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
