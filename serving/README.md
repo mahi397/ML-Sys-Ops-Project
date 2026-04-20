@@ -4,6 +4,18 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 
 ---
 
+## Quick Access
+
+| Service | URL | Credentials |
+|---|---|---|
+| API / Health | http://192.5.87.115:8000/health | — |
+| Recap UI | http://192.5.87.115:8000/ui | — |
+| Grafana | http://192.5.87.115:3000 | `admin` / `jitsi2026` |
+| Prometheus | http://192.5.87.115:9090 | — |
+| Ray Dashboard | http://192.5.87.115:8265 | — |
+
+---
+
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
@@ -404,18 +416,23 @@ Prometheus scrapes `ray-serve:8000/metrics` every 5 seconds.
 
 **Alert rules:**
 
-| Alert | Condition |
-|---|---|
-| `HighErrorRate` | Error rate > 5% for 2 min |
-| `ServiceDown` | No requests for 5 min |
-| `SegmentationLatencyHigh` | p95 > 2s for 5 min |
-| `SummarizationLatencyHigh` | p95 > 30s for 5 min |
-| `ModelNotLoaded` | `jitsi_model_loaded == 0` |
-| `LowConfidenceScores` | avg confidence < 0.3 |
-| `GPUMemoryHigh` | GPU usage > 90% |
-| `HighBoundaryCorrections` | User corrections > 10/min |
+| Alert | Condition | Severity |
+|---|---|---|
+| `SegmentationLatencyHigh` | Segmentation p95 > 2s for 2 min | critical + rollback |
+| `SummarizationLatencyHigh` | Summarization p95 > 30s for 2 min | warning |
+| `RecapLatencyHigh` | Full recap p95 > 5 min for 2 min | critical + rollback |
+| `HighErrorRate` | Error rate > 5% for 3 min | critical + rollback |
+| `ServiceDown` | `jitsi_requests_total` metric absent for 10 min | critical |
+| `GPUMemoryHigh` | GPU memory > 21504 MB (87.5% of 24 GB) for 5 min | warning |
+| `CPUHigh` | CPU > 85% for 5 min | warning |
+| `ModelNotLoaded` | `jitsi_model_loaded == 0` for 1 min | critical |
+| `LowConfidenceScores` | Median boundary confidence < 0.3 for 3 min | warning + investigate |
+| `RetrainingThresholdReached` | 500 corrections accumulated for 5 min | warning + retrain |
+| `HighBoundaryCorrections` | 10+ boundary removals in 1 hour | warning + investigate |
+| `FeedbackDriftSpiking` | >30% of recap segments manually corrected for 5 min | critical + investigate |
 
 ---
+
 ## What We Tried & Why We Use Ray Serve
 
 ### Approach 1 — FastAPI (baseline)
@@ -447,21 +464,6 @@ From the project perspective — Jitsi sends a full meeting transcript and expec
 ## FastAPI Baseline
 
 Located in `app/`. Stateless single-process serving kept for benchmarking comparison against Ray Serve.
-
-**Serving modes** (via `SERVING_MODE` env var):
-
-| Mode | Backend | Use Case |
-|---|---|---|
-| `pytorch` | Native PyTorch | GPU reference |
-| `onnx_cpu` | ONNX Runtime CPU | CPU-only deployment |
-| `onnx_gpu` | ONNX Runtime CUDA | GPU with ONNX optimization |
-
-Key difference from Ray Serve: no batching, no deployment-to-deployment calls, no MLflow integration, no persistence.
-
-## FastAPI Baseline
-
-Located in `app/`. Stateless single-process serving kept for benchmarking comparison against Ray Serve.
-
 
 **Serving modes** (via `SERVING_MODE` env var):
 
@@ -521,6 +523,17 @@ bash setup.sh
 
 `setup.sh` installs Docker, NVIDIA Container Toolkit, downloads model weights, and starts all containers.
 
+**Chameleon-specific prerequisites (bare-metal only):**
+```bash
+# python3-pip is not pre-installed on Chameleon bare-metal images
+sudo apt install python3-pip -y
+
+# setup.sh step [5] (model download) uses pip — must be on PATH first
+# After install, re-run setup.sh or run the download step manually:
+pip3 install transformers torch --quiet
+python3 -c "from transformers import RobertaTokenizer; RobertaTokenizer.from_pretrained('roberta-base')"
+```
+
 ### Rebuild after code changes
 
 ```bash
@@ -544,7 +557,7 @@ curl http://192.5.87.115:9090/api/v1/targets   # Prometheus targets
 
 | Variable | Default | Description |
 |---|---|---|
-|| `MLFLOW_TRACKING_URI` | `http://192.5.86.182:5000` | MLflow server URL ||
+| `MLFLOW_TRACKING_URI` | `http://192.5.86.182:5000` | MLflow server URL |
 | `MLFLOW_MODEL_NAME` | `jitsi-topic-segmenter` | Registered model name |
 | `MODEL_ALIAS` | `production` | MLflow alias to load (`production` or `fallback`) |
 | `MODEL_RELOAD_INTERVAL_SECONDS` | `300` | Hot-reload poll interval (seconds) |
@@ -570,17 +583,18 @@ python3 benchmark/benchmark.py \
   --label pytorch_gpu --n 200
 ```
 
-**Observed performance — Quadro RTX 6000:**
+**Observed performance — Quadro RTX 6000 (measured on Chameleon node `192.5.87.115`):**
 
-| Metric | Value |
-|---|---|
-| Segmentation p50 | ~100 ms |
-| Segmentation p95 | ~250 ms |
-| Full `/recap` (12 utterances) | ~1.2 s |
-| Throughput | ~10 req/s |
-| GPU memory (segmenter) | ~1 GB |
-| GPU memory (summarizer) | ~5.3 GB |
-| SLA (2s for segmentation) | Never breached ✅ |
+| Metric | Concurrency 1 | Concurrency 5 |
+|---|---|---|
+| Segmentation p50 | 96.4 ms | 157.8 ms |
+| Segmentation p95 | 100.3 ms | 173.2 ms |
+| Throughput | 10.34 req/s | 31.40 req/s |
+| Full `/recap` (12 utterances) | ~1.2 s | — |
+| GPU memory (total, nvidia-smi) | ~6.1 GB | — |
+| SLA (2s for segmentation) | Never breached | Never breached |
+
+> **Note:** `jitsi_gpu_memory_used_mb` currently reads 0 in Grafana. This is a known issue — `torch.cuda.memory_allocated()` returns 0 in MetricsDeployment because it runs in a separate Ray worker process. Actual GPU usage is visible via `nvidia-smi` (~6.1 GB). Fix requires switching to `pynvml` for system-wide GPU queries (not yet applied).
 
 ---
 
@@ -617,9 +631,13 @@ monitoring/
 ```
 
 **Access:**
-- Grafana: `http://<server>:3000` — `admin` / `admin`
-- Prometheus: `http://<server>:9090`
-- Alertmanager: `http://<server>:9093`
+
+| Service | URL | Credentials |
+|---|---|---|
+| Grafana | http://192.5.87.115:3000 | `admin` / `jitsi2026` |
+| Prometheus | http://192.5.87.115:9090 | — |
+| Alertmanager | http://192.5.87.115:9093 | — |
+| Ray Dashboard | http://192.5.87.115:8265 | — |
 
 ---
 
@@ -650,7 +668,7 @@ docker logs jitsi-ray-serve 2>&1 | grep "Ready on"
 ### Grafana showing "No data"
 ```bash
 # Verify Prometheus scrapes port 8000 (not 9091)
-curl -s http://<server>:9090/api/v1/targets | python3 -c "
+curl -s http://192.5.87.115:9090/api/v1/targets | python3 -c "
 import json,sys; t=json.load(sys.stdin)
 [print(tg['scrapeUrl'], tg['health']) for tg in t['data']['activeTargets']]
 "
