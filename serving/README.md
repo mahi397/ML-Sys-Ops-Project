@@ -12,6 +12,7 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 | Recap UI | http://192.5.87.115:8000/ui | — |
 | Grafana | http://192.5.87.115:3000 | `admin` / `jitsi2026` |
 | Prometheus | http://192.5.87.115:9090 | — |
+| Alertmanager | http://192.5.87.115:9093| — |
 | Ray Dashboard | http://192.5.87.115:8265 | — |
 
 ---
@@ -629,15 +630,6 @@ monitoring/
         └── datasources/
             └── prometheus.yml        # Datasource: http://prometheus:9090
 ```
-
-**Access:**
-
-| Service | URL | Credentials |
-|---|---|---|
-| Grafana | http://192.5.87.115:3000 | `admin` / `jitsi2026` |
-| Prometheus | http://192.5.87.115:9090 | — |
-| Alertmanager | http://192.5.87.115:9093 | — |
-| Ray Dashboard | http://192.5.87.115:8265 | — |
 
 ---
 
