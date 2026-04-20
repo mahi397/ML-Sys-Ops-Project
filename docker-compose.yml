@@ -77,6 +77,7 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -99,6 +100,7 @@ services:
   # Add after minio service — bucket creation for both MLflow and Ray
   minio-create-buckets:
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+    container_name: minio-create-buckets
     depends_on:
       minio:
         condition: service_healthy
@@ -123,6 +125,7 @@ services:
   mlflow:
     # Using v3.9.0 to match the lab setup that has historical training runs
     image: ghcr.io/mlflow/mlflow:v3.9.0
+    container_name: mlflow
     restart: unless-stopped
     depends_on:
       postgres:
@@ -557,6 +560,7 @@ services:
 
   retrain-watcher:
     build: ./train
+    container_name: retrain-watcher
     command: retrain_watcher.py
     runtime: nvidia
     shm_size: '10g'
@@ -593,6 +597,7 @@ services:
 
   retrain-job:
     build: ./train
+    container_name: retrain-job
     command: retrain.py
     runtime: nvidia
     shm_size: '10g'
