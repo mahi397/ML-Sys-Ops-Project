@@ -143,6 +143,30 @@ function ensure_writable_dir() {
   fi
 }
 
+function prepare_optional_writable_dir() {
+  local dir_path="$1"
+  local label="${2:-Directory}"
+
+  if mkdir -p "${dir_path}" 2>/dev/null && [[ -d "${dir_path}" && -w "${dir_path}" ]]; then
+    return 0
+  fi
+
+  banner "Skipping ${label} because ${dir_path} is not writable by $(whoami)"
+  return 1
+}
+
+function copy_file_if_absent() {
+  local src_path="$1"
+  local dst_dir="$2"
+  local dst_path="${dst_dir}/$(basename "${src_path}")"
+
+  if [[ -e "${dst_path}" ]]; then
+    return 0
+  fi
+
+  cp "${src_path}" "${dst_path}"
+}
+
 function remote_has_file() {
   local remote_dir="$1"
   local filename="$2"
@@ -238,6 +262,10 @@ function load_runtime_env() {
 }
 
 function postgres_data_initialized() {
+  if [[ -e "${POSTGRES_DATA_DIR}" && ( ! -r "${POSTGRES_DATA_DIR}" || ! -x "${POSTGRES_DATA_DIR}" ) ]]; then
+    return 2
+  fi
+
   if [[ -f "${POSTGRES_DATA_DIR}/PG_VERSION" ]]; then
     return 0
   fi
@@ -246,7 +274,7 @@ function postgres_data_initialized() {
     return 0
   fi
 
-  if [[ -d "${POSTGRES_DATA_DIR}" ]] && find "${POSTGRES_DATA_DIR}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  if [[ -d "${POSTGRES_DATA_DIR}" ]] && find "${POSTGRES_DATA_DIR}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
     return 0
   fi
 
@@ -388,6 +416,9 @@ function apply_runtime_schema_updates() {
 function start_runtime_stack() {
   local running_services=()
   local missing_services=()
+  local missing_core_services=()
+  local missing_runtime_workers=()
+  local postgres_dir_state=1
   local service=""
 
   ensure_no_runtime_name_conflicts
@@ -395,7 +426,12 @@ function start_runtime_stack() {
   if postgres_data_initialized; then
     banner "Detected existing Postgres data at ${POSTGRES_DATA_DIR}; setup will reuse it and apply idempotent schema updates after startup"
   else
-    banner "Postgres data directory is empty at ${POSTGRES_DATA_DIR}; first-start schema bootstrap will run when Postgres comes up"
+    postgres_dir_state=$?
+    if [[ ${postgres_dir_state} -eq 2 ]]; then
+      banner "Postgres data directory exists at ${POSTGRES_DATA_DIR}, but it is not inspectable by $(whoami); setup will continue and rely on container startup state"
+    else
+      banner "Postgres data directory is empty at ${POSTGRES_DATA_DIR}; first-start schema bootstrap will run when Postgres comes up"
+    fi
   fi
 
   while IFS= read -r service; do
@@ -419,15 +455,76 @@ function start_runtime_stack() {
   if [[ ${#missing_services[@]} -eq 0 ]]; then
     banner "All runtime services are already up; skipping docker compose up -d"
   else
-    banner "Ensuring the integrated runtime stack is up from ${PROJ07_RUNTIME_DIR}"
-    (
-      cd "${PROJ07_RUNTIME_DIR}"
-      docker compose up -d
-    )
+    for service in "${missing_services[@]}"; do
+      case "${service}" in
+        postgres|adminer)
+          missing_core_services+=("${service}")
+          ;;
+        *)
+          missing_runtime_workers+=("${service}")
+          ;;
+      esac
+    done
+
+    if [[ ${#missing_core_services[@]} -gt 0 ]]; then
+      banner "Starting core runtime services first: $(join_by ', ' "${missing_core_services[@]}")"
+      (
+        cd "${PROJ07_RUNTIME_DIR}"
+        docker compose up -d "${missing_core_services[@]}"
+      )
+    fi
   fi
 
   wait_for_postgres
   apply_runtime_schema_updates
+
+  if [[ ${#missing_runtime_workers[@]} -gt 0 ]]; then
+    banner "Starting runtime workers after schema updates: $(join_by ', ' "${missing_runtime_workers[@]}")"
+    (
+      cd "${PROJ07_RUNTIME_DIR}"
+      docker compose up -d "${missing_runtime_workers[@]}"
+    )
+  fi
+}
+
+function seed_mock_transcripts() {
+  local transcript=""
+  local seeded_any=0
+  local legacy_seed_enabled=0
+  local final_seed_enabled=0
+
+  banner "Seeding mock Jitsi transcripts into ${LEGACY_TRANSCRIPT_ROOT} and ${FINAL_RECEIVED_TRANSCRIPT_ROOT}"
+
+  if prepare_optional_writable_dir "${LEGACY_TRANSCRIPT_ROOT}" "legacy transcript seed root"; then
+    legacy_seed_enabled=1
+  fi
+  if prepare_optional_writable_dir "${FINAL_RECEIVED_TRANSCRIPT_ROOT}" "received transcript seed root"; then
+    final_seed_enabled=1
+  fi
+
+  if [[ ${legacy_seed_enabled} -eq 0 && ${final_seed_enabled} -eq 0 ]]; then
+    banner "Skipping mock transcript seeding because neither transcript destination is writable"
+    return
+  fi
+
+  for transcript in "${MOCK_JITSI_DIR}"/transcript_*.txt; do
+    if [[ ! -f "${transcript}" ]]; then
+      continue
+    fi
+
+    if [[ ${legacy_seed_enabled} -eq 1 ]]; then
+      copy_file_if_absent "${transcript}" "${LEGACY_TRANSCRIPT_ROOT}"
+      seeded_any=1
+    fi
+    if [[ ${final_seed_enabled} -eq 1 ]]; then
+      copy_file_if_absent "${transcript}" "${FINAL_RECEIVED_TRANSCRIPT_ROOT}"
+      seeded_any=1
+    fi
+  done
+
+  if [[ ${seeded_any} -eq 0 ]]; then
+    banner "No mock Jitsi transcripts were copied because they were already present"
+  fi
 }
 
 require_cmd python3
@@ -497,13 +594,7 @@ stage_ami_corpus_to_object_store
 bootstrap_synthetic_stage1_inputs
 start_runtime_stack
 
-banner "Seeding mock Jitsi transcripts into ${LEGACY_TRANSCRIPT_ROOT} and ${FINAL_RECEIVED_TRANSCRIPT_ROOT}"
-for transcript in "${MOCK_JITSI_DIR}"/transcript_*.txt; do
-  if [[ -f "${transcript}" ]]; then
-    cp -n "${transcript}" "${LEGACY_TRANSCRIPT_ROOT}/"
-    cp -n "${transcript}" "${FINAL_RECEIVED_TRANSCRIPT_ROOT}/"
-  fi
-done
+seed_mock_transcripts
 
 cat <<EOF
 

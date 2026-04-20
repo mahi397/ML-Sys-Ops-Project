@@ -87,10 +87,21 @@ class MeetingValidityRefreshTask:
     config: DispatcherConfig
     logger: object
     name: str = "meeting_validity_refresh"
+    schema_wait_logged: bool = False
 
     def run_cycle(self, *, full_scan: bool) -> int:
         conn = get_conn()
         try:
+            if not self.schema_ready(conn):
+                if not self.schema_wait_logged:
+                    self.logger.info(
+                        "Skipping meeting validity refresh until meetings.is_valid is available"
+                    )
+                    self.schema_wait_logged = True
+                conn.rollback()
+                return 0
+
+            self.schema_wait_logged = False
             refreshed = self.refresh_validity_flags(conn)
             conn.commit()
         finally:
@@ -99,6 +110,22 @@ class MeetingValidityRefreshTask:
         if refreshed:
             self.logger.info("Refreshed meeting validity flags | updated=%s", refreshed)
         return refreshed
+
+    def schema_ready(self, conn) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'meetings'
+                      AND column_name = 'is_valid'
+                ) AS has_is_valid
+                """
+            )
+            row = cur.fetchone()
+        return bool(row["has_is_valid"])
 
     def refresh_validity_flags(self, conn) -> int:
         with conn.cursor() as cur:

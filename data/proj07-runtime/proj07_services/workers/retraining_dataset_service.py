@@ -102,11 +102,22 @@ class RetrainingDatasetServiceConfig:
 class RetrainingDatasetService:
     config: RetrainingDatasetServiceConfig
     logger: object
+    schema_wait_logged: bool = False
 
     def run_cycle(self, *, force_run: bool, dry_run: bool) -> bool:
         conn = get_conn()
         lock_acquired = False
         try:
+            if not self.schema_ready(conn):
+                if not self.schema_wait_logged:
+                    self.logger.info(
+                        "Skipping retraining dataset scan until the meetings validity schema is available"
+                    )
+                    self.schema_wait_logged = True
+                conn.rollback()
+                return False
+
+            self.schema_wait_logged = False
             lock_acquired = self.try_advisory_lock(conn)
             if not lock_acquired:
                 self.logger.info("Another retraining dataset build is already in progress; skipping this cycle")
@@ -170,9 +181,54 @@ class RetrainingDatasetService:
             )
             return True
         finally:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             if lock_acquired:
                 self.release_advisory_lock(conn)
             conn.close()
+
+    def schema_ready(self, conn) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'meetings'
+                          AND column_name = 'is_valid'
+                    ) AS has_meeting_validity,
+                    EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'meetings'
+                          AND column_name = 'dataset_version'
+                    ) AS has_dataset_version,
+                    EXISTS (
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'feedback_events'
+                    ) AS has_feedback_events,
+                    EXISTS (
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'dataset_versions'
+                    ) AS has_dataset_versions
+                """
+            )
+            row = cur.fetchone()
+        return (
+            bool(row["has_meeting_validity"])
+            and bool(row["has_dataset_version"])
+            and bool(row["has_feedback_events"])
+            and bool(row["has_dataset_versions"])
+        )
 
     def try_advisory_lock(self, conn) -> bool:
         with conn.cursor() as cur:
