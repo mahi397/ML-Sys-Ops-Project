@@ -1,42 +1,9 @@
 services:
-  postgres:
-    image: postgres:16
-    container_name: postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-proj07_sql_db}
-      POSTGRES_USER: ${POSTGRES_USER:-proj07_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-proj07}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - ${POSTGRES_DATA_DIR:-/mnt/block/postgres-data}:/var/lib/postgresql/data
-      - ../proj07-db/init_sql:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proj07_user} -d ${POSTGRES_DB:-proj07_sql_db}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  adminer:
-    image: adminer:4.8.1
-    container_name: adminer
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "${ADMINER_PORT:-5050}:8080"
-
   jitsi_transcript_receiver:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jitsi_transcript_receiver
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       INGEST_TOKEN: ${INGEST_TOKEN:-}
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
@@ -63,16 +30,14 @@ services:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
       - /mnt/block/ingest_logs/jitsi_transcript:/mnt/block/ingest_logs/jitsi_transcript
       - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - proj07_shared
 
   db_task_worker:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: db_task_worker
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       DB_TASK_LOG_DIR: /mnt/block/ingest_logs/db_task_worker
@@ -95,16 +60,14 @@ services:
     command: ["python", "-m", "proj07_services.workers.db_task_worker"]
     volumes:
       - /mnt/block/ingest_logs/db_task_worker:/mnt/block/ingest_logs/db_task_worker
+    networks:
+      - proj07_shared
 
   stage1_payload_service:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: stage1_payload_service
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       STAGE1_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_payload_service
@@ -132,16 +95,14 @@ services:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
       - /mnt/block/ingest_logs/stage1_payload_service:/mnt/block/ingest_logs/stage1_payload_service
       - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - proj07_shared
 
   stage1_forward_service:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: stage1_forward_service
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       STAGE1_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_forward_service
@@ -167,16 +128,14 @@ services:
       - /mnt/block/user-behaviour/inference_responses/stage1:/mnt/block/user-behaviour/inference_responses/stage1
       - /mnt/block/ingest_logs/stage1_forward_service:/mnt/block/ingest_logs/stage1_forward_service
       - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - proj07_shared
 
   stage2_input_service:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: stage2_input_service
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       STAGE2_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_input_service
@@ -204,16 +163,14 @@ services:
       - /mnt/block/user-behaviour/reconstructed_segments:/mnt/block/user-behaviour/reconstructed_segments
       - /mnt/block/ingest_logs/stage2_input_service:/mnt/block/ingest_logs/stage2_input_service
       - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - proj07_shared
 
   stage2_forward_service:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: stage2_forward_service
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       STAGE2_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_forward_service
@@ -241,16 +198,14 @@ services:
       - /mnt/block/user-behaviour/inference_responses/stage2:/mnt/block/user-behaviour/inference_responses/stage2
       - /mnt/block/ingest_logs/stage2_forward_service:/mnt/block/ingest_logs/stage2_forward_service
       - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - proj07_shared
 
   user_summary_materialize_service:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: user_summary_materialize_service
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
       USER_SUMMARY_WORKER_LOG_DIR: /mnt/block/ingest_logs/user_summary_materialize_service
@@ -269,3 +224,9 @@ services:
       - /mnt/block/user-behaviour/user_summary_edits:/mnt/block/user-behaviour/user_summary_edits
       - /mnt/block/ingest_logs/user_summary_materialize_service:/mnt/block/ingest_logs/user_summary_materialize_service
       - ${HOME}/.config/rclone:/config/rclone:ro
+    networks:
+      - proj07_shared
+
+networks:
+  proj07_shared:
+    external: true

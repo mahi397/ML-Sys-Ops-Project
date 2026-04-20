@@ -17,6 +17,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      proj07_shared:
+        aliases:
+          - postgres
 
   adminer:
     image: adminer:4.8.1
@@ -27,3 +31,9 @@ services:
         condition: service_healthy
     ports:
       - "${ADMINER_PORT:-5050}:8080"
+    networks:
+      - proj07_shared
+
+networks:
+  proj07_shared:
+    name: proj07_shared
