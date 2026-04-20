@@ -544,7 +544,7 @@ curl http://192.5.87.115:9090/api/v1/targets   # Prometheus targets
 
 | Variable | Default | Description |
 |---|---|---|
-| `MLFLOW_TRACKING_URI` | `http://129.114.25.185:8000` | MLflow server URL — **update this** |
+|| `MLFLOW_TRACKING_URI` | `http://192.5.86.182:5000` | MLflow server URL ||
 | `MLFLOW_MODEL_NAME` | `jitsi-topic-segmenter` | Registered model name |
 | `MODEL_ALIAS` | `production` | MLflow alias to load (`production` or `fallback`) |
 | `MODEL_RELOAD_INTERVAL_SECONDS` | `300` | Hot-reload poll interval (seconds) |
