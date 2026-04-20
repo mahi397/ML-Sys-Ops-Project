@@ -432,12 +432,141 @@ def build_host_identity(
     }
 
 
+def load_uploaded_room_participants(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_participants: Any = metadata.get("room_participants")
+    if raw_participants is None:
+        raw_participants = metadata.get("room_participants_json")
+
+    if isinstance(raw_participants, str):
+        raw_value = raw_participants.strip()
+        if not raw_value:
+            return []
+        try:
+            raw_participants = json.loads(raw_value)
+        except json.JSONDecodeError:
+            return []
+
+    if not isinstance(raw_participants, list):
+        return []
+
+    participants: list[dict[str, Any]] = []
+    for raw_participant in raw_participants:
+        if not isinstance(raw_participant, dict):
+            continue
+
+        user_id = str(raw_participant.get("user_id", "") or "").strip()
+        if not user_id:
+            continue
+
+        display_name = str(raw_participant.get("display_name", "") or "").strip() or user_id
+        email = str(raw_participant.get("email", "") or "").strip().lower() or None
+        identity_source = (
+            str(raw_participant.get("identity_source", "") or "").strip()
+            or "transcript_upload_metadata"
+        )
+        written_at = str(raw_participant.get("written_at", "") or "").strip() or None
+
+        participants.append(
+            {
+                "user_id": user_id,
+                "display_name": display_name,
+                "email": email,
+                "identity_source": identity_source,
+                "written_at": written_at,
+            }
+        )
+
+    return participants
+
+
+def build_meeting_participants(
+    *,
+    meeting_id: str,
+    host_identity: dict[str, Any],
+    uploaded_participants: list[dict[str, Any]],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list[dict[str, Any]]:
+    participants_by_user_id: dict[str, dict[str, Any]] = {}
+
+    def upsert_participant(participant: dict[str, Any], *, role: str) -> None:
+        normalized_user_id = str(participant.get("user_id", "") or "").strip()
+        if not normalized_user_id:
+            return
+
+        key = normalized_user_id.casefold()
+        existing = participants_by_user_id.get(key)
+        payload = {
+            "meeting_id": meeting_id,
+            "user_id": normalized_user_id,
+            "display_name": str(participant.get("display_name", "") or "").strip() or normalized_user_id,
+            "email": str(participant.get("email", "") or "").strip().lower() or None,
+            "identity_source": str(participant.get("identity_source", "") or "").strip() or None,
+            "role": role,
+            "can_view_summary": True,
+            "can_edit_summary": True,
+            "joined_at": start_dt.isoformat(),
+            "left_at": end_dt.isoformat(),
+        }
+
+        if existing is None:
+            participants_by_user_id[key] = payload
+            return
+
+        existing["display_name"] = payload["display_name"] or existing["display_name"]
+        existing["email"] = existing["email"] or payload["email"]
+        existing["identity_source"] = existing["identity_source"] or payload["identity_source"]
+        if role == "host":
+            existing["role"] = "host"
+            existing["can_view_summary"] = True
+            existing["can_edit_summary"] = True
+
+    upsert_participant(host_identity, role="host")
+    for uploaded_participant in uploaded_participants:
+        role = (
+            "host"
+            if str(uploaded_participant.get("user_id", "")).strip().casefold()
+            == str(host_identity.get("user_id", "")).strip().casefold()
+            else "participant"
+        )
+        upsert_participant(uploaded_participant, role=role)
+
+    return list(participants_by_user_id.values())
+
+
+def build_speaker_user_lookup(participants: list[dict[str, Any]]) -> dict[str, str]:
+    match_counts: dict[str, int] = {}
+    match_values: dict[str, str] = {}
+
+    for participant in participants:
+        user_id = str(participant.get("user_id", "") or "").strip()
+        if not user_id:
+            continue
+
+        candidate_keys = {
+            user_id.casefold(),
+            str(participant.get("display_name", "") or "").strip().casefold(),
+        }
+        for candidate_key in candidate_keys:
+            if not candidate_key:
+                continue
+            match_counts[candidate_key] = match_counts.get(candidate_key, 0) + 1
+            match_values[candidate_key] = user_id
+
+    return {
+        candidate_key: match_values[candidate_key]
+        for candidate_key, count in match_counts.items()
+        if count == 1
+    }
+
+
 def build_parsed_payload(
     *,
     meeting_id: str,
     original_filename: str,
     host_external_key: str,
     host_identity: dict[str, Any],
+    metadata: dict[str, Any],
     parsed: dict[str, Any],
     raw_folder_prefix: str,
     raw_object_key: str,
@@ -457,8 +586,15 @@ def build_parsed_payload(
         name: speaker_label_for_index(idx)
         for idx, name in enumerate(speaker_order)
     }
-    normalized_host_display_name = host_identity["display_name"].strip().casefold()
-    normalized_host_user_id = host_identity["user_id"].strip().casefold()
+    uploaded_participants = load_uploaded_room_participants(metadata)
+    meeting_participants = build_meeting_participants(
+        meeting_id=meeting_id,
+        host_identity=host_identity,
+        uploaded_participants=uploaded_participants,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    speaker_user_lookup = build_speaker_user_lookup(meeting_participants)
 
     utterance_rows: list[dict[str, Any]] = []
     for idx, utterance in enumerate(utterances):
@@ -511,28 +647,11 @@ def build_parsed_payload(
             "host_external_key": host_external_key,
             "identity_source": host_identity["identity_source"],
         },
-        "meeting_participants": [
-            {
-                "meeting_id": meeting_id,
-                "user_id": host_identity["user_id"],
-                "role": "host",
-                "can_view_summary": True,
-                "can_edit_summary": True,
-                "joined_at": start_dt.isoformat(),
-                "left_at": end_dt.isoformat(),
-            }
-        ],
+        "meeting_participants": meeting_participants,
         "meeting_speakers": [
             {
                 "meeting_id": meeting_id,
-                "user_id": (
-                    host_identity["user_id"]
-                    if name.strip().casefold() in (
-                        normalized_host_display_name,
-                        normalized_host_user_id,
-                    )
-                    else None
-                ),
+                "user_id": speaker_user_lookup.get(name.strip().casefold()),
                 "speaker_label": speaker_labels[name],
                 "display_name": name,
                 "role": None,
@@ -559,9 +678,10 @@ def build_parsed_payload(
             f"meeting_id derived from original filename: {original_filename}",
             f"Host uploader node identity: {host_external_key}",
             f"Host user identity source: {host_identity['identity_source']}",
-            "meeting_participants currently includes only the host uploader identity.",
+            f"Meeting participants loaded from upload metadata: {len(uploaded_participants)}",
+            "meeting_participants includes the host uploader identity plus uploaded authenticated participants.",
             "meeting_speakers contains transcript-level spoken identities only.",
-            "meeting_speakers.user_id is populated only when a speaker name matches the host identity.",
+            "meeting_speakers.user_id is populated when a speaker name uniquely matches an uploaded participant display name or user_id.",
             "Raw and parsed transcript artifacts are uploaded to object storage.",
             "Utterance end time is assumed to be just before the next utterance start time.",
         ],
@@ -674,12 +794,13 @@ def insert_rows(
             logger.info("Replacing existing meeting: %s", meeting_id)
             cur.execute("DELETE FROM meetings WHERE meeting_id = %s", (meeting_id,))
 
-        upsert_host_user(
-            cur,
-            user_id=host["user_id"],
-            display_name=host["display_name"],
-            email=host.get("email"),
-        )
+        for participant in participants:
+            upsert_host_user(
+                cur,
+                user_id=participant["user_id"],
+                display_name=participant.get("display_name") or participant["user_id"],
+                email=participant.get("email"),
+            )
 
         cur.execute(
             """
@@ -1011,6 +1132,7 @@ def main() -> None:
         original_filename=original_filename,
         host_external_key=host_external_key,
         host_identity=host_identity,
+        metadata=metadata_payload,
         parsed=parsed,
         raw_folder_prefix=raw_folder_prefix,
         raw_object_key=raw_object_key,
