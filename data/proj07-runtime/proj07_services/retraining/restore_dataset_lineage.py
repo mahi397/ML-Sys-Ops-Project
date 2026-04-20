@@ -459,6 +459,48 @@ def normalize_parsed_jitsi_payload(
         raise RuntimeError(
             f"Parsed transcript payload meeting_id mismatch: expected {meeting_id}, found {payload_meeting_id or 'none'}"
         )
+    
+    # Backward-compatible host normalization:
+    # older parsed payloads may store host metadata under meeting instead of top-level payload["host"].
+    if not isinstance(normalized_payload.get("host"), dict):
+        host_candidate: dict[str, Any] | None = None
+
+        nested_host = meeting.get("host")
+        if isinstance(nested_host, dict):
+            host_candidate = dict(nested_host)
+        else:
+            host_candidate = {
+                "external_key": str(meeting.get("host_external_key") or "").strip(),
+                "user_id": str(meeting.get("host_user_id") or "").strip(),
+                "display_name": str(meeting.get("host_display_name") or "").strip(),
+                "email": str(meeting.get("host_email") or "").strip(),
+            }
+            host_candidate = {k: v for k, v in host_candidate.items() if v}
+
+        if not host_candidate:
+            raise RuntimeError(
+                f"Parsed transcript payload for {meeting_id} is missing host metadata required by insert_rows"
+            )
+
+        normalized_payload["host"] = host_candidate
+        logger.warning(
+            "Synthesized host metadata during restore | meeting_id=%s keys=%s",
+            meeting_id,
+            ",".join(sorted(host_candidate.keys())),
+        )
+
+    # Backward-compatible participants normalization:
+    if not isinstance(normalized_payload.get("participants"), list):
+        participants_candidate = None
+
+        if isinstance(meeting.get("participants"), list):
+            participants_candidate = meeting.get("participants")
+        elif isinstance(normalized_payload.get("meeting_participants"), list):
+            participants_candidate = normalized_payload.get("meeting_participants")
+        else:
+            participants_candidate = []
+
+        normalized_payload["participants"] = participants_candidate
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
