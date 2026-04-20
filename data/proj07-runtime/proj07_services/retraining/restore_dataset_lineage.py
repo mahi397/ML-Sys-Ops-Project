@@ -627,6 +627,84 @@ def normalize_parsed_jitsi_payload(
     normalized_payload["participants"] = normalized_participants
     normalized_payload["meeting_participants"] = normalized_participants
 
+    # Backward-compatible utterance normalization:
+    # historical parsed payloads may use different field names than insert_rows expects.
+    utterance_rows = normalized_payload.get("utterances")
+    if not isinstance(utterance_rows, list):
+        utterance_rows = meeting.get("utterances") if isinstance(meeting.get("utterances"), list) else []
+
+    normalized_utterances: list[dict[str, Any]] = []
+    for idx, utterance in enumerate(utterance_rows):
+        if not isinstance(utterance, dict):
+            continue
+
+        start_time_sec = (
+            utterance.get("start_time_sec")
+            if utterance.get("start_time_sec") is not None
+            else utterance.get("start_sec")
+        )
+        end_time_sec = (
+            utterance.get("end_time_sec")
+            if utterance.get("end_time_sec") is not None
+            else utterance.get("end_sec")
+        )
+
+        raw_text = (
+            utterance.get("raw_text")
+            if utterance.get("raw_text") is not None
+            else utterance.get("text")
+        )
+        clean_text = (
+            utterance.get("clean_text")
+            if utterance.get("clean_text") is not None
+            else utterance.get("normalized_text")
+            if utterance.get("normalized_text") is not None
+            else utterance.get("text")
+        )
+
+        normalized_utterances.append(
+            {
+                "utterance_id": str(
+                    utterance.get("utterance_id")
+                    or f"{meeting_id}_utt_{idx}"
+                ).strip(),
+                "meeting_id": str(utterance.get("meeting_id") or meeting_id).strip(),
+                "meeting_speaker_id": str(
+                    utterance.get("meeting_speaker_id")
+                    or utterance.get("speaker_id")
+                    or ""
+                ).strip(),
+                "utterance_index": int(
+                    utterance.get("utterance_index")
+                    if utterance.get("utterance_index") is not None
+                    else idx
+                ),
+                "start_time_sec": float(start_time_sec) if start_time_sec is not None else None,
+                "end_time_sec": float(end_time_sec) if end_time_sec is not None else None,
+                "raw_text": str(raw_text or "").strip(),
+                "clean_text": str(clean_text or "").strip(),
+                "source_segment_id": str(utterance.get("source_segment_id") or "").strip(),
+            }
+        )
+
+    normalized_payload["utterances"] = normalized_utterances
+    filtered_utterances: list[dict[str, Any]] = []
+    dropped_utterances = 0
+
+    for utterance in normalized_payload["utterances"]:
+        if utterance["start_time_sec"] is None or utterance["end_time_sec"] is None:
+            dropped_utterances += 1
+            continue
+        filtered_utterances.append(utterance)
+
+    if dropped_utterances:
+        logger.warning(
+            "Dropped %d utterance row(s) without timing during restore | meeting_id=%s",
+            dropped_utterances,
+            meeting_id,
+        )
+
+    normalized_payload["utterances"] = filtered_utterances
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
