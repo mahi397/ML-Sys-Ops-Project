@@ -133,10 +133,8 @@ sudo mkdir -p \
     "${BLOCK_ROOT}/user-behaviour/reconstructed_segments" \
     "${BLOCK_ROOT}/user-behaviour/user_summary_edits"
 sudo chown -R "${USER}:${USER}" "${BLOCK_ROOT}"
-# Restore postgres ownership if data dir already exists
-if [[ -d "${BLOCK_ROOT}/postgres_data/global" ]]; then
-    sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
-fi
+# Postgres process runs as uid 999 inside the container — always restore ownership
+sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
 ok "Block storage ready at ${BLOCK_ROOT}"
 
 # ── 5. Stage training datasets ────────────────────────────────────────────────
