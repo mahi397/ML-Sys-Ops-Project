@@ -58,6 +58,7 @@ The canonical shared config file is `../.env`. `../setup.sh` keeps this folder's
 12. `stage2_forward_service.py` posts `stage2_inputs.json` to `POST /summarize`, saves the Stage 2 response locally, optionally uploads it, and upserts response artifact rows into `meeting_artifacts`.
 13. `db_task_worker.py` continuously refreshes `meetings.is_valid` so retraining can exclude incomplete Jitsi meetings whose ingest or Stage 1 / Stage 2 artifact chain is missing.
 14. `retraining_dataset_service.py` watches for valid unconsumed meetings and structural feedback volume, then builds the next `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` snapshot when thresholds are crossed.
+15. `production_drift_monitor.py` compares rolling live Jitsi meeting features against the latest approved Stage 1 dataset profile and writes a persisted quality report for drift investigation.
 
 The key split is:
 - `meeting_artifacts` describes durable data outputs
@@ -208,12 +209,28 @@ Role:
 - Checks whether the threshold has been crossed for unconsumed valid meetings or structural feedback events
 - Builds the next Stage 1 feedback pool and rolling retraining snapshot when thresholds are met
 - Marks meetings consumed by the snapshot with the new `dataset_version` and `dataset_split`
+- Profiles each candidate feedback pool / snapshot, compares it against the latest approved reference profile, and quarantines candidates whose drift exceeds the configured threshold
 
 Manual trigger:
 
 ```bash
 docker compose exec retraining_dataset_service \
   python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+### `production_drift_monitor.py`
+
+Role:
+- Polls recent valid Jitsi meetings from Postgres on a schedule
+- Rebuilds inference-style feature distributions from live utterances
+- Compares the live window against the latest approved `roberta_stage1` profile
+- Persists a `dataset_quality_reports` row plus a JSON report under `/mnt/block/staging/feedback_loop/production_drift_reports`
+
+Manual trigger:
+
+```bash
+docker compose exec production_drift_monitor \
+  python -m proj07_services.workers.production_drift_monitor --once
 ```
 
 ### `jitsi_transcript_receiver.py`

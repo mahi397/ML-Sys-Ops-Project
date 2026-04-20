@@ -68,6 +68,22 @@ def default_build_config() -> RetrainingBuildConfig:
             "RETRAINING_DATASET_MAX_WORDS_PER_UTTERANCE",
             env_int("MAX_WORDS_PER_UTTERANCE", env_int("STAGE1_MAX_WORDS_PER_UTTERANCE", 50)),
         ),
+        quality_psi_threshold=env_float(
+            "RETRAINING_DATASET_QUALITY_PSI_THRESHOLD",
+            0.2,
+        ),
+        quality_max_drift_share=env_float(
+            "RETRAINING_DATASET_QUALITY_MAX_DRIFT_SHARE",
+            0.35,
+        ),
+        quality_min_feature_samples=env_int(
+            "RETRAINING_DATASET_QUALITY_MIN_FEATURE_SAMPLES",
+            25,
+        ),
+        quality_numeric_bin_count=env_int(
+            "RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT",
+            10,
+        ),
     )
 
 
@@ -256,6 +272,14 @@ def validate_config(config: RetrainingDatasetServiceConfig) -> None:
         raise ValueError("RETRAINING_DATASET_MIN_UTTERANCE_CHARS must be > 0")
     if config.build_config.max_words_per_utterance <= 0:
         raise ValueError("RETRAINING_DATASET_MAX_WORDS_PER_UTTERANCE must be > 0")
+    if config.build_config.quality_psi_threshold <= 0:
+        raise ValueError("RETRAINING_DATASET_QUALITY_PSI_THRESHOLD must be > 0")
+    if config.build_config.quality_max_drift_share < 0:
+        raise ValueError("RETRAINING_DATASET_QUALITY_MAX_DRIFT_SHARE must be >= 0")
+    if config.build_config.quality_min_feature_samples <= 0:
+        raise ValueError("RETRAINING_DATASET_QUALITY_MIN_FEATURE_SAMPLES must be > 0")
+    if config.build_config.quality_numeric_bin_count < 2:
+        raise ValueError("RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT must be >= 2")
 
 
 def parse_args() -> argparse.Namespace:
@@ -283,13 +307,15 @@ def main() -> None:
 
     logger.info("Starting %s", APP_NAME)
     logger.info(
-        "Config | poll_interval=%ss valid_meeting_threshold=%s feedback_event_threshold=%s upload_artifacts=%s dataset_root=%s feedback_pool_root=%s",
+        "Config | poll_interval=%ss valid_meeting_threshold=%s feedback_event_threshold=%s upload_artifacts=%s dataset_root=%s feedback_pool_root=%s quality_psi_threshold=%s quality_max_drift_share=%s",
         config.poll_interval_seconds,
         config.valid_meeting_threshold,
         config.feedback_event_threshold,
         config.build_config.upload_artifacts,
         config.build_config.dataset_root,
         config.build_config.feedback_pool_root,
+        config.build_config.quality_psi_threshold,
+        config.build_config.quality_max_drift_share,
     )
 
     if args.once:

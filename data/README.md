@@ -20,7 +20,7 @@ This bundle assumes:
   - owns `init_sql/` and the canonical database-side SQL history
 - `proj07-runtime/`
   - canonical final runnable stack
-  - owns the one compose file that launches Postgres, Adminer, transcript ingest, workflow dispatch, Stage 1 / Stage 2 workers, user-summary materialization, and retraining-dataset monitoring
+  - owns the one compose file that launches Postgres, Adminer, transcript ingest, workflow dispatch, Stage 1 / Stage 2 workers, user-summary materialization, retraining-dataset monitoring, and production drift monitoring
 - `initial_implementation/`
   - preserved April 6 standalone runtime bundle
   - contains the original `external_data_training_runtime/`, `endpoint_replay_runtime/`, `online_inference_workflow_runtime/`, `retraining_dataset_runtime/`, and `mock_jitsi_meet/` folders
@@ -51,6 +51,30 @@ This bundle assumes:
 - `proj07-db/init_sql/`
   - keeps the final schema and migration-style bootstrap files that the integrated runtime stack mounts into Postgres
 
+## Data control plane
+
+The modern `data/` bundle now includes an explicit data-quality control layer on top of the ingest and retraining flow.
+
+- At ingestion time, malformed or incomplete Jitsi transcripts are rejected before they are treated as valid inputs.
+- During runtime orchestration, `meetings.is_valid` is only flipped on when the expected raw, parsed, Stage 1, Stage 2, and summary artifacts exist.
+- During retraining dataset publication, candidate `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` builds are profiled, compared against the latest approved reference profile, and quarantined if drift exceeds the configured threshold instead of being published silently.
+- During live production monitoring, a scheduled drift monitor compares a rolling window of valid Jitsi meetings against the latest approved Stage 1 dataset profile and persists a report for investigation.
+
+The control-plane state is stored in Postgres:
+
+- `dataset_versions`
+  - approved, published dataset manifests
+- `dataset_quality_reports`
+  - persisted drift and quality-gate results for feedback-pool builds, retraining snapshots, and live production windows
+- `retrain_log` and `audit_log`
+  - retraining lifecycle history and operational audit trail
+
+The main artifacts produced by this control plane are:
+
+- approved dataset profiles at `proj07-runtime` dataset roots such as `/mnt/block/roberta_stage1/vN/profile.json`
+- per-run drift reports under `/mnt/block/staging/feedback_loop/.../quality_report.json`
+- quarantined failed candidates under dataset-root `_quarantine/` folders
+
 ## Recommended flow
 
 1. From inside `data/`, run:
@@ -80,9 +104,11 @@ source .venv/bin/activate
 
 6. Use `initial_implementation/setup.sh` and `initial_implementation/README.md` only when you need the archived standalone scripts for lineage tracing, comparison, or isolated batch reruns.
 
+7. If you tune drift thresholds or monitoring cadence, update `data/.env` and restart the relevant `proj07-runtime` services so the new control-plane settings take effect.
+
 ## Important note about first-time DB initialization
 
-The SQL files under `proj07-db/init_sql/` are mounted by `proj07-runtime/docker-compose.yml`. On a fresh Postgres data volume they are applied automatically during container initialization, and `data/setup.sh` also reapplies the idempotent post-bootstrap migrations so existing volumes can pick up newer schema changes.
+The SQL files under `proj07-db/init_sql/` are mounted by `proj07-runtime/docker-compose.yml`. On a fresh Postgres data volume they are applied automatically during container initialization, and `data/setup.sh` also reapplies the idempotent post-bootstrap migrations so existing volumes can pick up newer schema changes such as `meetings.is_valid` and `dataset_quality_reports`.
 
 When you rerun `data/setup.sh`, it now detects whether the runtime services are already running and whether `${POSTGRES_DATA_DIR:-/mnt/block/postgres-data}` already contains a Postgres data directory, so repeated setup runs are more predictable.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from proj07_services.common.feedback_common import (
     build_stage1_rows,
     fetch_source_utterances,
     fetch_topic_segments,
+    insert_dataset_quality_report,
     insert_dataset_version,
     label_counts,
     pick_stage1_examples,
@@ -21,6 +23,13 @@ from proj07_services.common.feedback_common import (
     upload_dir,
     write_json,
     write_jsonl,
+)
+from proj07_services.quality.drift_control import (
+    DriftGateConfig,
+    build_reference_profile,
+    compare_feature_columns_to_reference,
+    extract_stage1_feature_columns,
+    load_reference_profile,
 )
 
 
@@ -45,6 +54,10 @@ class RetrainingBuildConfig:
     transition_index: int
     min_utterance_chars: int
     max_words_per_utterance: int
+    quality_psi_threshold: float
+    quality_max_drift_share: float
+    quality_min_feature_samples: int
+    quality_numeric_bin_count: int
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,62 @@ def next_version(root: Path) -> int:
 def latest_version(root: Path) -> int | None:
     versions = existing_versions(root)
     return versions[-1] if versions else None
+
+
+def quality_gate_config(config: RetrainingBuildConfig) -> DriftGateConfig:
+    return DriftGateConfig(
+        psi_threshold=config.quality_psi_threshold,
+        max_drift_share=config.quality_max_drift_share,
+        min_feature_samples=config.quality_min_feature_samples,
+        numeric_bin_count=config.quality_numeric_bin_count,
+    )
+
+
+def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
+    version = latest_version(root)
+    if version is None:
+        return None, None
+    return version, load_reference_profile(root / f"v{version}" / "profile.json")
+
+
+def candidate_staging_root(base_root: Path, version_hint: int) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return base_root / ".staging" / f"candidate-v{version_hint}-{stamp}"
+
+
+def quarantine_root(base_root: Path, version_hint: int) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return base_root / "_quarantine" / f"candidate-v{version_hint}-{stamp}"
+
+
+def move_tree(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.move(str(source), str(destination))
+
+
+def evaluate_stage1_quality_gate(
+    *,
+    rows: list[dict],
+    include_label: bool,
+    reference_root: Path,
+    config: RetrainingBuildConfig,
+) -> tuple[dict[str, Any], dict[str, Any], int | None]:
+    feature_columns, metadata = extract_stage1_feature_columns(rows, include_label=include_label)
+    current_profile = build_reference_profile(
+        feature_columns,
+        metadata=metadata,
+        bin_count=config.quality_numeric_bin_count,
+    )
+    reference_version, reference_profile = latest_reference_profile(reference_root)
+    report = compare_feature_columns_to_reference(
+        reference_profile=reference_profile,
+        current_feature_columns=feature_columns,
+        current_metadata=metadata,
+        config=quality_gate_config(config),
+    )
+    return current_profile, report, reference_version
 
 
 def meeting_sort_key(meeting_id: str) -> tuple[int, str]:
@@ -230,19 +299,12 @@ def build_stage1_feedback_pool(
         return None
 
     version = next_version(config.feedback_pool_root)
-    out_root = config.feedback_pool_root / f"v{version}"
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    write_jsonl(out_root / "feedback_examples.jsonl", dataset_rows)
-    write_json(
-        out_root / "meeting_ids.json",
-        {
-            "candidate_meeting_ids": candidate_meetings,
-            "eligible_meeting_ids": eligible_meetings,
-        },
+    profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+        rows=dataset_rows,
+        include_label=True,
+        reference_root=config.feedback_pool_root,
+        config=config,
     )
-    write_json(out_root / "examples.json", pick_stage1_examples(dataset_rows))
-
     manifest = {
         "dataset_name": "roberta_stage1_feedback_pool",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -268,21 +330,73 @@ def build_stage1_feedback_pool(
             "eligible_meeting_ids": eligible_meetings,
         },
         "rows": label_counts(dataset_rows),
+        "quality_gate": {
+            "status": quality_report["status"],
+            "reference_version": reference_version,
+            "share_drifted_features": quality_report["share_drifted_features"],
+            "drifted_feature_count": quality_report["drifted_feature_count"],
+            "total_feature_count": quality_report["total_feature_count"],
+        },
     }
-    write_json(out_root / "manifest.json", manifest)
+    staging_root = candidate_staging_root(config.feedback_pool_root, version)
+    staging_root.mkdir(parents=True, exist_ok=True)
 
-    object_prefix = f"{config.feedback_pool_object_prefix.strip('/')}/v{version}"
-    if config.upload_artifacts:
-        upload_dir(out_root, object_prefix, logger)
-
-    insert_dataset_version(
-        conn=conn,
-        dataset_name="roberta_stage1_feedback_pool",
-        stage="stage1",
-        source_type="production_feedback",
-        object_key=f"{object_prefix}/manifest.json",
-        manifest_json=manifest,
+    write_jsonl(staging_root / "feedback_examples.jsonl", dataset_rows)
+    write_json(
+        staging_root / "meeting_ids.json",
+        {
+            "candidate_meeting_ids": candidate_meetings,
+            "eligible_meeting_ids": eligible_meetings,
+        },
     )
+    write_json(staging_root / "examples.json", pick_stage1_examples(dataset_rows))
+    write_json(staging_root / "profile.json", profile)
+    write_json(staging_root / "quality_report.json", quality_report)
+    write_json(staging_root / "manifest.json", manifest)
+
+    publish_allowed = quality_report["status"] != "failed"
+    if publish_allowed:
+        out_root = config.feedback_pool_root / f"v{version}"
+        move_tree(staging_root, out_root)
+        object_prefix = f"{config.feedback_pool_object_prefix.strip('/')}/v{version}"
+        if config.upload_artifacts:
+            upload_dir(out_root, object_prefix, logger)
+
+        insert_dataset_version(
+            conn=conn,
+            dataset_name="roberta_stage1_feedback_pool",
+            stage="stage1",
+            source_type="production_feedback",
+            object_key=f"{object_prefix}/manifest.json",
+            manifest_json=manifest,
+        )
+    else:
+        out_root = quarantine_root(config.feedback_pool_root, version)
+        move_tree(staging_root, out_root)
+
+    insert_dataset_quality_report(
+        conn,
+        dataset_name="roberta_stage1_feedback_pool",
+        report_scope="feedback_pool",
+        report_status=quality_report["status"],
+        dataset_version=str(version) if publish_allowed else None,
+        reference_dataset_name="roberta_stage1_feedback_pool",
+        reference_dataset_version=None if reference_version is None else str(reference_version),
+        report_path=str((out_root / "quality_report.json").resolve()),
+        share_drifted_features=quality_report["share_drifted_features"],
+        drifted_feature_count=quality_report["drifted_feature_count"],
+        total_feature_count=quality_report["total_feature_count"],
+        details_json=quality_report,
+    )
+
+    if not publish_allowed:
+        logger.warning(
+            "Feedback pool candidate failed quality gate and was quarantined | candidate_version=v%s reference=v%s share_drifted=%.3f",
+            version,
+            reference_version if reference_version is not None else "none",
+            quality_report["share_drifted_features"],
+        )
+        return None
 
     logger.info(
         "Built Stage 1 feedback pool v%s | meetings=%s rows=%s",
@@ -390,22 +504,13 @@ def build_retraining_snapshot(
             "feedback_pool_source": f"roberta_stage1_feedback_pool/v{feedback_pool.version}",
         }
 
-    out_root = config.dataset_root / f"v{snapshot_version}"
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    write_jsonl(out_root / "train.jsonl", train_rows)
-    write_jsonl(out_root / "val.jsonl", val_rows)
-    write_jsonl(out_root / "test.jsonl", test_rows)
-    write_json(out_root / "split_info.json", split_info)
-    write_json(
-        out_root / "examples.json",
-        {
-            "train": pick_stage1_examples(train_rows),
-            "val": pick_stage1_examples(val_rows),
-            "test": pick_stage1_examples(test_rows),
-        },
+    combined_rows = train_rows + val_rows + test_rows
+    profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+        rows=combined_rows,
+        include_label=True,
+        reference_root=config.dataset_root,
+        config=config,
     )
-
     manifest = {
         "dataset_name": config.dataset_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -423,22 +528,79 @@ def build_retraining_snapshot(
             "test": label_counts(test_rows),
         },
         "meetings": split_info,
+        "quality_gate": {
+            "status": quality_report["status"],
+            "reference_version": reference_version,
+            "share_drifted_features": quality_report["share_drifted_features"],
+            "drifted_feature_count": quality_report["drifted_feature_count"],
+            "total_feature_count": quality_report["total_feature_count"],
+        },
     }
-    write_json(out_root / "manifest.json", manifest)
+    staging_root = candidate_staging_root(config.dataset_root, snapshot_version)
+    staging_root.mkdir(parents=True, exist_ok=True)
 
-    object_prefix = f"{config.dataset_object_prefix.strip('/')}/v{snapshot_version}"
-    if config.upload_artifacts:
-        upload_dir(out_root, object_prefix, logger)
-
-    insert_dataset_version(
-        conn=conn,
-        dataset_name=config.dataset_name,
-        stage="stage1",
-        source_type="production_feedback",
-        object_key=f"{object_prefix}/manifest.json",
-        manifest_json=manifest,
+    write_jsonl(staging_root / "train.jsonl", train_rows)
+    write_jsonl(staging_root / "val.jsonl", val_rows)
+    write_jsonl(staging_root / "test.jsonl", test_rows)
+    write_json(staging_root / "split_info.json", split_info)
+    write_json(
+        staging_root / "examples.json",
+        {
+            "train": pick_stage1_examples(train_rows),
+            "val": pick_stage1_examples(val_rows),
+            "test": pick_stage1_examples(test_rows),
+        },
     )
-    mark_meetings_as_consumed(conn, snapshot_version, split_assignments)
+    write_json(staging_root / "profile.json", profile)
+    write_json(staging_root / "quality_report.json", quality_report)
+    write_json(staging_root / "manifest.json", manifest)
+
+    publish_allowed = quality_report["status"] != "failed"
+    if publish_allowed:
+        out_root = config.dataset_root / f"v{snapshot_version}"
+        move_tree(staging_root, out_root)
+        object_prefix = f"{config.dataset_object_prefix.strip('/')}/v{snapshot_version}"
+        if config.upload_artifacts:
+            upload_dir(out_root, object_prefix, logger)
+
+        insert_dataset_version(
+            conn=conn,
+            dataset_name=config.dataset_name,
+            stage="stage1",
+            source_type="production_feedback",
+            object_key=f"{object_prefix}/manifest.json",
+            manifest_json=manifest,
+        )
+        mark_meetings_as_consumed(conn, snapshot_version, split_assignments)
+    else:
+        out_root = quarantine_root(config.dataset_root, snapshot_version)
+        move_tree(staging_root, out_root)
+
+    insert_dataset_quality_report(
+        conn,
+        dataset_name=config.dataset_name,
+        report_scope="retraining_snapshot",
+        report_status=quality_report["status"],
+        dataset_version=str(snapshot_version) if publish_allowed else None,
+        reference_dataset_name=config.dataset_name,
+        reference_dataset_version=None if reference_version is None else str(reference_version),
+        report_path=str((out_root / "quality_report.json").resolve()),
+        share_drifted_features=quality_report["share_drifted_features"],
+        drifted_feature_count=quality_report["drifted_feature_count"],
+        total_feature_count=quality_report["total_feature_count"],
+        details_json=quality_report,
+    )
+
+    if not publish_allowed:
+        logger.warning(
+            "Retraining snapshot candidate failed quality gate and was quarantined | candidate_version=v%s reference=v%s share_drifted=%.3f",
+            snapshot_version,
+            reference_version if reference_version is not None else "none",
+            quality_report["share_drifted_features"],
+        )
+        raise RuntimeError(
+            f"Retraining snapshot v{snapshot_version} failed drift gate and was quarantined"
+        )
 
     row_counts = {
         "train": len(train_rows),
