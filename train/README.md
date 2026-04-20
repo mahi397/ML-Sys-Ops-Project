@@ -72,7 +72,7 @@ Three aliases in MLflow under `jitsi-topic-segmenter`:
 | Alias | Description | test_pk | test_f1 |
 |---|---|---|---|
 | `production` | Optuna best (Trial #10/20) | 0.213 | 0.232 |
-| `fallback` | roberta-base full fine-tune | 0.228 | 0.222 |
+| `fallback` | distilroberta-base full fine-tune | 0.228 | 0.222 |
 | `candidate` | Set automatically after a passing retrain | — | — |
 
 Promotion from `candidate` → `production` is a **manual step** in the MLflow UI. Rollback is handled by Shruti's serving layer — if correction rate spikes post-deployment, the serving API switches back to `fallback`.

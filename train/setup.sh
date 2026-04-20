@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup_train.sh — Training subsystem setup for RTX node (CHI@UC)
+# setup.sh — Training subsystem setup for RTX node (CHI@UC)
 # Run once before docker compose up
 # Assumes: repo cloned at ~/ML-Sys-Ops-Project, .env filled in
 
