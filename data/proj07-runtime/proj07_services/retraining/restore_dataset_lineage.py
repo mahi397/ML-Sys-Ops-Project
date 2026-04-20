@@ -15,13 +15,38 @@ from typing import Any
 from proj07_services.common.feedback_common import (
     ensure_dataset_version_record,
     get_conn,
+    upsert_meeting_artifact,
 )
+from proj07_services.pipeline.ingest_saved_jitsi_transcript import insert_rows as insert_jitsi_rows
 from proj07_services.retraining.runtime import existing_versions
+from proj07_services.workers.stage2_forward_service import (
+    extract_response_rows,
+    normalize_saved_stage2_outputs,
+    register_recap_outputs,
+)
 
 
 APP_NAME = "restore_dataset_lineage"
 VERSION_DIR_RE = re.compile(r"^v(?P<version>\d+)/?$")
+VERSIONED_JSON_RE = re.compile(r"^v(?P<version>\d+)\.json$")
+JITSI_MEETING_ID_RE = re.compile(r"^jitsi_[A-Za-z0-9_]+$")
 SPLIT_NAMES = ("train", "val", "test")
+ARTIFACT_CONTENT_TYPES = {
+    "raw_transcript": "text/plain",
+    "parsed_transcript": "application/json",
+    "stage1_requests_jsonl": "application/x-ndjson",
+    "stage1_requests_json": "application/json",
+    "stage1_model_utterances_json": "application/json",
+    "stage1_manifest_json": "application/json",
+    "stage1_responses_jsonl": "application/x-ndjson",
+    "stage1_responses_json": "application/json",
+    "stage2_inputs_jsonl": "application/x-ndjson",
+    "stage2_inputs_json": "application/json",
+    "reconstructed_segments_json": "application/json",
+    "stage2_responses_jsonl": "application/x-ndjson",
+    "stage2_responses_json": "application/json",
+    "summary_json": "application/json",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +81,20 @@ class PlannedFamilyRestore:
     source: str
     versions: list[int]
     stored_versions: list[StoredVersion]
+
+
+@dataclass(frozen=True)
+class MissingMeetingRecoveryConfig:
+    parsed_prefix: str
+    stage1_request_prefix: str
+    stage1_response_prefix: str
+    stage2_request_prefix: str
+    stage2_response_prefix: str
+    reconstructed_segments_prefix: str
+    artifact_version: int
+    stage2_model_name: str
+    stage2_model_version: str
+    stage2_prompt_version: str
 
 
 def default_local_tmp_root() -> Path:
@@ -122,12 +161,68 @@ def parse_args() -> argparse.Namespace:
         ).strip(),
     )
     parser.add_argument(
+        "--jitsi-parsed-object-prefix",
+        default=os.getenv("JITSI_PARSED_OBJECT_PREFIX", "production/jitsi/parsed_transcripts").strip(),
+    )
+    parser.add_argument(
+        "--stage1-object-prefix",
+        default=os.getenv("STAGE1_OBJECT_PREFIX", "production/inference_requests/stage1").strip(),
+    )
+    parser.add_argument(
+        "--stage1-response-prefix",
+        default=os.getenv("STAGE1_RESPONSE_PREFIX", "production/inference_responses/stage1").strip(),
+    )
+    parser.add_argument(
+        "--stage2-object-prefix",
+        default=os.getenv("STAGE2_OBJECT_PREFIX", "production/inference_requests/stage2").strip(),
+    )
+    parser.add_argument(
+        "--stage2-response-prefix",
+        default=os.getenv("STAGE2_RESPONSE_PREFIX", "production/inference_responses/stage2").strip(),
+    )
+    parser.add_argument(
+        "--reconstructed-segments-prefix",
+        default=os.getenv("SEGMENTS_PREFIX", "production/reconstructed_segments").strip(),
+    )
+    parser.add_argument(
+        "--artifact-version",
+        type=int,
+        default=int(os.getenv("STAGE1_ARTIFACT_VERSION", "1")),
+    )
+    parser.add_argument(
+        "--stage2-model-name",
+        default=os.getenv("STAGE2_MODEL_NAME", "stage2-summarizer").strip(),
+    )
+    parser.add_argument(
+        "--stage2-model-version",
+        default=os.getenv("STAGE2_MODEL_VERSION", "").strip(),
+    )
+    parser.add_argument(
+        "--stage2-prompt-version",
+        default=os.getenv("STAGE2_PROMPT_VERSION", "").strip(),
+    )
+    parser.add_argument(
         "--log-file",
         type=Path,
         default=Path("/mnt/block/ingest_logs/retraining_dataset_lineage_restore.log"),
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+def missing_meeting_recovery_config(args: argparse.Namespace) -> MissingMeetingRecoveryConfig:
+    return MissingMeetingRecoveryConfig(
+        parsed_prefix=args.jitsi_parsed_object_prefix,
+        stage1_request_prefix=args.stage1_object_prefix,
+        stage1_response_prefix=args.stage1_response_prefix,
+        stage2_request_prefix=args.stage2_object_prefix,
+        stage2_response_prefix=args.stage2_response_prefix,
+        reconstructed_segments_prefix=args.reconstructed_segments_prefix,
+        artifact_version=args.artifact_version,
+        stage2_model_name=args.stage2_model_name,
+        stage2_model_version=args.stage2_model_version,
+        stage2_prompt_version=args.stage2_prompt_version,
+    )
 
 
 def setup_logger(log_file: Path | None = None) -> logging.Logger:
@@ -237,8 +332,424 @@ def read_remote_json(
     return json.loads(result.stdout)
 
 
+def read_remote_jsonl(
+    *,
+    remote: str,
+    bucket: str,
+    object_key: str,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    result = run_command(
+        ["rclone", "cat", remote_object_path(remote, bucket, object_key)],
+        logger=logger,
+        label=f"read remote jsonl {object_key}",
+        capture=True,
+    )
+    rows: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            rows.append(parsed)
+    return rows
+
+
 def read_local_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def list_remote_files(
+    *,
+    remote: str,
+    bucket: str,
+    prefix: str,
+    logger: logging.Logger,
+) -> list[str]:
+    result = run_command(
+        ["rclone", "lsf", "--files-only", remote_dir_path(remote, bucket, prefix)],
+        logger=logger,
+        label=f"list remote files under {prefix}",
+        capture=True,
+        allow_failure=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def remote_object_exists(
+    *,
+    remote: str,
+    bucket: str,
+    object_key: str,
+    logger: logging.Logger,
+) -> bool:
+    result = run_command(
+        ["rclone", "lsf", remote_object_path(remote, bucket, object_key)],
+        logger=logger,
+        label=f"check remote object {object_key}",
+        capture=True,
+        allow_failure=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def content_type_for_artifact(artifact_type: str) -> str:
+    return ARTIFACT_CONTENT_TYPES.get(artifact_type, "application/octet-stream")
+
+
+def find_latest_jitsi_parsed_payload(
+    meeting_id: str,
+    *,
+    remote: str,
+    bucket: str,
+    config: MissingMeetingRecoveryConfig,
+    logger: logging.Logger,
+) -> tuple[str, int] | None:
+    prefix = f"{config.parsed_prefix.strip('/')}/{meeting_id}"
+    files = list_remote_files(
+        remote=remote,
+        bucket=bucket,
+        prefix=prefix,
+        logger=logger,
+    )
+    candidates: list[tuple[int, str]] = []
+    for file_name in files:
+        match = VERSIONED_JSON_RE.match(file_name)
+        if not match:
+            continue
+        version = int(match.group("version"))
+        candidates.append((version, f"{prefix}/{file_name}"))
+
+    if not candidates:
+        fallback_key = f"{prefix}/v{config.artifact_version}.json"
+        if remote_object_exists(
+            remote=remote,
+            bucket=bucket,
+            object_key=fallback_key,
+            logger=logger,
+        ):
+            return fallback_key, config.artifact_version
+        return None
+
+    candidates.sort()
+    return candidates[-1][1], candidates[-1][0]
+
+
+def normalize_parsed_jitsi_payload(
+    payload: dict[str, Any],
+    *,
+    meeting_id: str,
+    parsed_object_key: str,
+    logger: logging.Logger,
+    remote: str,
+    bucket: str,
+) -> tuple[dict[str, Any], int]:
+    normalized_payload = json.loads(json.dumps(payload))
+
+    meeting = normalized_payload.get("meeting")
+    if not isinstance(meeting, dict):
+        raise RuntimeError(f"Parsed transcript payload for {meeting_id} is missing meeting metadata")
+
+    payload_meeting_id = str(meeting.get("meeting_id") or "").strip()
+    if payload_meeting_id != meeting_id:
+        raise RuntimeError(
+            f"Parsed transcript payload meeting_id mismatch: expected {meeting_id}, found {payload_meeting_id or 'none'}"
+        )
+
+    artifact_rows = normalized_payload.get("meeting_artifacts")
+    if not isinstance(artifact_rows, list):
+        raise RuntimeError(f"Parsed transcript payload for {meeting_id} is missing meeting_artifacts")
+
+    verified_base_artifacts: list[dict[str, Any]] = []
+    parsed_artifact_version = None
+    for artifact in artifact_rows:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_type = str(artifact.get("artifact_type") or "").strip()
+        object_key = str(artifact.get("object_key") or "").strip()
+        if artifact_type not in {"raw_transcript", "parsed_transcript"}:
+            continue
+        if artifact_type == "parsed_transcript":
+            object_key = parsed_object_key
+
+        if not object_key:
+            continue
+        if not remote_object_exists(
+            remote=remote,
+            bucket=bucket,
+            object_key=object_key,
+            logger=logger,
+        ):
+            logger.warning(
+                "Skipping missing stored artifact while restoring %s | meeting_id=%s | object_key=%s",
+                artifact_type,
+                meeting_id,
+                object_key,
+            )
+            continue
+
+        normalized_artifact = dict(artifact)
+        normalized_artifact["meeting_id"] = meeting_id
+        normalized_artifact["object_key"] = object_key
+        normalized_artifact["content_type"] = (
+            str(artifact.get("content_type") or "").strip()
+            or content_type_for_artifact(artifact_type)
+        )
+        artifact_version = int(artifact.get("artifact_version") or 1)
+        normalized_artifact["artifact_version"] = artifact_version
+        if artifact_type == "parsed_transcript":
+            parsed_artifact_version = artifact_version
+        verified_base_artifacts.append(normalized_artifact)
+
+    if not any(str(row.get("artifact_type")) == "parsed_transcript" for row in verified_base_artifacts):
+        raise RuntimeError(
+            f"Cannot restore historical Jitsi meeting {meeting_id} because the parsed_transcript artifact is unavailable"
+        )
+
+    normalized_payload["meeting_artifacts"] = verified_base_artifacts
+    return normalized_payload, parsed_artifact_version or 1
+
+
+def candidate_jitsi_artifact_keys(
+    meeting_id: str,
+    version: int,
+    config: MissingMeetingRecoveryConfig,
+) -> dict[str, str]:
+    stage1_prefix = f"{config.stage1_request_prefix.strip('/')}/{meeting_id}/v{version}"
+    stage1_response_prefix = f"{config.stage1_response_prefix.strip('/')}/{meeting_id}/v{version}"
+    stage2_prefix = f"{config.stage2_request_prefix.strip('/')}/{meeting_id}/v{version}"
+    stage2_response_prefix = f"{config.stage2_response_prefix.strip('/')}/{meeting_id}/v{version}"
+    reconstructed_segments_key = (
+        f"{config.reconstructed_segments_prefix.strip('/')}/{meeting_id}/v{version}.json"
+    )
+
+    return {
+        "stage1_requests_jsonl": f"{stage1_prefix}/requests.jsonl",
+        "stage1_requests_json": f"{stage1_prefix}/requests.json",
+        "stage1_model_utterances_json": f"{stage1_prefix}/model_utterances.json",
+        "stage1_manifest_json": f"{stage1_prefix}/manifest.json",
+        "stage1_responses_jsonl": f"{stage1_response_prefix}/responses.jsonl",
+        "stage1_responses_json": f"{stage1_response_prefix}/responses.json",
+        "stage2_inputs_jsonl": f"{stage2_prefix}/inputs.jsonl",
+        "stage2_inputs_json": f"{stage2_prefix}/inputs.json",
+        "reconstructed_segments_json": reconstructed_segments_key,
+        "stage2_responses_jsonl": f"{stage2_response_prefix}/responses.jsonl",
+        "stage2_responses_json": f"{stage2_response_prefix}/responses.json",
+        "summary_json": f"{stage2_response_prefix}/summary.json",
+    }
+
+
+def restore_verified_artifact_rows(
+    conn,
+    *,
+    meeting_id: str,
+    version: int,
+    remote: str,
+    bucket: str,
+    config: MissingMeetingRecoveryConfig,
+    logger: logging.Logger,
+    dry_run: bool,
+) -> dict[str, str]:
+    restored_keys: dict[str, str] = {}
+    for artifact_type, object_key in candidate_jitsi_artifact_keys(meeting_id, version, config).items():
+        if not remote_object_exists(
+            remote=remote,
+            bucket=bucket,
+            object_key=object_key,
+            logger=logger,
+        ):
+            continue
+
+        restored_keys[artifact_type] = object_key
+        if dry_run:
+            continue
+
+        upsert_meeting_artifact(
+            conn,
+            meeting_id,
+            artifact_type,
+            object_key,
+            content_type_for_artifact(artifact_type),
+            version,
+        )
+
+    if not dry_run:
+        conn.commit()
+    return restored_keys
+
+
+def restore_materialized_summary_rows(
+    conn,
+    *,
+    meeting_id: str,
+    version: int,
+    restored_artifacts: dict[str, str],
+    remote: str,
+    bucket: str,
+    config: MissingMeetingRecoveryConfig,
+    logger: logging.Logger,
+    dry_run: bool,
+) -> bool:
+    stage2_inputs_key = restored_artifacts.get("stage2_inputs_json")
+    response_json_key = restored_artifacts.get("stage2_responses_json")
+    summary_json_key = restored_artifacts.get("summary_json")
+    if not stage2_inputs_key or not response_json_key or not summary_json_key:
+        return False
+
+    stage2_payload = read_remote_json(
+        remote=remote,
+        bucket=bucket,
+        object_key=stage2_inputs_key,
+        logger=logger,
+    )
+    stage2_inputs = stage2_payload.get("segments") if isinstance(stage2_payload, dict) else None
+    if not isinstance(stage2_inputs, list) or not stage2_inputs:
+        logger.info(
+            "Skipping recap materialization because stored Stage 2 inputs are empty | meeting_id=%s",
+            meeting_id,
+        )
+        return False
+
+    response_payload = read_remote_json(
+        remote=remote,
+        bucket=bucket,
+        object_key=response_json_key,
+        logger=logger,
+    )
+    response_rows = extract_response_rows(response_payload) or []
+    if not response_rows and "stage2_responses_jsonl" in restored_artifacts:
+        response_rows = read_remote_jsonl(
+            remote=remote,
+            bucket=bucket,
+            object_key=restored_artifacts["stage2_responses_jsonl"],
+            logger=logger,
+        )
+
+    normalized_outputs = normalize_saved_stage2_outputs(response_rows, stage2_inputs)
+    if len(normalized_outputs) != len(stage2_inputs):
+        logger.warning(
+            "Skipping recap materialization because stored Stage 2 outputs are incomplete | meeting_id=%s inputs=%s outputs=%s",
+            meeting_id,
+            len(stage2_inputs),
+            len(normalized_outputs),
+        )
+        return False
+
+    if dry_run:
+        logger.info(
+            "Dry-run only | would materialize llm_generated summary rows for restored historical meeting %s",
+            meeting_id,
+        )
+        return True
+
+    register_recap_outputs(
+        conn,
+        meeting_id=meeting_id,
+        version=version,
+        recap_uri=summary_json_key,
+        stage2_inputs=stage2_inputs,
+        stage2_outputs=normalized_outputs,
+        model_name=config.stage2_model_name,
+        model_version=config.stage2_model_version,
+        prompt_version=config.stage2_prompt_version,
+    )
+    conn.commit()
+    return True
+
+
+def restore_missing_jitsi_meetings(
+    meeting_ids: list[str],
+    *,
+    conn,
+    remote: str,
+    bucket: str,
+    config: MissingMeetingRecoveryConfig,
+    logger: logging.Logger,
+    dry_run: bool,
+) -> set[str]:
+    restored_ids: set[str] = set()
+    for meeting_id in meeting_ids:
+        if not JITSI_MEETING_ID_RE.match(meeting_id):
+            continue
+
+        parsed_payload_info = find_latest_jitsi_parsed_payload(
+            meeting_id,
+            remote=remote,
+            bucket=bucket,
+            config=config,
+            logger=logger,
+        )
+        if parsed_payload_info is None:
+            logger.warning(
+                "No stored parsed transcript artifact was found for historical meeting %s",
+                meeting_id,
+            )
+            continue
+
+        parsed_object_key, parsed_version = parsed_payload_info
+        parsed_payload = read_remote_json(
+            remote=remote,
+            bucket=bucket,
+            object_key=parsed_object_key,
+            logger=logger,
+        )
+        normalized_payload, artifact_version = normalize_parsed_jitsi_payload(
+            parsed_payload,
+            meeting_id=meeting_id,
+            parsed_object_key=parsed_object_key,
+            logger=logger,
+            remote=remote,
+            bucket=bucket,
+        )
+
+        logger.info(
+            "Restoring historical Jitsi meeting from stored parsed payload | meeting_id=%s parsed_version=v%s artifact_version=%s",
+            meeting_id,
+            parsed_version,
+            artifact_version,
+        )
+
+        if not dry_run:
+            insert_jitsi_rows(
+                conn=conn,
+                payload=normalized_payload,
+                replace_existing=False,
+                artifact_version=artifact_version,
+                logger=logger,
+            )
+
+        restored_artifacts = restore_verified_artifact_rows(
+            conn,
+            meeting_id=meeting_id,
+            version=artifact_version,
+            remote=remote,
+            bucket=bucket,
+            config=config,
+            logger=logger,
+            dry_run=dry_run,
+        )
+        restore_materialized_summary_rows(
+            conn,
+            meeting_id=meeting_id,
+            version=artifact_version,
+            restored_artifacts=restored_artifacts,
+            remote=remote,
+            bucket=bucket,
+            config=config,
+            logger=logger,
+            dry_run=dry_run,
+        )
+        restored_ids.add(meeting_id)
+
+    if restored_ids:
+        logger.info(
+            "Historical Jitsi recovery completed | restored=%s",
+            ", ".join(sorted(restored_ids)),
+        )
+    return restored_ids
 
 
 def determine_authoritative_versions(
@@ -591,11 +1102,39 @@ def validate_referenced_meetings_present(
     stored_versions: list[StoredVersion],
     *,
     conn,
+    remote: str,
+    bucket: str,
+    missing_meeting_config: MissingMeetingRecoveryConfig,
+    logger: logging.Logger,
+    dry_run: bool,
 ) -> dict[str, dict[str, Any]]:
     meeting_ids = collect_referenced_meeting_ids(stored_versions)
     meeting_states = fetch_meeting_states(conn, meeting_ids)
 
     missing = [meeting_id for meeting_id in meeting_ids if meeting_id not in meeting_states]
+    if missing:
+        restored_ids = restore_missing_jitsi_meetings(
+            missing,
+            conn=conn,
+            remote=remote,
+            bucket=bucket,
+            config=missing_meeting_config,
+            logger=logger,
+            dry_run=dry_run,
+        )
+        if restored_ids:
+            if dry_run:
+                for meeting_id in restored_ids:
+                    meeting_states[meeting_id] = {
+                        "meeting_id": meeting_id,
+                        "source_type": "jitsi",
+                        "dataset_version": None,
+                        "dataset_split": None,
+                    }
+            else:
+                meeting_states = fetch_meeting_states(conn, meeting_ids)
+            missing = [meeting_id for meeting_id in meeting_ids if meeting_id not in meeting_states]
+
     if missing:
         sample = ", ".join(missing[:10])
         extra = "" if len(missing) <= 10 else f" (+{len(missing) - 10} more)"
@@ -854,6 +1393,11 @@ def main() -> int:
             meeting_states = validate_referenced_meetings_present(
                 meeting_versions,
                 conn=conn,
+                remote=args.rclone_remote,
+                bucket=args.bucket,
+                missing_meeting_config=missing_meeting_recovery_config(args),
+                logger=logger,
+                dry_run=args.dry_run,
             )
 
             for plan in planned_restores:

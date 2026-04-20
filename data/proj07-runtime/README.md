@@ -75,7 +75,7 @@ The runtime also owns the AMI historical-data bootstrap path used by `../setup.s
 - `ingest_ami_meeting.py`
   - parses one staged AMI meeting, uploads processed transcript/summary artifacts, inserts `meetings`, `users`, `meeting_participants`, `meeting_speakers`, `utterances`, `topic_segments`, `utterance_transitions`, `meeting_artifacts`, and `summaries`, and repairs partial AMI rows by replacing the existing meeting when needed
 - `restore_dataset_lineage.py`
-  - restores historical `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` directories from block storage or object storage, upserts their `dataset_versions` manifests, and replays per-meeting `dataset_version` / `dataset_split` stamps only when every referenced meeting is already present in Postgres
+  - restores historical `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` directories from block storage or object storage, upserts their `dataset_versions` manifests, attempts to recover any lineage-referenced historical `jitsi_*` meetings from stored parsed transcript payloads plus verified Stage 1 / Stage 2 artifacts, and then replays per-meeting `dataset_version` / `dataset_split` stamps
 
 Manual trigger:
 
@@ -85,7 +85,7 @@ python -m proj07_services.pipeline.bootstrap_ami_corpus
 python -m proj07_services.retraining.restore_dataset_lineage
 ```
 
-`restore_dataset_lineage.py` is intentionally conservative. If stored dataset versions point at meetings that are missing from Postgres, it fails instead of silently restamping the wrong lineage. For a truly fresh environment, clear those stored dataset prefixes or disable `BOOTSTRAP_DATASET_LINEAGE_ENABLED` before running `../setup.sh`.
+`restore_dataset_lineage.py` is intentionally conservative. It will only recover missing historical Jitsi meetings when the stored parsed transcript payload and any claimed artifact files actually exist in object storage; otherwise it still fails instead of silently restamping the wrong lineage. For a truly fresh environment, clear those stored dataset prefixes or disable `BOOTSTRAP_DATASET_LINEAGE_ENABLED` before running `../setup.sh`.
 
 ## Core DB tables
 

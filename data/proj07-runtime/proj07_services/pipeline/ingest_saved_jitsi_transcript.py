@@ -68,11 +68,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--raw-object-prefix",
-        default="production/jitsi/raw_transcripts",
+        default=os.getenv("JITSI_RAW_OBJECT_PREFIX", "production/jitsi/raw_transcripts"),
     )
     parser.add_argument(
         "--parsed-object-prefix",
-        default="production/jitsi/parsed_transcripts",
+        default=os.getenv("JITSI_PARSED_OBJECT_PREFIX", "production/jitsi/parsed_transcripts"),
     )
     parser.add_argument(
         "--replace-existing",
