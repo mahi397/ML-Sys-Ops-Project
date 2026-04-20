@@ -90,16 +90,30 @@ cp jitsi-deployment/stack.env.example jitsi-deployment/stack.env
 
 2. Edit `jitsi-deployment/stack.env`.
 
-Required values:
-
-- `MEETING_PORTAL_DATABASE_URL`
-- `JITSI_TRANSCRIPT_INGEST_URL`
-
-Recommended values:
+Update these values before running the installer:
 
 - `PUBLIC_URL`
 - `JVB_ADVERTISE_IPS`
+- `MEETING_PORTAL_DATABASE_URL`
+- `JITSI_TRANSCRIPT_INGEST_URL`
+
+Example values if your Jitsi VM is `198.51.100.25` and your runtime/API VM is `198.51.100.30`:
+
+```dotenv
+PUBLIC_URL=https://198.51.100.25:8443
+JVB_ADVERTISE_IPS=198.51.100.25
+MEETING_PORTAL_DATABASE_URL=postgresql://proj07_user:proj07@198.51.100.30:5432/proj07_sql_db
+JITSI_TRANSCRIPT_INGEST_URL=http://198.51.100.30:9000/ingest/jitsi-transcript
+```
+
+Recommended values:
+
 - `JITSI_HOST_EXTERNAL_KEY`
+
+The bundled `stack.env.example` now defaults to `HTTP_PORT=8000` and `HTTPS_PORT=8443`. If you keep
+those ports, make sure `PUBLIC_URL` includes the external HTTPS port, for example
+`https://YOUR_VM_IP:8443`. If you change ports, keep `PUBLIC_URL`, `HTTP_PORT`, `HTTPS_PORT`, and
+`JVB_ADVERTISE_IPS` aligned with how the VM is actually reachable.
 
 For transcription-only installs, leave `JIGASI_DISABLE_SIP=1`. Only set `JIGASI_DISABLE_SIP=0` and replace the demo `JIGASI_SIP_*` values if you want the SIP/PSTN gateway itself.
 
