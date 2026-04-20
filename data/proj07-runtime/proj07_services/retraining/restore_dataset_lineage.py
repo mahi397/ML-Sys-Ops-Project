@@ -503,83 +503,90 @@ def normalize_parsed_jitsi_payload(
 
     # Backward-compatible participants normalization:
     # historical meetings may not have explicit participant records.
-    # If missing, derive lightweight participants from known speakers.
-    if not isinstance(normalized_payload.get("participants"), list):
-        participants_rows: list[dict[str, Any]] = []
+    # If missing, derive lightweight participant rows from known speakers.
+    participants_rows: list[dict[str, Any]] = []
 
-        if isinstance(meeting.get("participants"), list):
-            participants_rows = [
-                row for row in meeting["participants"] if isinstance(row, dict)
-            ]
+    if isinstance(normalized_payload.get("meeting_participants"), list):
+        participants_rows = [
+            row for row in normalized_payload["meeting_participants"]
+            if isinstance(row, dict)
+        ]
 
-        elif isinstance(normalized_payload.get("meeting_participants"), list):
-            participants_rows = [
-                row for row in normalized_payload["meeting_participants"] if isinstance(row, dict)
-            ]
+    elif isinstance(normalized_payload.get("participants"), list):
+        participants_rows = [
+            row for row in normalized_payload["participants"]
+            if isinstance(row, dict)
+        ]
 
+    elif isinstance(meeting.get("participants"), list):
+        participants_rows = [
+            row for row in meeting["participants"]
+            if isinstance(row, dict)
+        ]
+
+    else:
+        speakers = None
+
+        if isinstance(normalized_payload.get("meeting_speakers"), list):
+            speakers = normalized_payload["meeting_speakers"]
+        elif isinstance(meeting.get("meeting_speakers"), list):
+            speakers = meeting["meeting_speakers"]
+        elif isinstance(normalized_payload.get("speakers"), list):
+            speakers = normalized_payload["speakers"]
+        elif isinstance(meeting.get("speakers"), list):
+            speakers = meeting["speakers"]
+
+        if isinstance(speakers, list):
+            seen: set[str] = set()
+
+            for speaker in speakers:
+                if not isinstance(speaker, dict):
+                    continue
+
+                dedupe_key = str(
+                    speaker.get("speaker_id")
+                    or speaker.get("speaker_label")
+                    or speaker.get("display_name")
+                    or speaker.get("speaker_name")
+                    or ""
+                ).strip()
+
+                if dedupe_key and dedupe_key in seen:
+                    continue
+                if dedupe_key:
+                    seen.add(dedupe_key)
+
+                participants_rows.append(
+                    {
+                        "user_id": speaker.get("user_id"),  # can be None
+                        "external_key": speaker.get("external_key"),
+                        "display_name": str(
+                            speaker.get("display_name")
+                            or speaker.get("speaker_name")
+                            or speaker.get("speaker_label")
+                            or speaker.get("speaker_id")
+                            or ""
+                        ).strip(),
+                        "email": (str(speaker.get("email") or "").strip() or None),
+                    }
+                )
+
+        if participants_rows:
+            logger.warning(
+                "Synthesized %d participant row(s) from speakers during restore | meeting_id=%s",
+                len(participants_rows),
+                meeting_id,
+            )
         else:
-            speakers = None
+            logger.warning(
+                "No participant metadata found for historical meeting; restoring with empty participant rows | meeting_id=%s",
+                meeting_id,
+            )
 
-            if isinstance(normalized_payload.get("meeting_speakers"), list):
-                speakers = normalized_payload["meeting_speakers"]
-            elif isinstance(meeting.get("meeting_speakers"), list):
-                speakers = meeting["meeting_speakers"]
-            elif isinstance(normalized_payload.get("speakers"), list):
-                speakers = normalized_payload["speakers"]
-            elif isinstance(meeting.get("speakers"), list):
-                speakers = meeting["speakers"]
-
-            if isinstance(speakers, list):
-                seen: set[str] = set()
-
-                for speaker in speakers:
-                    if not isinstance(speaker, dict):
-                        continue
-
-                    dedupe_key = str(
-                        speaker.get("speaker_id")
-                        or speaker.get("speaker_label")
-                        or speaker.get("display_name")
-                        or speaker.get("speaker_name")
-                        or ""
-                    ).strip()
-
-                    if dedupe_key and dedupe_key in seen:
-                        continue
-                    if dedupe_key:
-                        seen.add(dedupe_key)
-
-                    participants_rows.append(
-                        {
-                            # user_id may legitimately be unknown for old meetings
-                            "user_id": speaker.get("user_id"),
-                            "external_key": speaker.get("external_key"),
-                            "display_name": str(
-                                speaker.get("display_name")
-                                or speaker.get("speaker_name")
-                                or speaker.get("speaker_label")
-                                or speaker.get("speaker_id")
-                                or ""
-                            ).strip(),
-                            "email": (
-                                str(speaker.get("email") or "").strip() or None
-                            ),
-                        }
-                    )
-
-                if participants_rows:
-                    logger.warning(
-                        "Synthesized %d participant row(s) from speakers during restore | meeting_id=%s",
-                        len(participants_rows),
-                        meeting_id,
-                    )
-                else:
-                    logger.warning(
-                        "No participant metadata found for historical meeting; restoring with empty participants | meeting_id=%s",
-                        meeting_id,
-                    )
-
-        normalized_payload["participants"] = participants_rows
+    # Important: preserve both keys because older payloads and current ingester
+    # may look for different field names.
+    normalized_payload["participants"] = participants_rows
+    normalized_payload["meeting_participants"] = participants_rows
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
