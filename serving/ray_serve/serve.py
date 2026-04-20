@@ -441,13 +441,20 @@ class MetricsDeployment:
 
     def _update_system(self):
         try:
-            if torch.cuda.is_available():
-                mem_used = torch.cuda.memory_allocated(0) / 1024 / 1024
-                mem_total = torch.cuda.get_device_properties(0).total_mem / 1024 / 1024
-                self.gpu_mem_used.set(mem_used)
-                self.gpu_mem_total.set(mem_total)
-        except:
-            pass
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            self.gpu_mem_used.set(info.used / 1024 / 1024)
+            self.gpu_mem_total.set(info.total / 1024 / 1024)
+        except Exception:
+            # fallback to torch (only sees current process)
+            try:
+                if torch.cuda.is_available():
+                    self.gpu_mem_used.set(torch.cuda.memory_allocated(0) / 1024 / 1024)
+                    self.gpu_mem_total.set(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024)
+            except:
+                pass
         self.cpu_util.set(psutil.cpu_percent())
         self.ram_used.set(psutil.virtual_memory().used / 1024 / 1024)
 
@@ -748,6 +755,17 @@ class SummarizerDeployment:
         segment_id = body.get("segment_id", 0)
         t_start = body.get("t_start", 0)
         t_end = body.get("t_end", 0)
+
+        # ── VALIDATION: require utterances ──
+        utterances = body.get("utterances", [])
+        if not utterances:
+            return {
+                "meeting_id": meeting_id, "segment_id": segment_id,
+                "t_start": t_start, "t_end": t_end,
+                "topic_label": "", "summary_bullets": [],
+                "status": "error", "error": "No utterances provided"
+            }
+
 
         if self.llm is None:
             return {
@@ -1145,7 +1163,7 @@ class RecapAPIDeployment:
                     "meeting_title":    meeting_id,
                     "meeting_duration": duration_str,
                     "participant_count": len(speakers),
-                    "model_version":    segments[0].get("model_version") or "mlflow@prod1",
+                    "model_version":    segments[0].get("model_version") or f"mlflow@{MODEL_ALIAS}",
                     "created_at":       "",
                     "segments":         ui_segments,
                     "utterances":       ui_utterances,
@@ -1327,16 +1345,22 @@ class RecapAPIDeployment:
 @serve.deployment(name="recap_ui", num_replicas=1)
 class RecapUIDeployment:
     def __init__(self):
-        ui_path = Path(__file__).parent / "recap_ui.html"
-        if ui_path.exists():
-            self._html = ui_path.read_text()
-            print(f"[recap_ui] Loaded UI from {ui_path}")
+        self._path = Path(__file__).parent / "recap_ui.html"
+        if not self._path.exists():
+            print(f"[recap_ui] WARNING: {self._path} not found")
         else:
-            self._html = "<h1>recap_ui.html not found</h1>"
-            print(f"[recap_ui] WARNING: {ui_path} not found")
+            print(f"[recap_ui] Will serve UI from {self._path} (disk-read per request)")
 
     async def __call__(self, request: Request) -> Response:
-        return Response(content=self._html, media_type="text/html")
+        if self._path.exists():
+            html = self._path.read_text()
+        else:
+            html = "<h1>recap_ui.html not found</h1>"
+        return Response(
+            content=html,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
     
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
