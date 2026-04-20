@@ -1,6 +1,6 @@
 # Endpoint Replay Runtime
 
-This folder now lives under `data/initial_implementation/` because it preserves the original standalone runtime from April 6, 2026. The final integrated layout is now split between `../../proj07-db/` for schema/bootstrap assets and `../../proj07-services/` for the running services.
+This folder now lives under `data/initial_implementation/` because it preserves the original standalone runtime from April 6, 2026. The final integrated layout now uses `../../proj07-db/` for schema/bootstrap assets and `../../proj07-runtime/` for the running stack.
 
 This folder is a self-contained runtime bundle for replaying hypothetical endpoint traffic:
 

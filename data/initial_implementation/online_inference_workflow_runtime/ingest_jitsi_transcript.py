@@ -424,9 +424,9 @@ def insert_rows(
         cur.execute(
             """
             INSERT INTO meetings (
-                meeting_id, source_type, source_name, started_at, ended_at, raw_folder_prefix
+                meeting_id, source_type, source_name, started_at, ended_at, raw_folder_prefix, is_valid
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 meeting["meeting_id"],
@@ -435,6 +435,7 @@ def insert_rows(
                 meeting["started_at"],
                 meeting["ended_at"],
                 meeting["raw_folder_prefix"],
+                False,
             ),
         )
 

@@ -13,6 +13,7 @@ def main() -> None:
             FROM meetings m
             JOIN feedback_events fe ON fe.meeting_id = m.meeting_id
             WHERE m.source_type = 'jitsi'
+              AND m.is_valid = TRUE
               AND m.dataset_version IS NULL
               AND fe.event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
             ORDER BY m.meeting_id

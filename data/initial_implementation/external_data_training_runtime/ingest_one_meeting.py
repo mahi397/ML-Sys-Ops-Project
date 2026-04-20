@@ -644,14 +644,15 @@ def load_rows_to_postgres(
     meeting_sql = f"""
     BEGIN;
     INSERT INTO meetings (
-        meeting_id, source_type, source_name, started_at, ended_at, raw_folder_prefix
+        meeting_id, source_type, source_name, started_at, ended_at, raw_folder_prefix, is_valid
     ) VALUES (
         {sql_literal(meeting_row["meeting_id"])},
         {sql_literal(meeting_row["source_type"])},
         {sql_literal(meeting_row["source_name"])},
         {sql_literal(meeting_row["started_at"])},
         {sql_literal(meeting_row["ended_at"])},
-        {sql_literal(meeting_row["raw_folder_prefix"])}
+        {sql_literal(meeting_row["raw_folder_prefix"])},
+        TRUE
     );
     COMMIT;
     """

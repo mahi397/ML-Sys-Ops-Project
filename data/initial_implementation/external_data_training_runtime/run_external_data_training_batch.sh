@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${EXTERNAL_DATA_TRAINING_ENV_FILE:-${SCRIPT_DIR}/external_data_training.env}"
+DATA_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+COMMON_ENV_FILE="${DATA_ROOT}/.env"
+LEGACY_ENV_FILE="${SCRIPT_DIR}/external_data_training.env"
+ENV_FILE="${EXTERNAL_DATA_TRAINING_ENV_FILE:-${COMMON_ENV_FILE}}"
+
+if [[ "${ENV_FILE}" == "${COMMON_ENV_FILE}" && ! -f "${ENV_FILE}" && -f "${LEGACY_ENV_FILE}" ]]; then
+  ENV_FILE="${LEGACY_ENV_FILE}"
+fi
 
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -11,12 +18,12 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
-OBJECT_BUCKET="${OBJECT_BUCKET:-objstore-proj07}"
+OBJECT_BUCKET="${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}"
 AMI_OBJECT_PREFIX="${AMI_OBJECT_PREFIX:-ami_public_manual_1.6.2}"
 
 DB_CONTAINER="${DB_CONTAINER:-postgres}"
-DB_USER="${DB_USER:-proj07_user}"
-DB_NAME="${DB_NAME:-proj07_sql_db}"
+DB_USER="${DB_USER:-${POSTGRES_USER:-proj07_user}}"
+DB_NAME="${DB_NAME:-${POSTGRES_DB:-proj07_sql_db}}"
 
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RAW_ROOT="${RAW_ROOT:-${BLOCK_ROOT}/staging/current_job/raw}"

@@ -17,7 +17,8 @@ CREATE TABLE meetings (
     dataset_split TEXT CHECK (
         dataset_split IS NULL
         OR dataset_split IN ('train', 'val', 'test')
-    )
+    ),
+    is_valid BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE users (

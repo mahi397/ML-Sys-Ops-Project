@@ -48,19 +48,25 @@ def build_stage1_feedback_pool(
         if candidate_meetings is None:
             cur.execute(
                 """
-                SELECT DISTINCT meeting_id
-                FROM feedback_events
-                WHERE event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
+                SELECT DISTINCT fe.meeting_id
+                FROM feedback_events fe
+                JOIN meetings m
+                  ON m.meeting_id = fe.meeting_id
+                WHERE m.is_valid = TRUE
+                  AND fe.event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
                 ORDER BY meeting_id
                 """
             )
         else:
             cur.execute(
                 """
-                SELECT DISTINCT meeting_id
-                FROM feedback_events
-                WHERE meeting_id = ANY(%s)
-                  AND event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
+                SELECT DISTINCT fe.meeting_id
+                FROM feedback_events fe
+                JOIN meetings m
+                  ON m.meeting_id = fe.meeting_id
+                WHERE m.is_valid = TRUE
+                  AND fe.meeting_id = ANY(%s)
+                  AND fe.event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
                 ORDER BY meeting_id
                 """,
                 (candidate_meetings,),

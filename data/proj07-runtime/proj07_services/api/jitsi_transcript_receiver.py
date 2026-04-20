@@ -21,7 +21,7 @@ SAVE_DIR = Path(
     os.getenv("JITSI_SAVE_DIR", "/mnt/block/user-behaviour/received_transcripts")
 )
 LOG_DIR = Path(
-    os.getenv("JITSI_LOG_DIR", "/mnt/block/ingest_logs/jitsi_transcripts")
+    os.getenv("JITSI_LOG_DIR", "/mnt/block/ingest_logs/jitsi_transcript")
 )
 LOG_FILE = LOG_DIR / f"{APP_NAME}_logs.txt"
 

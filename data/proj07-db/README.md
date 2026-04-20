@@ -1,28 +1,16 @@
 # proj07-db
 
-This folder is now DB-only.
+This folder is now source-only for the database layer.
 
-It contains the Postgres bootstrap assets for the final integrated workflow:
+It contains the schema and migration assets that the runnable stack under `../proj07-runtime/` mounts into Postgres:
 
 - `init_sql/`
   - schema bootstrap and integration-era SQL additions
-- `docker-compose.yml`
-  - starts Postgres plus Adminer only
-- `.env.example`
-  - DB-only environment defaults
 
 ## When to use this folder
 
-- Use `proj07-db/` when you only need the database and schema bootstrap.
-- Use `../proj07-services/` when you want the full ingest and workflow-service stack.
-- Do not run both compose files at the same time; the full-service compose already includes Postgres plus Adminer.
-
-## Start the DB only
-
-```bash
-cp .env.example .env
-docker compose up -d
-```
+- Use `proj07-db/` when you need to inspect or edit the canonical schema/bootstrap SQL.
+- Use `../proj07-runtime/` when you want to launch Postgres, Adminer, and the ingest/workflow services.
 
 ## Schema files
 
@@ -31,5 +19,6 @@ docker compose up -d
 - `init_sql/002_add_user_auth_columns.sql`
 - `init_sql/003_workflow_tasks.sql`
 - `init_sql/004_retrain_audit_logs.sql`
+- `init_sql/005_meeting_validity.sql`
 
-The SQL files under `init_sql/` are applied automatically by Postgres only when the database volume is initialized for the first time.
+The SQL files under `init_sql/` are mounted by `../proj07-runtime/docker-compose.yml`. On a fresh Postgres data volume they run automatically during container initialization, and the global `data/setup.sh` also re-applies the idempotent post-bootstrap migrations so existing volumes pick up schema additions such as `meetings.is_valid`.

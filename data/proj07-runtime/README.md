@@ -1,12 +1,10 @@
-# proj07-services
+# proj07-runtime
 
-This folder is the canonical final service integration under `data/`.
+This folder is the canonical final runnable stack under `data/`.
 
-It supersedes the original standalone runtime bundle now grouped under `../initial_implementation/` and contains the Jitsi transcript ingest service plus the async workers that build Stage 1 requests, forward Stage 1 inference, derive Stage 2 segment inputs, and materialize user-summary state.
+It supersedes the original standalone runtime bundle now grouped under `../initial_implementation/` and contains the Jitsi transcript ingest service plus the async workers that build Stage 1 requests, forward Stage 1 inference, derive Stage 2 segment inputs, materialize user-summary state, and monitor whether enough new valid meetings / feedback have accumulated to build the next retraining dataset snapshot.
 
-Database-specific assets were moved out to `../proj07-db/` so this folder stays service-only. The compose file here still mounts `../proj07-db/init_sql/` so the full stack can be started from one place.
-
-This compose file already includes Postgres plus Adminer, so it should be used instead of the DB-only compose when you want the full integrated stack.
+Database-specific source assets stay under `../proj07-db/`, but this folder owns the runnable stack. Its compose file launches Postgres, Adminer, and the current ingest/workflow services together, while mounting `../proj07-db/init_sql/` into Postgres during bootstrap.
 
 ## Package layout
 
@@ -22,9 +20,14 @@ This compose file already includes Postgres plus Adminer, so it should be used i
 ## Start the full stack
 
 ```bash
+cd ..
 cp .env.example .env
+bash setup.sh
+cd proj07-runtime
 docker compose up -d
 ```
+
+The canonical shared config file is `../.env`. `../setup.sh` keeps this folder's `.env` pointed at that shared file, so updating `data/.env` is enough for DB settings, object-store settings, and Stage 1 / Stage 2 inference URLs.
 
 ## Relationship to the initial implementation and DB layer
 
@@ -37,6 +40,7 @@ docker compose up -d
 - `proj07_services/workers/db_task_worker.py`, `proj07_services/common/task_service_common.py`, `proj07_services/common/workflow_task_common.py`, `proj07_services/workers/stage1_payload_service.py`, and `proj07_services/workers/stage2_input_service.py`
   - integration-specific additions introduced after the original bundle
 - `../proj07-db/init_sql/` contains the schema/bootstrap SQL that these services depend on.
+- `docker-compose.yml` in this folder owns the Postgres and Adminer containers that these services talk to.
 
 ## Current flow
 
@@ -52,6 +56,8 @@ docker compose up -d
 10. `stage2_input_service.py` loads `model_utterances.json` plus `stage1_responses.jsonl`, reconstructs predicted segments, writes Stage 2 input artifacts, and upserts their references into `meeting_artifacts`.
 11. `stage2_input_service.py` enqueues `stage2_forward`.
 12. `stage2_forward_service.py` posts `stage2_inputs.json` to `POST /summarize`, saves the Stage 2 response locally, optionally uploads it, and upserts response artifact rows into `meeting_artifacts`.
+13. `db_task_worker.py` continuously refreshes `meetings.is_valid` so retraining can exclude incomplete Jitsi meetings whose ingest or Stage 1 / Stage 2 artifact chain is missing.
+14. `retraining_dataset_service.py` watches for valid unconsumed meetings and structural feedback volume, then builds the next `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` snapshot when thresholds are crossed.
 
 The key split is:
 - `meeting_artifacts` describes durable data outputs
@@ -70,6 +76,7 @@ Common columns used in this flow:
 - `started_at`
 - `ended_at`
 - `raw_folder_prefix`
+- `is_valid`
 
 ### `meeting_artifacts`
 
@@ -152,6 +159,18 @@ Current task types:
 - `stage2_build`
 - `stage2_forward`
 
+### `dataset_versions`
+
+Stores versioned dataset manifests produced by feedback-pool and retraining snapshot builds.
+
+Common columns used in this flow:
+- `dataset_name`
+- `stage`
+- `source_type`
+- `object_key`
+- `manifest_json`
+- `created_at`
+
 ### `workflow_task_attempts`
 
 Stores one row per task attempt for audit and debugging.
@@ -181,6 +200,21 @@ Role:
 
 Role:
 - DB inspection UI only
+
+### `retraining_dataset_service.py`
+
+Role:
+- Polls Postgres for valid Jitsi meetings whose `dataset_version` is still `NULL`
+- Checks whether the threshold has been crossed for unconsumed valid meetings or structural feedback events
+- Builds the next Stage 1 feedback pool and rolling retraining snapshot when thresholds are met
+- Marks meetings consumed by the snapshot with the new `dataset_version` and `dataset_split`
+
+Manual trigger:
+
+```bash
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
 
 ### `jitsi_transcript_receiver.py`
 

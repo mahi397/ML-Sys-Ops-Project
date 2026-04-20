@@ -32,7 +32,8 @@ CREATE TABLE meetings (
     dataset_split TEXT CHECK (
         dataset_split IS NULL
         OR dataset_split IN ('train', 'val', 'test')
-    )
+    ),
+    is_valid BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE meeting_participants (
@@ -165,5 +166,8 @@ CREATE INDEX idx_summaries_meeting_id
 
 CREATE INDEX idx_meetings_dataset_version
     ON meetings(dataset_version);
+
+CREATE INDEX idx_meetings_source_type_is_valid
+    ON meetings(source_type, is_valid);
 
 COMMIT;

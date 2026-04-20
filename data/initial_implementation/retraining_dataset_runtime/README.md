@@ -1,10 +1,11 @@
 # Retraining Dataset Runtime
 
-This folder now lives under `data/initial_implementation/` because it preserves the original standalone runtime from April 6, 2026. The final integrated layout is now split between `../../proj07-db/` for schema/bootstrap assets and `../../proj07-services/` for the running services.
+This folder now lives under `data/initial_implementation/` because it preserves the original standalone runtime from April 6, 2026. The final integrated layout now uses `../../proj07-db/` for schema/bootstrap assets and `../../proj07-runtime/` for the running stack.
 
 This folder is a self-contained runtime bundle for compiling rolling retraining datasets:
 
 - start from online-inference workflow meetings that already have corrected production-like state in Postgres
+- only select meetings whose `meetings.is_valid = TRUE`
 - only select meetings whose `meetings.dataset_version` is still `NULL`
 - compile the next versioned Stage 1 feedback pool automatically
 - build the next versioned `roberta_stage1` snapshot automatically where:
@@ -27,6 +28,7 @@ This runtime assumes these already exist:
    - feedback events already created
    - corrected recap state already materialized
    - `topic_segments.segment_type = 'user_corrected'` for structurally corrected meetings
+   - `meetings.is_valid = TRUE` so incomplete ingest / Stage 1 / Stage 2 runs are excluded
    - `meetings.dataset_version IS NULL` for meetings that have not been consumed yet
 
 2. Historical base dataset already present locally at:

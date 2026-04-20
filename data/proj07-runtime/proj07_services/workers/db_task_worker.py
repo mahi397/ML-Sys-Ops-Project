@@ -69,6 +69,10 @@ class DispatcherConfig:
         "DB_TASK_USER_SUMMARY_ENABLED",
         True,
     )
+    meeting_validity_refresh_enabled: bool = env_flag(
+        "DB_TASK_MEETING_VALIDITY_ENABLED",
+        True,
+    )
 
 
 class DispatchTask(Protocol):
@@ -76,6 +80,139 @@ class DispatchTask(Protocol):
 
     def run_cycle(self, *, full_scan: bool) -> int:
         ...
+
+
+@dataclass
+class MeetingValidityRefreshTask:
+    config: DispatcherConfig
+    logger: object
+    name: str = "meeting_validity_refresh"
+
+    def run_cycle(self, *, full_scan: bool) -> int:
+        conn = get_conn()
+        try:
+            refreshed = self.refresh_validity_flags(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        if refreshed:
+            self.logger.info("Refreshed meeting validity flags | updated=%s", refreshed)
+        return refreshed
+
+    def refresh_validity_flags(self, conn) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH validity AS (
+                    SELECT
+                        m.meeting_id,
+                        (
+                            COUNT(u.utterance_id) >= 1
+                            AND raw_artifact.artifact_id IS NOT NULL
+                            AND parsed_artifact.artifact_id IS NOT NULL
+                            AND stage1_jsonl.artifact_id IS NOT NULL
+                            AND stage1_json.artifact_id IS NOT NULL
+                            AND stage1_model.artifact_id IS NOT NULL
+                            AND stage1_manifest.artifact_id IS NOT NULL
+                            AND stage1_resp_jsonl.artifact_id IS NOT NULL
+                            AND stage1_resp_json.artifact_id IS NOT NULL
+                            AND stage2_jsonl.artifact_id IS NOT NULL
+                            AND stage2_json.artifact_id IS NOT NULL
+                            AND reconstructed_segments.artifact_id IS NOT NULL
+                            AND stage2_resp_jsonl.artifact_id IS NOT NULL
+                            AND stage2_resp_json.artifact_id IS NOT NULL
+                            AND summary_json.artifact_id IS NOT NULL
+                        ) AS computed_is_valid
+                    FROM meetings m
+                    LEFT JOIN utterances u
+                      ON u.meeting_id = m.meeting_id
+                    LEFT JOIN meeting_artifacts raw_artifact
+                      ON raw_artifact.meeting_id = m.meeting_id
+                     AND raw_artifact.artifact_type = 'raw_transcript'
+                     AND raw_artifact.artifact_version = %s
+                    LEFT JOIN meeting_artifacts parsed_artifact
+                      ON parsed_artifact.meeting_id = m.meeting_id
+                     AND parsed_artifact.artifact_type = 'parsed_transcript'
+                     AND parsed_artifact.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage1_jsonl
+                      ON stage1_jsonl.meeting_id = m.meeting_id
+                     AND stage1_jsonl.artifact_type = 'stage1_requests_jsonl'
+                     AND stage1_jsonl.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage1_json
+                      ON stage1_json.meeting_id = m.meeting_id
+                     AND stage1_json.artifact_type = 'stage1_requests_json'
+                     AND stage1_json.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage1_model
+                      ON stage1_model.meeting_id = m.meeting_id
+                     AND stage1_model.artifact_type = 'stage1_model_utterances_json'
+                     AND stage1_model.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage1_manifest
+                      ON stage1_manifest.meeting_id = m.meeting_id
+                     AND stage1_manifest.artifact_type = 'stage1_manifest_json'
+                     AND stage1_manifest.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage1_resp_jsonl
+                      ON stage1_resp_jsonl.meeting_id = m.meeting_id
+                     AND stage1_resp_jsonl.artifact_type = 'stage1_responses_jsonl'
+                     AND stage1_resp_jsonl.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage1_resp_json
+                      ON stage1_resp_json.meeting_id = m.meeting_id
+                     AND stage1_resp_json.artifact_type = 'stage1_responses_json'
+                     AND stage1_resp_json.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage2_jsonl
+                      ON stage2_jsonl.meeting_id = m.meeting_id
+                     AND stage2_jsonl.artifact_type = 'stage2_inputs_jsonl'
+                     AND stage2_jsonl.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage2_json
+                      ON stage2_json.meeting_id = m.meeting_id
+                     AND stage2_json.artifact_type = 'stage2_inputs_json'
+                     AND stage2_json.artifact_version = %s
+                    LEFT JOIN meeting_artifacts reconstructed_segments
+                      ON reconstructed_segments.meeting_id = m.meeting_id
+                     AND reconstructed_segments.artifact_type = 'reconstructed_segments_json'
+                     AND reconstructed_segments.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage2_resp_jsonl
+                      ON stage2_resp_jsonl.meeting_id = m.meeting_id
+                     AND stage2_resp_jsonl.artifact_type = 'stage2_responses_jsonl'
+                     AND stage2_resp_jsonl.artifact_version = %s
+                    LEFT JOIN meeting_artifacts stage2_resp_json
+                      ON stage2_resp_json.meeting_id = m.meeting_id
+                     AND stage2_resp_json.artifact_type = 'stage2_responses_json'
+                     AND stage2_resp_json.artifact_version = %s
+                    LEFT JOIN meeting_artifacts summary_json
+                      ON summary_json.meeting_id = m.meeting_id
+                     AND summary_json.artifact_type = 'summary_json'
+                     AND summary_json.artifact_version = %s
+                    WHERE m.source_type = 'jitsi'
+                    GROUP BY
+                        m.meeting_id,
+                        raw_artifact.artifact_id,
+                        parsed_artifact.artifact_id,
+                        stage1_jsonl.artifact_id,
+                        stage1_json.artifact_id,
+                        stage1_model.artifact_id,
+                        stage1_manifest.artifact_id,
+                        stage1_resp_jsonl.artifact_id,
+                        stage1_resp_json.artifact_id,
+                        stage2_jsonl.artifact_id,
+                        stage2_json.artifact_id,
+                        reconstructed_segments.artifact_id,
+                        stage2_resp_jsonl.artifact_id,
+                        stage2_resp_json.artifact_id,
+                        summary_json.artifact_id
+                )
+                UPDATE meetings m
+                SET is_valid = validity.computed_is_valid
+                FROM validity
+                WHERE m.meeting_id = validity.meeting_id
+                  AND m.is_valid IS DISTINCT FROM validity.computed_is_valid
+                RETURNING m.meeting_id
+                """,
+                [self.config.stage1_version] * 14,
+            )
+            rows = cur.fetchall()
+
+        return len(rows)
 
 
 @dataclass
@@ -473,6 +610,8 @@ class UserSummaryDispatchTask:
 
 def build_dispatch_tasks(config: DispatcherConfig, logger) -> list[DispatchTask]:
     tasks: list[DispatchTask] = []
+    if config.meeting_validity_refresh_enabled:
+        tasks.append(MeetingValidityRefreshTask(config=config, logger=logger))
     if config.stage1_build_dispatch_enabled:
         tasks.append(Stage1BuildDispatchTask(config=config, logger=logger))
     if config.stage1_forward_dispatch_enabled:
@@ -548,6 +687,10 @@ def main() -> None:
     logger.info(
         "Dispatch tasks | user_summary=%s",
         config.user_summary_dispatch_enabled,
+    )
+    logger.info(
+        "Dispatch tasks | meeting_validity_refresh=%s",
+        config.meeting_validity_refresh_enabled,
     )
 
     next_full_scan_at = time.monotonic()

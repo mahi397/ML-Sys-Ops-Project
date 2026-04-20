@@ -920,6 +920,15 @@ def main() -> None:
             args.prompt_template.name,
             args.stage2_mode,
         )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meetings
+                SET is_valid = TRUE
+                WHERE meeting_id = %s
+                """,
+                (args.meeting_id,),
+            )
 
     conn.commit()
 

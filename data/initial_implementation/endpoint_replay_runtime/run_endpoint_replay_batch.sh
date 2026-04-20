@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ENDPOINT_REPLAY_ENV_FILE:-${SCRIPT_DIR}/endpoint_replay.env}"
+DATA_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+COMMON_ENV_FILE="${DATA_ROOT}/.env"
+LEGACY_ENV_FILE="${SCRIPT_DIR}/endpoint_replay.env"
+ENV_FILE="${ENDPOINT_REPLAY_ENV_FILE:-${COMMON_ENV_FILE}}"
+
+if [[ "${ENV_FILE}" == "${COMMON_ENV_FILE}" && ! -f "${ENV_FILE}" && -f "${LEGACY_ENV_FILE}" ]]; then
+  ENV_FILE="${LEGACY_ENV_FILE}"
+fi
 
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -10,9 +17,9 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATABASE_URL="${DATABASE_URL:-postgresql://proj07_user:proj07@127.0.0.1:5432/proj07_sql_db}"
+DATABASE_URL="${DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-proj07_sql_db}}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
-BUCKET="${BUCKET:-objstore-proj07}"
+BUCKET="${BUCKET:-${OBJECT_BUCKET:-objstore-proj07}}"
 
 ONLINE_STAGE1_ROOT="${ONLINE_STAGE1_ROOT:-/mnt/block/user-behaviour/online_inference/stage1}"
 STAGE1_RESPONSE_ROOT="${STAGE1_RESPONSE_ROOT:-/mnt/block/user-behaviour/inference_responses/stage1}"
@@ -29,8 +36,8 @@ VERSION="${VERSION:-1}"
 MODEL_VERSION="${MODEL_VERSION:-flowise-stage2-v1}"
 SYNTHETIC_MEETING_COUNT="${SYNTHETIC_MEETING_COUNT:-3}"
 SYNTHETIC_SEED="${SYNTHETIC_SEED:-42}"
-STAGE1_URL="${STAGE1_URL:-}"
-STAGE2_URL="${STAGE2_URL:-}"
+STAGE1_URL="${STAGE1_URL:-${STAGE1_FORWARD_URL:-}}"
+STAGE2_URL="${STAGE2_URL:-${STAGE2_FORWARD_URL:-}}"
 FLOWISE_BASE_URL="${FLOWISE_BASE_URL:-}"
 FLOWISE_FLOW_ID="${FLOWISE_FLOW_ID:-}"
 FLOWISE_API_KEY="${FLOWISE_API_KEY:-}"

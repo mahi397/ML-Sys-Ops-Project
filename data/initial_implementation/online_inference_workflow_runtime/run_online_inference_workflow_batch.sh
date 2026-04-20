@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ONLINE_INFERENCE_WORKFLOW_ENV_FILE:-${SCRIPT_DIR}/online_inference_workflow.env}"
+DATA_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+COMMON_ENV_FILE="${DATA_ROOT}/.env"
+LEGACY_ENV_FILE="${SCRIPT_DIR}/online_inference_workflow.env"
+ENV_FILE="${ONLINE_INFERENCE_WORKFLOW_ENV_FILE:-${COMMON_ENV_FILE}}"
+
+if [[ "${ENV_FILE}" == "${COMMON_ENV_FILE}" && ! -f "${ENV_FILE}" && -f "${LEGACY_ENV_FILE}" ]]; then
+  ENV_FILE="${LEGACY_ENV_FILE}"
+fi
 
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -10,9 +17,9 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATABASE_URL="${DATABASE_URL:-postgresql://proj07_user:proj07@127.0.0.1:5432/proj07_sql_db}"
+DATABASE_URL="${DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-proj07_sql_db}}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
-BUCKET="${BUCKET:-objstore-proj07}"
+BUCKET="${BUCKET:-${OBJECT_BUCKET:-objstore-proj07}}"
 
 TRANSCRIPT_ROOT="${TRANSCRIPT_ROOT:-/mnt/block/user-behaviour/Transcripts}"
 PARSED_TRANSCRIPT_ROOT="${PARSED_TRANSCRIPT_ROOT:-/mnt/block/user-behaviour/parsed_transcripts}"
