@@ -2,6 +2,14 @@
 set -euo pipefail
 
 DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJ07_DB_DIR="${DATA_DIR}/proj07-db"
+PROJ07_SERVICES_DIR="${DATA_DIR}/proj07-services"
+INITIAL_IMPLEMENTATION_DIR="${DATA_DIR}/initial_implementation"
+EXTERNAL_DATA_TRAINING_DIR="${INITIAL_IMPLEMENTATION_DIR}/external_data_training_runtime"
+ENDPOINT_REPLAY_DIR="${INITIAL_IMPLEMENTATION_DIR}/endpoint_replay_runtime"
+ONLINE_INFERENCE_DIR="${INITIAL_IMPLEMENTATION_DIR}/online_inference_workflow_runtime"
+RETRAINING_DATASET_DIR="${INITIAL_IMPLEMENTATION_DIR}/retraining_dataset_runtime"
+MOCK_JITSI_DIR="${INITIAL_IMPLEMENTATION_DIR}/mock_jitsi_meet"
 VENV_DIR="${VENV_DIR:-${DATA_DIR}/.venv}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 TRANSCRIPT_ROOT="${TRANSCRIPT_ROOT:-${BLOCK_ROOT}/user-behaviour/Transcripts}"
@@ -131,18 +139,19 @@ python -m pip install --upgrade pip
 python -m pip install -r "${DATA_DIR}/requirements.txt"
 
 banner "Preparing environment files"
-copy_if_missing "${DATA_DIR}/proj07-db/.env.example" "${DATA_DIR}/proj07-db/.env"
-copy_if_missing "${DATA_DIR}/external_data_training_runtime/external_data_training.env.example" "${DATA_DIR}/external_data_training_runtime/external_data_training.env"
-copy_if_missing "${DATA_DIR}/endpoint_replay_runtime/endpoint_replay.env.example" "${DATA_DIR}/endpoint_replay_runtime/endpoint_replay.env"
-copy_if_missing "${DATA_DIR}/online_inference_workflow_runtime/online_inference_workflow.env.example" "${DATA_DIR}/online_inference_workflow_runtime/online_inference_workflow.env"
-copy_if_missing "${DATA_DIR}/retraining_dataset_runtime/retraining_dataset.env.example" "${DATA_DIR}/retraining_dataset_runtime/retraining_dataset.env"
+copy_if_missing "${PROJ07_DB_DIR}/.env.example" "${PROJ07_DB_DIR}/.env"
+copy_if_missing "${PROJ07_SERVICES_DIR}/.env.example" "${PROJ07_SERVICES_DIR}/.env"
+copy_if_missing "${EXTERNAL_DATA_TRAINING_DIR}/external_data_training.env.example" "${EXTERNAL_DATA_TRAINING_DIR}/external_data_training.env"
+copy_if_missing "${ENDPOINT_REPLAY_DIR}/endpoint_replay.env.example" "${ENDPOINT_REPLAY_DIR}/endpoint_replay.env"
+copy_if_missing "${ONLINE_INFERENCE_DIR}/online_inference_workflow.env.example" "${ONLINE_INFERENCE_DIR}/online_inference_workflow.env"
+copy_if_missing "${RETRAINING_DATASET_DIR}/retraining_dataset.env.example" "${RETRAINING_DATASET_DIR}/retraining_dataset.env"
 
 banner "Marking batch scripts executable"
 chmod +x "${DATA_DIR}/setup.sh"
-chmod +x "${DATA_DIR}/external_data_training_runtime/run_external_data_training_batch.sh"
-chmod +x "${DATA_DIR}/endpoint_replay_runtime/run_endpoint_replay_batch.sh"
-chmod +x "${DATA_DIR}/online_inference_workflow_runtime/run_online_inference_workflow_batch.sh"
-chmod +x "${DATA_DIR}/retraining_dataset_runtime/run_retraining_dataset_batch.sh"
+chmod +x "${EXTERNAL_DATA_TRAINING_DIR}/run_external_data_training_batch.sh"
+chmod +x "${ENDPOINT_REPLAY_DIR}/run_endpoint_replay_batch.sh"
+chmod +x "${ONLINE_INFERENCE_DIR}/run_online_inference_workflow_batch.sh"
+chmod +x "${RETRAINING_DATASET_DIR}/run_retraining_dataset_batch.sh"
 
 banner "Preparing block-storage layout"
 mkdir -p \
@@ -165,7 +174,7 @@ mkdir -p \
 stage_ami_corpus_to_object_store
 
 banner "Seeding mock Jitsi transcripts into ${TRANSCRIPT_ROOT}"
-for transcript in "${DATA_DIR}"/mock_jitsi_meet/transcript_*.txt; do
+for transcript in "${MOCK_JITSI_DIR}"/transcript_*.txt; do
   if [[ -f "${transcript}" ]]; then
     cp -n "${transcript}" "${TRANSCRIPT_ROOT}/"
   fi
@@ -181,11 +190,16 @@ AMI raw corpus uploaded to:
 Next steps:
 1. Activate the virtual environment:
    source "${VENV_DIR}/bin/activate"
-2. Start Postgres and Adminer:
-   cd "${DATA_DIR}/proj07-db" && docker compose up -d
-3. Run the runtimes in order:
-   bash "${DATA_DIR}/external_data_training_runtime/run_external_data_training_batch.sh"
-   bash "${DATA_DIR}/endpoint_replay_runtime/run_endpoint_replay_batch.sh"
-   bash "${DATA_DIR}/online_inference_workflow_runtime/run_online_inference_workflow_batch.sh"
-   bash "${DATA_DIR}/retraining_dataset_runtime/run_retraining_dataset_batch.sh"
+2. Start the integrated service stack:
+   cd "${PROJ07_SERVICES_DIR}" && docker compose up -d
+3. Read the integrated service guide:
+   ${PROJ07_SERVICES_DIR}/README.md
+4. If you only need Postgres plus Adminer:
+   cd "${PROJ07_DB_DIR}" && docker compose up -d
+5. Legacy batch runtimes from the initial implementation remain available under:
+   ${INITIAL_IMPLEMENTATION_DIR}
+   bash "${EXTERNAL_DATA_TRAINING_DIR}/run_external_data_training_batch.sh"
+   bash "${ENDPOINT_REPLAY_DIR}/run_endpoint_replay_batch.sh"
+   bash "${ONLINE_INFERENCE_DIR}/run_online_inference_workflow_batch.sh"
+   bash "${RETRAINING_DATASET_DIR}/run_retraining_dataset_batch.sh"
 EOF

@@ -22,7 +22,8 @@ Runs as a long-lived container. Periodically checks:
   2. How long since the last retrain
 
 If either threshold is met, triggers:
-  Aneesh's retraining_dataset_runtime (build_feedback_pool.py + build_retraining_snapshot.py)
+  Aneesh's data/initial_implementation/retraining_dataset_runtime
+  (build_feedback_pool.py + build_retraining_snapshot.py)
   → Mahima's retrain.py (Ray Train fault-tolerant training)
 """
 
