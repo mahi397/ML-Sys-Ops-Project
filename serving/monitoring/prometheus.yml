@@ -15,7 +15,7 @@ scrape_configs:
     scrape_interval: 5s
     metrics_path: /metrics
     static_configs:
-      - targets: ['ray-serve:8000']
+      - targets: ['serving-api:8000']
 
   - job_name: 'node-exporter'
     scrape_interval: 10s
