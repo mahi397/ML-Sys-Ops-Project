@@ -91,9 +91,9 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 **Two ML stages in sequence:**
 - **Stage A — RoBERTa** (`roberta-base` fine-tuned): Detects topic boundaries between utterance pairs
 - **Stage B — Mistral-7B** (`Q4_K_M` quantized GGUF via `llama-cpp-python`): Generates topic labels + bullet-point summaries per segment
+
 ---
-```
----
+
 **GPU time-sharing summary:**
 
 | Stage | Deployment | GPU Fraction | Concurrency |
