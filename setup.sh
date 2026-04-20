@@ -169,10 +169,11 @@ echo -e "\n${YELLOW}[6/10] ML models (RoBERTa + Mistral)...${NC}"
 MODELS_DIR="${REPO_DIR}/serving/models"
 mkdir -p "${MODELS_DIR}"
 
+_pip() { python3 -m pip "$@" 2>/dev/null || python3 -m pip --break-system-packages "$@"; }
+
 if [[ ! -d "${MODELS_DIR}/roberta-seg" || ! -f "${MODELS_DIR}/roberta-seg/config.json" ]]; then
     info "Downloading RoBERTa base weights (~500MB)..."
-    pip install transformers torch --quiet 2>/dev/null || \
-        pip install --break-system-packages transformers torch --quiet 2>/dev/null
+    _pip install --quiet transformers torch
     python3 -c "
 from transformers import RobertaForSequenceClassification, RobertaTokenizer
 m = RobertaForSequenceClassification.from_pretrained('roberta-base', num_labels=2)
@@ -189,8 +190,7 @@ fi
 GGUF="${MODELS_DIR}/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 if [[ ! -f "${GGUF}" ]]; then
     info "Downloading Mistral-7B Q4_K_M (~4.4GB) — this takes a while..."
-    pip install huggingface-hub --quiet 2>/dev/null || \
-        pip install --break-system-packages huggingface-hub --quiet 2>/dev/null
+    _pip install --quiet huggingface-hub
     python3 -c "
 from huggingface_hub import hf_hub_download
 hf_hub_download(
