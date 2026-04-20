@@ -4,12 +4,14 @@
     const LOGIN_ENDPOINT = APP_PREFIX + "/api/login";
     const SIGNUP_ENDPOINT = APP_PREFIX + "/api/signup";
     const LOGOUT_ENDPOINT = APP_PREFIX + "/api/logout";
+    const ROOM_AUTH_ENDPOINT = APP_PREFIX + "/api/room-auth-url";
+    const ROOM_PRESENCE_ENDPOINT = APP_PREFIX + "/api/room-context/presence";
     const RECAPS_ENDPOINT = APP_PREFIX + "/recaps";   // recap change
 
     const ROOT_SHELL_ID = "meeting-portal-shell";
     const ROOT_STYLESHEET_ID = "meeting-portal-ui-stylesheet";
     const RECAPS_LINK_ID = "meeting-portal-recaps-link";   // recap change
-    const UI_ASSET_VERSION = "20260419g"; // bump this value to force clients to reload the stylesheet
+    const UI_ASSET_VERSION = "20260420b"; // bump this value to force clients to reload the stylesheet
     const GUEST_MODE_STORAGE_KEY = "meeting-portal-guest-mode";
     const ROUTE_POLL_INTERVAL_MS = 500;
 
@@ -58,6 +60,49 @@
 
     function currentRouteKey() {
         return window.location.pathname + window.location.search;
+    }
+
+    function isMeetingRoomPath() {
+        return !isRootPath() && !window.location.pathname.startsWith(APP_PREFIX + "/");
+    }
+
+    function currentRoomPathName() {
+        if (!isMeetingRoomPath()) {
+            return "";
+        }
+
+        const rawPath = (window.location.pathname || "").replace(/^\/+/, "");
+        const roomPathSegment = rawPath.split("/")[0] || "";
+        if (!roomPathSegment) {
+            return "";
+        }
+
+        try {
+            return decodeURIComponent(roomPathSegment);
+        } catch (error) {
+            return roomPathSegment;
+        }
+    }
+
+    function normalizeDisplayName(value) {
+        return typeof value === "string" ? value.trim() : "";
+    }
+
+    function roomPresenceMarkerKey(roomName, jwtToken, displayName) {
+        return "meeting-portal-room-presence:" + roomName + ":" + jwtToken.slice(-24) + ":" + normalizeDisplayName(displayName).toLowerCase();
+    }
+
+    function mergeCurrentSearchIntoRoomUrl(urlString) {
+        const redirectUrl = new URL(urlString, window.location.origin);
+        const searchParams = currentSearchParams();
+        for (const [key, value] of searchParams.entries()) {
+            if (key === "jwt") {
+                continue;
+            }
+            redirectUrl.searchParams.append(key, value);
+        }
+        redirectUrl.hash = window.location.hash || "";
+        return redirectUrl.toString();
     }
 
     function visibleElement(element) {
@@ -210,6 +255,103 @@
         return authMode === "login" || authMode === "signup" ? authMode : "";
     }
 
+    function getJitsiState() {
+        try {
+            const store = window.APP && window.APP.store;
+            if (!store || typeof store.getState !== "function") {
+                return null;
+            }
+
+            return store.getState();
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function getCurrentLocalParticipant() {
+        const state = getJitsiState();
+        const participants = state && state["features/base/participants"];
+        if (Array.isArray(participants)) {
+            return participants.find((participant) => participant && (participant.local || participant.isLocal)) || null;
+        }
+
+        if (participants && typeof participants === "object") {
+            const values = Object.values(participants);
+            return values.find((participant) => participant && (participant.local || participant.isLocal)) || null;
+        }
+
+        return null;
+    }
+
+    function getCurrentMeetingDisplayName() {
+        const localParticipant = getCurrentLocalParticipant();
+        const participantDisplayName = normalizeDisplayName(
+            (localParticipant && (localParticipant.name || localParticipant.displayName)) || ""
+        );
+        if (participantDisplayName) {
+            return participantDisplayName;
+        }
+
+        const state = getJitsiState();
+        const settings = state && state["features/base/settings"];
+        return (
+            normalizeDisplayName(settings && settings.displayName) ||
+            normalizeDisplayName(settings && settings.userName) ||
+            ""
+        );
+    }
+
+    async function sendRoomPresenceFromJwt() {
+        if (!isMeetingRoomPath()) {
+            return;
+        }
+
+        const roomName = currentRoomPathName();
+        const jwtToken = currentSearchParams().get("jwt") || "";
+        if (!roomName || !jwtToken) {
+            return;
+        }
+
+        const displayName = getCurrentMeetingDisplayName();
+        const markerKey = roomPresenceMarkerKey(roomName, jwtToken, displayName);
+        try {
+            if (window.sessionStorage.getItem(markerKey) === "1") {
+                return;
+            }
+        } catch (error) {
+            // Ignore sessionStorage failures and still try to send presence.
+        }
+
+        try {
+            const response = await fetch(ROOM_PRESENCE_ENDPOINT, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    room_name: roomName,
+                    jwt: jwtToken,
+                    display_name: displayName
+                }),
+                keepalive: true
+            });
+
+            if (!response.ok) {
+                return;
+            }
+
+            try {
+                window.sessionStorage.setItem(markerKey, "1");
+            } catch (error) {
+                return;
+            }
+        } catch (error) {
+            return;
+        }
+    }
+
     function hostLaunchUrl(roomName) {
         return roomName
             ? APP_PREFIX + "/host-launch/" + encodeURIComponent(roomName)
@@ -226,6 +368,42 @@
 
     function signupUrl(roomName) {
         return "/?auth=signup&next=" + encodeURIComponent(hostLaunchUrl(roomName));
+    }
+
+    async function fetchAuthenticatedRoomUrl(roomName) {
+        const response = await fetch(
+            ROOM_AUTH_ENDPOINT + "?room=" + encodeURIComponent(roomName),
+            {
+                credentials: "same-origin",
+                cache: "no-store"
+            }
+        );
+        if (!response.ok) {
+            return null;
+        }
+
+        const payload = await parseJsonResponse(response);
+        if (!payload.authenticated || !payload.room_url) {
+            return null;
+        }
+
+        return mergeCurrentSearchIntoRoomUrl(payload.room_url);
+    }
+
+    async function navigateToAuthenticatedRoom(roomName) {
+        const targetRoomName = roomName || getRoomName();
+
+        try {
+            const roomUrl = await fetchAuthenticatedRoomUrl(targetRoomName);
+            if (roomUrl) {
+                window.location.href = roomUrl;
+                return;
+            }
+        } catch (error) {
+            // Fall back to the existing host-launch redirect if the helper endpoint is unavailable.
+        }
+
+        window.location.href = hostLaunchUrl(targetRoomName);
     }
 
     async function parseJsonResponse(response) {
@@ -582,7 +760,7 @@
         if (state.session.authenticated) {
             event.preventDefault();
             event.stopPropagation();
-            window.location.href = hostLaunchUrl(roomName);
+            void navigateToAuthenticatedRoom(roomName);
             return;
         }
 
@@ -682,6 +860,10 @@
                 renderAuthUI();
             }
         }
+
+        if (isMeetingRoomPath()) {
+            void sendRoomPresenceFromJwt();
+        }
     }
 
     function boot() {
@@ -701,6 +883,8 @@
         renderAuthUI();
         if (isRootPath()) {
             scheduleSessionRefresh();
+        } else {
+            void sendRoomPresenceFromJwt();
         }
     }
 

@@ -15,6 +15,7 @@ from core.security import build_jitsi_token
 from core.urls import (
     build_auth_redirect,
     build_host_launch_path,
+    build_meet_path,
     build_native_room_url,
     sanitize_room_name,
 )
@@ -22,8 +23,13 @@ from core.urls import (
 router = APIRouter(tags=["auth-pages"])
 
 
-def _launch_room_for_user(user: dict[str, Any], room_name: str | None) -> RedirectResponse:
-    room = touch_room_for_user(user, room_name or "")
+def _launch_room_for_user(
+    user: dict[str, Any],
+    room_name: str | None,
+    *,
+    as_host: bool,
+) -> RedirectResponse:
+    room = touch_room_for_user(user, room_name or "", as_host=as_host)
     token = build_jitsi_token(user, room)
     return RedirectResponse(build_native_room_url(room, token), status_code=303)
 
@@ -55,7 +61,7 @@ def launch(request: Request, room_name: str = Form(default="")) -> RedirectRespo
     room = sanitize_room_name(room_name)
     if not user:
         return RedirectResponse(build_auth_redirect(build_host_launch_path(room)), status_code=303)
-    return _launch_room_for_user(user, room)
+    return _launch_room_for_user(user, room, as_host=True)
 
 
 @router.get(APP_PREFIX + "/host-launch", response_model=None)
@@ -64,7 +70,7 @@ def host_launch_default(request: Request, room: str | None = None) -> RedirectRe
     next_path = build_host_launch_path(room)
     if not user:
         return RedirectResponse(build_auth_redirect(next_path), status_code=303)
-    return _launch_room_for_user(user, room)
+    return _launch_room_for_user(user, room, as_host=True)
 
 
 @router.get(APP_PREFIX + "/host-launch/{room_name}", response_model=None)
@@ -73,7 +79,7 @@ def host_launch(request: Request, room_name: str) -> RedirectResponse:
     next_path = build_host_launch_path(room_name)
     if not user:
         return RedirectResponse(build_auth_redirect(next_path), status_code=303)
-    return _launch_room_for_user(user, room_name)
+    return _launch_room_for_user(user, room_name, as_host=True)
 
 
 @router.get(APP_PREFIX + "/join/{room_name}", response_model=None)
@@ -87,5 +93,5 @@ def meet(request: Request, room_name: str) -> RedirectResponse:
     user = fetch_authenticated_user(request)
     room = sanitize_room_name(room_name)
     if not user:
-        return RedirectResponse(build_auth_redirect(build_host_launch_path(room)), status_code=303)
-    return _launch_room_for_user(user, room)
+        return RedirectResponse(build_auth_redirect(build_meet_path(room)), status_code=303)
+    return _launch_room_for_user(user, room, as_host=False)

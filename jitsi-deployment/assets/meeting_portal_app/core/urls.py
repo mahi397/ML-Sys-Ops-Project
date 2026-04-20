@@ -57,6 +57,10 @@ def build_host_launch_path(room_name: str | None = None) -> str:
     return f"{APP_PREFIX}/host-launch"
 
 
+def build_meet_path(room_name: str) -> str:
+    return f"{APP_PREFIX}/meet/{quote(sanitize_room_name(room_name))}"
+
+
 def build_native_room_url(room_name: str, jwt_token: str | None = None) -> str:
     room = sanitize_room_name(room_name)
     base_url = f"{get_public_url()}/{quote(room)}"
