@@ -220,7 +220,7 @@ docker compose stop postgres 2>/dev/null || true
 sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
 docker compose up -d --remove-orphans postgres
 info "Waiting for postgres to be healthy..."
-until docker compose exec postgres pg_isready -U "${POSTGRES_USER:-proj07_user}" >/dev/null 2>&1; do
+until docker compose exec postgres pg_isready -U "${POSTGRES_USER:-proj07_user}" -d "${POSTGRES_DB:-proj07_sql_db}" >/dev/null 2>&1; do
     sleep 2
 done
 ok "Postgres healthy"
@@ -320,9 +320,9 @@ WHERE NOT EXISTS (
 #     echo "  Copy it there and run manually after stack is up"
 # fi
 
-# Bring up remaining services
+# Bring up remaining services (including monitoring profile for online-eval)
 info "Bringing up full stack..."
-docker compose up -d --remove-orphans
+docker compose --profile monitoring up -d --remove-orphans
 ok "Full stack started"
 
 # ── 9. Monitoring infra dirs ───────────────────────────────────────────────────
