@@ -579,10 +579,25 @@ def normalize_parsed_jitsi_payload(
                 meeting_id,
             )
 
+    normalized_participants: list[dict[str, Any]] = []
+    for participant in participants_rows:
+        if not isinstance(participant, dict):
+            continue
+
+        normalized_participants.append(
+            {
+                "meeting_id": str(participant.get("meeting_id") or meeting_id).strip(),
+                "user_id": str(participant.get("user_id") or "").strip(),
+                "external_key": str(participant.get("external_key") or "").strip(),
+                "display_name": str(participant.get("display_name") or "").strip(),
+                "email": str(participant.get("email") or "").strip(),
+            }
+        )
+
     # Important: preserve both keys because older payloads and current ingester
     # may look for different field names.
-    normalized_payload["participants"] = participants_rows
-    normalized_payload["meeting_participants"] = participants_rows
+    normalized_payload["participants"] = normalized_participants
+    normalized_payload["meeting_participants"] = normalized_participants
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
