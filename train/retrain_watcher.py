@@ -22,8 +22,7 @@ Runs as a long-lived container. Periodically checks:
   2. How long since the last retrain
 
 If either threshold is met, triggers:
-  Aneesh's data/initial_implementation/retraining_dataset_runtime
-  (build_feedback_pool.py + build_retraining_snapshot.py)
+  Aneesh's retraining_dataset_runtime (build_feedback_pool.py + build_retraining_snapshot.py)
   → Mahima's retrain.py (Ray Train fault-tolerant training)
 """
 
@@ -33,7 +32,7 @@ import time
 import logging
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -184,12 +183,23 @@ def get_latest_dataset_version():
         return None, None
 
 
+RETRAIN_LOCK_FILE = "/tmp/retrain.lock"
+
 def trigger_retrain(correction_count, watermark):
     """
     Trigger the retrain pipeline:
     1. Run Aneesh's retraining dataset build scripts
     2. Run retrain.py with Ray Train for fault-tolerant training
     """
+    import fcntl
+    lock_fd = open(RETRAIN_LOCK_FILE, 'w')
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log.warning("Retrain already in progress (lock file exists) — skipping this trigger")
+        lock_fd.close()
+        return False
+
     log.info("=" * 60)
     log.info("TRIGGERING RETRAIN PIPELINE")
     log.info("=" * 60)
@@ -202,7 +212,7 @@ def trigger_retrain(correction_count, watermark):
         "corrections_count": correction_count,
         "old_watermark": watermark,
         "new_watermark": new_watermark,
-        "trigger_time": datetime.utcnow().isoformat(),
+        "trigger_time": datetime.now(timezone.utc).isoformat(),
     })
 
     # ── Step 1: Build retraining dataset ──
@@ -357,7 +367,7 @@ def main():
             days_since = None
 
             if last_retrain:
-                days_since = (datetime.utcnow() - last_retrain).days
+                days_since = (datetime.now(timezone.utc) - last_retrain).days
 
             trigger_reason = None
 
