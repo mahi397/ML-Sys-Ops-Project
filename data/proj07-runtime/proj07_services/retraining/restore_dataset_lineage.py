@@ -461,13 +461,19 @@ def normalize_parsed_jitsi_payload(
         )
     
     # Backward-compatible host normalization:
-    # older parsed payloads may store host metadata under meeting instead of top-level payload["host"].
+    # some historical Jitsi meetings do not have host metadata.
+    # insert_rows only needs payload["host"] to exist; user_id can be blank.
     if not isinstance(normalized_payload.get("host"), dict):
-        host_candidate: dict[str, Any] | None = None
+        host_candidate: dict[str, Any] = {}
 
         nested_host = meeting.get("host")
         if isinstance(nested_host, dict):
-            host_candidate = dict(nested_host)
+            host_candidate = {
+                "external_key": str(nested_host.get("external_key") or "").strip(),
+                "user_id": str(nested_host.get("user_id") or "").strip(),
+                "display_name": str(nested_host.get("display_name") or "").strip(),
+                "email": str(nested_host.get("email") or "").strip(),
+            }
         else:
             host_candidate = {
                 "external_key": str(meeting.get("host_external_key") or "").strip(),
@@ -475,32 +481,34 @@ def normalize_parsed_jitsi_payload(
                 "display_name": str(meeting.get("host_display_name") or "").strip(),
                 "email": str(meeting.get("host_email") or "").strip(),
             }
-            host_candidate = {k: v for k, v in host_candidate.items() if v}
 
-        if not host_candidate:
-            raise RuntimeError(
-                f"Parsed transcript payload for {meeting_id} is missing host metadata required by insert_rows"
+        # Always provide a host object, even if every field is blank.
+        normalized_payload["host"] = {
+            "external_key": host_candidate.get("external_key", ""),
+            "user_id": host_candidate.get("user_id", ""),
+            "display_name": host_candidate.get("display_name", ""),
+            "email": host_candidate.get("email", ""),
+        }
+
+        if any(normalized_payload["host"].values()):
+            logger.warning(
+                "Synthesized partial host metadata during restore | meeting_id=%s",
+                meeting_id,
             )
-
-        normalized_payload["host"] = host_candidate
-        logger.warning(
-            "Synthesized host metadata during restore | meeting_id=%s keys=%s",
-            meeting_id,
-            ",".join(sorted(host_candidate.keys())),
-        )
+        else:
+            logger.warning(
+                "No host metadata found for historical meeting; restoring with blank host fields | meeting_id=%s",
+                meeting_id,
+            )
 
     # Backward-compatible participants normalization:
     if not isinstance(normalized_payload.get("participants"), list):
-        participants_candidate = None
-
         if isinstance(meeting.get("participants"), list):
-            participants_candidate = meeting.get("participants")
+            normalized_payload["participants"] = meeting["participants"]
         elif isinstance(normalized_payload.get("meeting_participants"), list):
-            participants_candidate = normalized_payload.get("meeting_participants")
+            normalized_payload["participants"] = normalized_payload["meeting_participants"]
         else:
-            participants_candidate = []
-
-        normalized_payload["participants"] = participants_candidate
+            normalized_payload["participants"] = []
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
