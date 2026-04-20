@@ -127,6 +127,22 @@ function array_contains() {
   return 1
 }
 
+function ensure_writable_dir() {
+  local dir_path="$1"
+  local label="${2:-Directory}"
+
+  mkdir -p "${dir_path}"
+  if [[ ! -d "${dir_path}" ]]; then
+    echo "${label} was not created: ${dir_path}" >&2
+    exit 1
+  fi
+  if [[ ! -w "${dir_path}" ]]; then
+    echo "${label} is not writable: ${dir_path}" >&2
+    echo "Fix the ownership or permissions for this path before rerunning setup.sh." >&2
+    exit 1
+  fi
+}
+
 function remote_has_file() {
   local remote_dir="$1"
   local filename="$2"
@@ -308,6 +324,9 @@ function bootstrap_synthetic_stage1_inputs() {
     banner "Synthetic Stage 1 bootstrap already present at ${manifest_path}"
     return
   fi
+
+  ensure_writable_dir "${FINAL_STAGE1_ROOT}" "Synthetic Stage 1 output root"
+  ensure_writable_dir "${BLOCK_ROOT}/ingest_logs" "Ingest log root"
 
   banner "Generating synthetic Stage 1 bootstrap artifacts under ${FINAL_STAGE1_ROOT}"
   python "${ENDPOINT_REPLAY_DIR}/generate_synthetic_endpoint_inputs.py" \

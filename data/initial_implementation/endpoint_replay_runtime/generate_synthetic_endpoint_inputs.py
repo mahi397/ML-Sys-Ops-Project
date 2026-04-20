@@ -106,7 +106,15 @@ def setup_logger(log_file: Path | None = None) -> logging.Logger:
 
 
 def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise PermissionError(
+            "Cannot create synthetic output directory "
+            f"{path}. Synthetic meeting folders such as "
+            "'synthetic_endpoint_01' are created automatically; "
+            f"the parent output root is not writable: {path.parent}"
+        ) from exc
 
 
 def write_json(path: Path, payload: dict) -> None:
