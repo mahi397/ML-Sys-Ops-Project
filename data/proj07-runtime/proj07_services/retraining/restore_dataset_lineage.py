@@ -446,6 +446,7 @@ def normalize_parsed_jitsi_payload(
     logger: logging.Logger,
     remote: str,
     bucket: str,
+    conn,
 ) -> tuple[dict[str, Any], int]:
     normalized_payload = json.loads(json.dumps(payload))
 
@@ -460,23 +461,44 @@ def normalize_parsed_jitsi_payload(
         )
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
+
+    # Backward-compatible fallback:
+    # older parsed payloads may not embed meeting_artifacts at all.
+    # In this system, artifact metadata is stored in the meeting_artifacts table.
     if not isinstance(artifact_rows, list):
-        raise RuntimeError(f"Parsed transcript payload for {meeting_id} is missing meeting_artifacts")
+        artifact_rows = fetch_meeting_artifacts_from_db(conn, meeting_id)
+        if artifact_rows:
+            logger.warning(
+                "Parsed transcript payload for %s is missing embedded meeting_artifacts; restored %d artifact row(s) from DB",
+                meeting_id,
+                len(artifact_rows),
+            )
+        else:
+            logger.warning(
+                "Parsed transcript payload for %s is missing embedded meeting_artifacts and no DB artifact rows were found",
+                meeting_id,
+            )
+            artifact_rows = []
 
     verified_base_artifacts: list[dict[str, Any]] = []
     parsed_artifact_version = None
+
     for artifact in artifact_rows:
         if not isinstance(artifact, dict):
             continue
+
         artifact_type = str(artifact.get("artifact_type") or "").strip()
         object_key = str(artifact.get("object_key") or "").strip()
+
         if artifact_type not in {"raw_transcript", "parsed_transcript"}:
             continue
+
         if artifact_type == "parsed_transcript":
             object_key = parsed_object_key
 
         if not object_key:
             continue
+
         if not remote_object_exists(
             remote=remote,
             bucket=bucket,
@@ -500,8 +522,10 @@ def normalize_parsed_jitsi_payload(
         )
         artifact_version = int(artifact.get("artifact_version") or 1)
         normalized_artifact["artifact_version"] = artifact_version
+
         if artifact_type == "parsed_transcript":
             parsed_artifact_version = artifact_version
+
         verified_base_artifacts.append(normalized_artifact)
 
     if not any(str(row.get("artifact_type")) == "parsed_transcript" for row in verified_base_artifacts):
@@ -511,7 +535,6 @@ def normalize_parsed_jitsi_payload(
 
     normalized_payload["meeting_artifacts"] = verified_base_artifacts
     return normalized_payload, parsed_artifact_version or 1
-
 
 def candidate_jitsi_artifact_keys(
     meeting_id: str,
@@ -697,12 +720,13 @@ def restore_missing_jitsi_meetings(
             logger=logger,
         )
         normalized_payload, artifact_version = normalize_parsed_jitsi_payload(
-            parsed_payload,
-            meeting_id=meeting_id,
-            parsed_object_key=parsed_object_key,
-            logger=logger,
-            remote=remote,
-            bucket=bucket,
+                parsed_payload,
+                meeting_id=meeting_id,
+                parsed_object_key=parsed_object_key,
+                logger=logger,
+                remote=remote,
+                bucket=bucket,
+                conn=conn,
         )
 
         logger.info(
@@ -1080,6 +1104,46 @@ def collect_referenced_meeting_ids(stored_versions: list[StoredVersion]) -> list
             meeting_ids.update(split_ids)
     return sorted(meeting_ids)
 
+def fetch_meeting_artifacts_from_db(conn, meeting_id: str) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT artifact_type, object_key, content_type, artifact_version, created_at
+            FROM meeting_artifacts
+            WHERE meeting_id = %s
+            ORDER BY artifact_id
+            """,
+            (meeting_id,),
+        )
+        rows = cur.fetchall()
+
+    artifacts: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            artifacts.append(
+                {
+                    "meeting_id": meeting_id,
+                    "artifact_type": row["artifact_type"],
+                    "object_key": row["object_key"],
+                    "content_type": row["content_type"],
+                    "artifact_version": int(row.get("artifact_version") or 1),
+                    "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                }
+            )
+        else:
+            artifact_type, object_key, content_type, artifact_version, created_at = row
+            artifacts.append(
+                {
+                    "meeting_id": meeting_id,
+                    "artifact_type": artifact_type,
+                    "object_key": object_key,
+                    "content_type": content_type,
+                    "artifact_version": int(artifact_version or 1),
+                    "created_at": created_at.isoformat() if created_at else None,
+                }
+            )
+
+    return artifacts
 
 def fetch_meeting_states(conn, meeting_ids: list[str]) -> dict[str, dict[str, Any]]:
     if not meeting_ids:
