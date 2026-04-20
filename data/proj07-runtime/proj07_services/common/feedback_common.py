@@ -166,6 +166,62 @@ def insert_dataset_version(
     conn.commit()
 
 
+def insert_dataset_quality_report(
+    conn,
+    *,
+    dataset_name: str,
+    report_scope: str,
+    report_status: str,
+    details_json: dict[str, Any],
+    dataset_version: str | None = None,
+    reference_dataset_name: str | None = None,
+    reference_dataset_version: str | None = None,
+    report_path: str | None = None,
+    share_drifted_features: float | None = None,
+    drifted_feature_count: int | None = None,
+    total_feature_count: int | None = None,
+    window_started_at: str | None = None,
+    window_ended_at: str | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dataset_quality_reports (
+                dataset_name,
+                report_scope,
+                report_status,
+                dataset_version,
+                reference_dataset_name,
+                reference_dataset_version,
+                report_path,
+                share_drifted_features,
+                drifted_feature_count,
+                total_feature_count,
+                window_started_at,
+                window_ended_at,
+                details_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                dataset_name,
+                report_scope,
+                report_status,
+                dataset_version,
+                reference_dataset_name,
+                reference_dataset_version,
+                report_path,
+                share_drifted_features,
+                drifted_feature_count,
+                total_feature_count,
+                window_started_at,
+                window_ended_at,
+                Json(details_json),
+            ),
+        )
+    conn.commit()
+
+
 def fetch_source_utterances(conn, meeting_ids: list[str]) -> list[dict]:
     if not meeting_ids:
         return []

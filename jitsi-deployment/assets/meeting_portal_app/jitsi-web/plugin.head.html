@@ -1,1 +1,78 @@
-<script defer src="/meeting-portal-ui.js?v=20260419g"></script>
+<script>
+  (function () {
+    const APP_PREFIX = '/meeting-portal';
+    const ROOM_AUTH_ENDPOINT = APP_PREFIX + '/api/room-auth-url';
+    const pathname = window.location.pathname || '';
+    const isRootPath = pathname === '/';
+    const isPortalPath = pathname === APP_PREFIX || pathname.startsWith(APP_PREFIX + '/');
+    const searchParams = new URLSearchParams(window.location.search || '');
+
+    function resolveRoomName() {
+      const rawPath = pathname.replace(/^\/+/, '');
+      const roomPathSegment = rawPath.split('/')[0] || '';
+      if (!roomPathSegment) {
+        return '';
+      }
+
+      try {
+        return decodeURIComponent(roomPathSegment);
+      } catch (error) {
+        return roomPathSegment;
+      }
+    }
+
+    function mergeCurrentSearchIntoUrl(urlString) {
+      const redirectUrl = new URL(urlString, window.location.origin);
+      for (const [key, value] of searchParams.entries()) {
+        if (key === 'jwt') {
+          continue;
+        }
+        redirectUrl.searchParams.append(key, value);
+      }
+      redirectUrl.hash = window.location.hash || '';
+      return redirectUrl.toString();
+    }
+
+    window.__meetingPortalRedirecting = false;
+    window.__meetingPortalBeforeBoot = Promise.resolve();
+
+    if (isRootPath || isPortalPath || searchParams.get('jwt')) {
+      return;
+    }
+
+    const roomName = resolveRoomName();
+    if (!roomName) {
+      return;
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller
+      ? window.setTimeout(() => controller.abort(), 3000)
+      : 0;
+
+    window.__meetingPortalBeforeBoot = fetch(
+      ROOM_AUTH_ENDPOINT + '?room=' + encodeURIComponent(roomName),
+      {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      }
+    )
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => {
+        if (!payload || !payload.authenticated || !payload.room_url) {
+          return;
+        }
+
+        window.__meetingPortalRedirecting = true;
+        window.location.replace(mergeCurrentSearchIntoUrl(payload.room_url));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (timeoutId) {
+          window.clearTimeout(timeoutId);
+        }
+      });
+  })();
+</script>
+<script defer src="/meeting-portal-ui.js?v=20260420b"></script>

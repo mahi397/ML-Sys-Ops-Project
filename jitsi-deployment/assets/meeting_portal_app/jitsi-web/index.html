@@ -28,7 +28,19 @@
         // the base pointing to the CDN. This way we can generate a full URL which will bypass the base.
         document.querySelector('#manifest-placeholder').setAttribute('href', window.location.origin + contextRoot(window.location.pathname) + 'manifest.json');
 
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (window.__meetingPortalBeforeBoot && typeof window.__meetingPortalBeforeBoot.then === 'function') {
+                try {
+                    await window.__meetingPortalBeforeBoot;
+                } catch (error) {
+                    console.log('Meeting portal pre-boot check failed.', error);
+                }
+            }
+
+            if (window.__meetingPortalRedirecting) {
+                return;
+            }
+
             if (!JitsiMeetJS.app) {
                 return;
             }

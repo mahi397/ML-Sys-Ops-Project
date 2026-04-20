@@ -3,18 +3,10 @@
 # local virtual env
 data/.venv/
 
-# local virtual env
-data/.venv/
-data/.venv/
-
 __pycache__/
 *.pyc
 
 .env
 *.env
-
-.env
-*.env
 .vscode/
-.vscode/settings.json
 .idea/

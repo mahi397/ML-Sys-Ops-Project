@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOM_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+MUC_ROOM_SUFFIX = "-muc-meet-jitsi"
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,10 +155,21 @@ def load_room_context(room_context_root: Path, room_name: str | None) -> dict[st
     if not room_name:
         return {}
 
-    room_context_path = room_context_root / f"{room_name}.json"
-    if not room_context_path.exists() and room_name.endswith("-muc-meet-jitsi"):
-        room_context_path = room_context_root / f"{room_name[:-len('-muc-meet-jitsi')]}.json"
-    if not room_context_path.exists():
+    candidate_paths: list[Path] = []
+    normalized_room_name = room_name.strip()
+    if normalized_room_name.endswith(MUC_ROOM_SUFFIX):
+        base_room_name = normalized_room_name[:-len(MUC_ROOM_SUFFIX)]
+        if base_room_name:
+            candidate_paths.append(room_context_root / f"{base_room_name}.json")
+    candidate_paths.append(room_context_root / f"{normalized_room_name}.json")
+
+    room_context_path: Path | None = None
+    for candidate_path in candidate_paths:
+        if candidate_path.exists():
+            room_context_path = candidate_path
+            break
+
+    if room_context_path is None:
         return {}
 
     try:

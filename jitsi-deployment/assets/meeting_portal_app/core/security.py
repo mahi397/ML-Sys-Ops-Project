@@ -63,3 +63,27 @@ def build_jitsi_token(user: dict[str, Any], room_name: str) -> str:
         },
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm="HS256")
+
+
+def decode_jitsi_token(token: str) -> dict[str, Any] | None:
+    if not token:
+        return None
+
+    try:
+        payload = jwt.decode(
+            token,
+            get_jwt_secret(),
+            algorithms=["HS256"],
+            audience=get_jwt_audience(),
+            issuer=get_jwt_app_id(),
+        )
+    except jwt.PyJWTError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    if str(payload.get("sub") or "").strip() != get_xmpp_domain():
+        return None
+
+    return payload

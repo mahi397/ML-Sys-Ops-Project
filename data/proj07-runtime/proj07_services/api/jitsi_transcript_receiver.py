@@ -11,6 +11,7 @@ import sys
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 
@@ -104,6 +105,82 @@ def sanitize_host_key(value: str) -> str:
     cleaned = value.strip()
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", cleaned)
     return cleaned
+
+
+def normalize_display_names(raw_display_names: Any, fallback_display_name: str = "") -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(value: Any) -> None:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return
+
+        key = text_value.casefold()
+        if key in seen:
+            return
+
+        seen.add(key)
+        normalized.append(text_value)
+
+    if isinstance(raw_display_names, list):
+        for display_name in raw_display_names:
+            add_name(display_name)
+
+    add_name(fallback_display_name)
+    return normalized
+
+
+def parse_room_participants_json(value: str | None) -> list[dict[str, Any]] | None:
+    raw_value = (value or "").strip()
+    if not raw_value:
+        return None
+
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid room_participants_json") from exc
+
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="room_participants_json must be a JSON array")
+
+    normalized_participants: list[dict[str, Any]] = []
+    for raw_participant in payload:
+        if not isinstance(raw_participant, dict):
+            continue
+
+        user_id = str(raw_participant.get("user_id") or "").strip()
+        display_name = str(raw_participant.get("display_name") or "").strip()
+        display_names = normalize_display_names(
+            raw_participant.get("display_names"),
+            display_name,
+        )
+        email = str(raw_participant.get("email") or "").strip().lower()
+        resolved_display_name = display_name or (display_names[-1] if display_names else "")
+        if not user_id and not resolved_display_name and not email:
+            continue
+
+        participant: dict[str, Any] = {}
+        if user_id:
+            participant["user_id"] = user_id
+        if resolved_display_name:
+            participant["display_name"] = resolved_display_name
+        if display_names:
+            participant["display_names"] = display_names
+        if email:
+            participant["email"] = email
+
+        identity_source = str(raw_participant.get("identity_source") or "").strip()
+        if identity_source:
+            participant["identity_source"] = identity_source
+
+        written_at = str(raw_participant.get("written_at") or "").strip()
+        if written_at:
+            participant["written_at"] = written_at
+
+        normalized_participants.append(participant)
+
+    return normalized_participants or None
 
 
 def parse_ingester_summary(stdout: str) -> dict:
@@ -244,6 +321,7 @@ async def ingest_jitsi_transcript(
     host_user_id: str | None = Form(default=None),
     host_display_name: str | None = Form(default=None),
     host_email: str | None = Form(default=None),
+    room_participants_json: str | None = Form(default=None),
     meeting_room: str | None = Form(default=None),
     identity_source: str | None = Form(default=None),
     authorization: str | None = Header(default=None),
@@ -330,6 +408,7 @@ async def ingest_jitsi_transcript(
     normalized_host_user_id = (host_user_id or "").strip() or None
     normalized_host_display_name = (host_display_name or "").strip() or None
     normalized_host_email = (host_email or "").strip() or None
+    normalized_room_participants = parse_room_participants_json(room_participants_json)
     normalized_meeting_room = (meeting_room or "").strip() or None
     normalized_identity_source = (identity_source or "").strip() or None
 
@@ -339,6 +418,7 @@ async def ingest_jitsi_transcript(
         "host_user_id": normalized_host_user_id,
         "host_display_name": normalized_host_display_name,
         "host_email": normalized_host_email,
+        "room_participants": normalized_room_participants,
         "meeting_room": normalized_meeting_room,
         "identity_source": normalized_identity_source,
         "client_host": client_host,
