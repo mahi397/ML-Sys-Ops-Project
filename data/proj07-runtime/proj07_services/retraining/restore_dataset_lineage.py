@@ -554,8 +554,9 @@ def normalize_parsed_jitsi_payload(
 
                 participants_rows.append(
                     {
-                        "user_id": speaker.get("user_id"),  # can be None
-                        "external_key": speaker.get("external_key"),
+                        "meeting_id": meeting_id,
+                        "user_id": str(speaker.get("user_id") or "").strip(),
+                        "external_key": str(speaker.get("external_key") or "").strip(),
                         "display_name": str(
                             speaker.get("display_name")
                             or speaker.get("speaker_name")
@@ -563,7 +564,8 @@ def normalize_parsed_jitsi_payload(
                             or speaker.get("speaker_id")
                             or ""
                         ).strip(),
-                        "email": (str(speaker.get("email") or "").strip() or None),
+                        "email": str(speaker.get("email") or "").strip(),
+                        "role": str(speaker.get("role") or "participant").strip(),
                     }
                 )
 
@@ -594,11 +596,28 @@ def normalize_parsed_jitsi_payload(
             }
         )
 
+    normalized_participants: list[dict[str, Any]] = []
+    for participant in participants_rows:
+        if not isinstance(participant, dict):
+            continue
+
+        normalized_participants.append(
+            {
+                "meeting_id": str(participant.get("meeting_id") or meeting_id).strip(),
+                "user_id": str(participant.get("user_id") or "").strip(),
+                "external_key": str(participant.get("external_key") or "").strip(),
+                "display_name": str(participant.get("display_name") or "").strip(),
+                "email": str(participant.get("email") or "").strip(),
+                "role": str(participant.get("role") or "speaker").strip(),
+            }
+        )
+
     # Important: preserve both keys because older payloads and current ingester
     # may look for different field names.
     normalized_payload["participants"] = normalized_participants
     normalized_payload["meeting_participants"] = normalized_participants
 
+    
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
         artifact_rows = fetch_meeting_artifacts_from_db(conn, meeting_id)
