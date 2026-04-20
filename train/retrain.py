@@ -95,15 +95,16 @@ DEFAULT_RETRAIN_CONFIG = {
     "model_name": "roberta-base",
     "freeze_backbone": False,
     "lr": 2.29e-5,
-    "batch_size": 32, # was 32, reduced for test on cpu vm
+    "batch_size": 32,
     "epochs": 8,
     "warmup_ratio": 0.105,
     "weight_decay": 0.072,
-    "max_seq_len": 256,
+    "max_seq_len": 128,
     "dropout": 0.21,
     "early_stopping_patience": 2,
     "max_oversample": 4.1,
     "seed": 42,
+    "debug_subsample": False,
     "warm_start_model_alias": "production",
     # Data paths
     "data_dir": "/mnt/block/roberta_stage1/v2",
@@ -284,6 +285,8 @@ def load_split(data_dir: str, split: str) -> Tuple[List, List, List]:
         log.warning(f"Split file not found: {path}")
         return [], [], []
     examples = load_jsonl(path)
+    if os.environ.get("RETRAIN_DEBUG_SUBSAMPLE"):
+        examples = examples[:500]
     texts = [format_window(e["input"]["window"]) for e in examples]
     labels = [e["output"]["label"] for e in examples]
     meeting_ids = [e["input"]["meeting_id"] for e in examples]
@@ -297,6 +300,8 @@ def load_split_with_metadata(data_dir: str, split: str) -> Tuple[List, List, Lis
         log.warning(f"Split file not found: {path}")
         return [], [], [], []
     examples = load_jsonl(path)
+    if os.environ.get("RETRAIN_DEBUG_SUBSAMPLE"):
+        examples = examples[:500]
     texts = [format_window(e["input"]["window"]) for e in examples]
     labels = [e["output"]["label"] for e in examples]
     meeting_ids = [e["input"]["meeting_id"] for e in examples]
@@ -309,6 +314,8 @@ def load_feedback_data(feedback_dir: str) -> Tuple[List, List, List]:
         path = os.path.join(feedback_dir, filename)
         if os.path.exists(path):
             examples = load_jsonl(path)
+            if os.environ.get("RETRAIN_DEBUG_SUBSAMPLE"):
+                examples = examples[:500]
             texts = [format_window(e["input"]["window"]) for e in examples]
             labels = [e["output"]["label"] for e in examples]
             meeting_ids = [e["input"]["meeting_id"] for e in examples]
@@ -835,6 +842,8 @@ def train_func(config: Dict):
     np.random.seed(config.get("seed", 42))
 
     train_texts, train_labels, _ = load_split(config["data_dir"], "train")
+    if config.get("debug_subsample"):
+        train_texts, train_labels = train_texts[:500], train_labels[:500]
     val_texts, val_labels, val_meeting_ids = load_split(config["data_dir"], "val")
 
     if config.get("feedback_data_dir"):
@@ -860,8 +869,8 @@ def train_func(config: Dict):
     sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
 
     train_loader = DataLoader(train_ds, batch_size=config["batch_size"],
-                              sampler=sampler, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=2)
+                              sampler=sampler, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2, num_workers=0)
 
     model = AutoModelForSequenceClassification.from_pretrained(
         config["model_name"], num_labels=2,
@@ -1025,7 +1034,7 @@ def evaluate_and_register(config: Dict, result) -> bool:
 
     # Run inference
     test_ds = WindowDataset(test_texts, test_labels, tokenizer, config["max_seq_len"])
-    test_loader = DataLoader(test_ds, batch_size=config["batch_size"] * 2, num_workers=2)
+    test_loader = DataLoader(test_ds, batch_size=config["batch_size"] * 2, num_workers=0)
     test_probs, test_true = [], []
     with torch.no_grad():
         for batch in test_loader:
