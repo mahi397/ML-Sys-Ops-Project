@@ -555,11 +555,7 @@ def normalize_parsed_jitsi_payload(
                 participants_rows.append(
                     {
                         "meeting_id": meeting_id,
-                        "user_id": (
-                            str(speaker.get("user_id")).strip()
-                            if speaker.get("user_id") is not None and str(speaker.get("user_id")).strip()
-                            else None
-                        ),
+                        "user_id": speaker.get("user_id"),
                         "external_key": str(speaker.get("external_key") or "").strip(),
                         "display_name": str(
                             speaker.get("display_name")
@@ -591,22 +587,29 @@ def normalize_parsed_jitsi_payload(
             )
 
     normalized_participants: list[dict[str, Any]] = []
+    dropped_missing_user_id = 0
+
     for participant in participants_rows:
         if not isinstance(participant, dict):
+            continue
+
+        raw_user_id = participant.get("user_id")
+        normalized_user_id = str(raw_user_id).strip() if raw_user_id is not None else ""
+
+        # meeting_participants.user_id is NOT NULL + FK to users.
+        # If we do not know the user_id, we must skip this participant row.
+        if not normalized_user_id:
+            dropped_missing_user_id += 1
             continue
 
         normalized_participants.append(
             {
                 "meeting_id": str(participant.get("meeting_id") or meeting_id).strip(),
-                "user_id": (
-                    str(participant.get("user_id")).strip()
-                    if participant.get("user_id") is not None and str(participant.get("user_id")).strip()
-                    else None
-                ),
+                "user_id": normalized_user_id,
                 "external_key": str(participant.get("external_key") or "").strip(),
                 "display_name": str(participant.get("display_name") or "").strip(),
                 "email": str(participant.get("email") or "").strip(),
-                "role": str(participant.get("role") or "speaker").strip(),
+                "role": str(participant.get("role") or "participant").strip(),
                 "can_view_summary": bool(participant.get("can_view_summary", True)),
                 "can_edit_summary": bool(participant.get("can_edit_summary", True)),
                 "joined_at": participant.get("joined_at"),
@@ -614,8 +617,13 @@ def normalize_parsed_jitsi_payload(
             }
         )
 
-    # Important: preserve both keys because older payloads and current ingester
-    # may look for different field names.
+    if dropped_missing_user_id:
+        logger.warning(
+            "Dropped %d participant row(s) without user_id during restore | meeting_id=%s",
+            dropped_missing_user_id,
+            meeting_id,
+        )
+
     normalized_payload["participants"] = normalized_participants
     normalized_payload["meeting_participants"] = normalized_participants
 
