@@ -706,6 +706,102 @@ def normalize_parsed_jitsi_payload(
 
     normalized_payload["utterances"] = filtered_utterances
 
+        # Backward-compatible utterance transition normalization:
+    transition_rows = normalized_payload.get("utterance_transitions")
+    if not isinstance(transition_rows, list):
+        transition_rows = (
+            meeting.get("utterance_transitions")
+            if isinstance(meeting.get("utterance_transitions"), list)
+            else []
+        )
+
+    available_indexes = sorted(
+        int(row["utterance_index"])
+        for row in normalized_payload.get("utterances", [])
+        if isinstance(row, dict) and row.get("utterance_index") is not None
+    )
+    available_index_set = set(available_indexes)
+
+    normalized_transitions: list[dict[str, Any]] = []
+    dropped_transitions = 0
+
+    for idx, transition in enumerate(transition_rows):
+        if not isinstance(transition, dict):
+            continue
+
+        left_index = transition.get("left_utterance_index")
+        if left_index is None:
+            left_index = transition.get("left_index")
+
+        right_index = transition.get("right_utterance_index")
+        if right_index is None:
+            right_index = transition.get("right_index")
+
+        # If historical payload gives no explicit indexes, assume adjacency by transition_index.
+        transition_index = (
+            int(transition.get("transition_index"))
+            if transition.get("transition_index") is not None
+            else idx
+        )
+
+        if left_index is None and right_index is None:
+            if transition_index < 0 or transition_index + 1 >= len(available_indexes):
+                dropped_transitions += 1
+                continue
+            left_index = available_indexes[transition_index]
+            right_index = available_indexes[transition_index + 1]
+
+        if left_index is None or right_index is None:
+            dropped_transitions += 1
+            continue
+
+        left_index = int(left_index)
+        right_index = int(right_index)
+
+        if left_index not in available_index_set or right_index not in available_index_set:
+            dropped_transitions += 1
+            continue
+
+        normalized_transitions.append(
+            {
+                "meeting_id": meeting_id,
+                "left_utterance_index": left_index,
+                "right_utterance_index": right_index,
+                "transition_index": transition_index,
+                "gold_boundary_label": transition.get("gold_boundary_label"),
+                "pred_boundary_prob": transition.get("pred_boundary_prob"),
+                "pred_boundary_label": transition.get("pred_boundary_label"),
+            }
+        )
+
+    # Fallback: synthesize adjacency transitions if none survived.
+    if not normalized_transitions and len(available_indexes) >= 2:
+        for i in range(len(available_indexes) - 1):
+            normalized_transitions.append(
+                {
+                    "meeting_id": meeting_id,
+                    "left_utterance_index": available_indexes[i],
+                    "right_utterance_index": available_indexes[i + 1],
+                    "transition_index": i,
+                    "gold_boundary_label": None,
+                    "pred_boundary_prob": None,
+                    "pred_boundary_label": None,
+                }
+            )
+        logger.warning(
+            "Synthesized %d adjacency transition row(s) during restore | meeting_id=%s",
+            len(normalized_transitions),
+            meeting_id,
+        )
+    elif dropped_transitions:
+        logger.warning(
+            "Dropped %d transition row(s) referencing missing utterance indexes during restore | meeting_id=%s",
+            dropped_transitions,
+            meeting_id,
+        )
+
+    normalized_payload["utterance_transitions"] = normalized_transitions
+
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
         artifact_rows = fetch_meeting_artifacts_from_db(conn, meeting_id)
