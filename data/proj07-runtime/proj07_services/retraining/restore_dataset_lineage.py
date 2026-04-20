@@ -461,33 +461,32 @@ def normalize_parsed_jitsi_payload(
         )
     
     # Backward-compatible host normalization:
-    # some historical Jitsi meetings do not have host metadata.
-    # insert_rows only needs payload["host"] to exist; user_id can be blank.
+    # historical meetings may not have host metadata.
+    # The ingester expects string fields here, not None.
     if not isinstance(normalized_payload.get("host"), dict):
-        host_candidate: dict[str, Any] = {}
+        nested_host = meeting.get("host") if isinstance(meeting.get("host"), dict) else {}
 
-        nested_host = meeting.get("host")
-        if isinstance(nested_host, dict):
-            host_candidate = {
-                "external_key": str(nested_host.get("external_key") or "").strip(),
-                "user_id": str(nested_host.get("user_id") or "").strip(),
-                "display_name": str(nested_host.get("display_name") or "").strip(),
-                "email": str(nested_host.get("email") or "").strip(),
-            }
-        else:
-            host_candidate = {
-                "external_key": str(meeting.get("host_external_key") or "").strip(),
-                "user_id": str(meeting.get("host_user_id") or "").strip(),
-                "display_name": str(meeting.get("host_display_name") or "").strip(),
-                "email": str(meeting.get("host_email") or "").strip(),
-            }
-
-        # Always provide a host object, even if every field is blank.
         normalized_payload["host"] = {
-            "external_key": host_candidate.get("external_key", ""),
-            "user_id": host_candidate.get("user_id", ""),
-            "display_name": host_candidate.get("display_name", ""),
-            "email": host_candidate.get("email", ""),
+            "external_key": str(
+                nested_host.get("external_key")
+                or meeting.get("host_external_key")
+                or ""
+            ).strip(),
+            "user_id": str(
+                nested_host.get("user_id")
+                or meeting.get("host_user_id")
+                or ""
+            ).strip(),
+            "display_name": str(
+                nested_host.get("display_name")
+                or meeting.get("host_display_name")
+                or ""
+            ).strip(),
+            "email": str(
+                nested_host.get("email")
+                or meeting.get("host_email")
+                or ""
+            ).strip(),
         }
 
         if any(normalized_payload["host"].values()):
