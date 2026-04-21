@@ -1,9 +1,9 @@
-# Jitsi Topic Segmentation & Recap — NeuralOps
+# Jitsi Topic Segmentation & Recap — NeuralOps (proj07)
 
 End-to-end ML system that automatically segments Jitsi meeting transcripts by topic and generates per-segment summaries, with automated model retraining driven by user feedback corrections.
 
-**Team:** Aneesh Mokashi (Data) · Shruti Pangare (Serving) · Mahima Sachdeva (Training)  
-**Infrastructure:** Chameleon Cloud GPU node (CHI@UC, RTX 6000)
+**Team:** Aneesh Mokashi (Data) · Mahima Sachdeva (Training) · Shruti Pangare (Serving)   
+**Infrastructure:** Chameleon Cloud GPU node (CHI@UC, Quadro RTX 6000)
 
 ---
 
@@ -32,7 +32,7 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 │  RoBERTa segmenter (0.3 GPU)     │  retrain.py  (Ray Train, GPU)     │
 │  Mistral-7B summarizer (0.7 GPU) │  online_eval  (hourly)            │
 │  MLflow hot-reload       │       │  offline_eval  (on demand)        │
-│  /ui · /recap · /segment │       └──────────────┬────────────────────┘
+│  /recap · /segment       │       └──────────────┬────────────────────┘
 │  /summarize · /feedback  │                      │ registers candidate
 └──────────────────────────┘                      ▼
                                    ┌───────────────────────────────────┐
@@ -53,7 +53,7 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 
 | Service | Port | Description |
 |---------|------|-------------|
-| Ray Serve API | `:8000` | `/health` `/recap` `/segment` `/summarize` `/ui` `/feedback` |
+| Ray Serve API | `:8000` | `/health` `/recap` `/segment` `/summarize` `/feedback` |
 | Ray Dashboard | `:8265` | Ray cluster dashboard |
 | MLflow | `:5000` | Experiment tracking + model registry |
 | Grafana | `:3000` | Serving + infrastructure dashboards |
@@ -76,19 +76,19 @@ ML-Sys-Ops-Project/
 ├── setup.sh                    # One-command bootstrap for a fresh Chameleon GPU node
 ├── env.example                 # Environment variable template — copy to .env
 │
-├── serving/                    # Shruti — Ray Serve, RoBERTa + Mistral, Prometheus/Grafana
+├── serving/                    # Ray Serve, RoBERTa + Mistral, Prometheus/Grafana
 │   ├── ray_serve/              # serve.py, storage.py, Dockerfile.ray
 │   ├── monitoring/             # prometheus.yml, alerts.yml, Grafana dashboards
 │   └── models/                 # Downloaded model weights (gitignored)
 │
-├── train/                      # Mahima — PyTorch fine-tuning, Ray Train, MLflow
-│   ├── retrain.py              # Main training + evaluation + MLflow registration
+├── train/                      # PyTorch fine-tuning, Ray Train, MLflow
+│   ├── retrain.py              # Main training (fault-tolerant) + evaluation + MLflow registration
 │   ├── retrain_watcher.py      # Feedback watcher daemon
 │   ├── online_eval.py          # Hourly correction-rate monitoring
 │   ├── offline_eval.py         # On-demand test-set evaluation
 │   └── Dockerfile              # Training container image
 │
-├── data/                       # Aneesh — ingest, workflow workers, dataset pipeline
+├── data/                       # ingest, workflow workers, dataset pipeline
 │   ├── proj07-runtime/         # Production service bundle (docker-compose + workers)
 │   ├── proj07-db/              # Postgres schema and migrations
 │   └── initial_implementation/ # Archived standalone scripts
@@ -131,7 +131,7 @@ ML-Sys-Ops-Project/
 
 ### Prerequisites
 
-- Chameleon Cloud GPU node (RTX 6000 or H100) with a floating IP and attached block volume at `/mnt/block`
+- Chameleon Cloud GPU node with a floating IP and attached block volume at `/mnt/block`
 - `~/.config/rclone/rclone.conf` with a `chi_tacc` remote (CHI@TACC S3)
 - AWS credentials for chi.tacc object storage (for MLflow artifacts)
 
@@ -171,7 +171,6 @@ docker compose ps
 
 | URL | What |
 |-----|------|
-| `http://<FLOATING_IP>:8000/ui` | Recap UI |
 | `http://<FLOATING_IP>:5000` | MLflow |
 | `http://<FLOATING_IP>:3000` | Grafana (admin / see .env) |
 | `http://<FLOATING_IP>:9001` | MinIO console |
@@ -182,7 +181,7 @@ docker compose ps
 
 ## Environment Variables
 
-See [`env.example`](env.example) for the full list. Key variables:
+See [`.env.example`](.env.example) for the full list. Key variables:
 
 | Variable | Description |
 |----------|-------------|
