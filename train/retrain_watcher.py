@@ -226,6 +226,11 @@ def trigger_retrain(correction_count, watermark):
         ("build_retraining_snapshot.py", "Build merged training snapshot"),
     ]
     for script_name, description in batch_scripts:
+        script_path = os.path.join("/app", script_name)
+        if not os.path.exists(script_path):
+            log.info(f"  {script_name} not present — skipping "
+                     f"(retraining_dataset_service handles dataset build)")
+            continue
         try:
             log.info(f"  Running {description} ({script_name})...")
             result = subprocess.run(
