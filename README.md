@@ -11,24 +11,24 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Jitsi Meet Stack                              │
-│  (jitsi-deployment/)  Web · Prosody · JVB · Jigasi · Vosk · Portal │
+│                        Jitsi Meet Stack                             │
+│  (jitsi-deployment/)  Web · Prosody · JVB · Jigasi · Vosk · Portal  │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │ transcript upload (HTTP)
                                 ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                       Data Pipeline  (data/)                          │
-│  jitsi_transcript_receiver → stage1_payload → stage1_forward         │
-│                            → stage2_input   → stage2_forward         │
-│  user_summary_materialize · retraining_dataset_service               │
-│  production_drift_monitor                                            │
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Data Pipeline  (data/)                        │
+│  jitsi_transcript_receiver → stage1_payload → stage1_forward        │
+│                            → stage2_input   → stage2_forward        │
+│  user_summary_materialize · retraining_dataset_service              │
+│  production_drift_monitor                                           │
 └──────────────┬──────────────────────────────────┬───────────────────┘
-               │  inference requests               │  feedback events
+               │  inference requests              │  feedback events
                ▼                                  ▼
 ┌──────────────────────────┐       ┌───────────────────────────────────┐
-│   Serving  (serving/)    │       │    Training  (train/)              │
-│                          │       │                                    │
-│  Ray Serve  :8000        │◄──────│  retrain_watcher  (always-on)      │
+│   Serving  (serving/)    │       │    Training  (train/)             │
+│                          │       │                                   │
+│  Ray Serve  :8000        │◄──────│  retrain_watcher  (always-on)     │
 │  RoBERTa segmenter (0.3 GPU)     │  retrain.py  (Ray Train, GPU)     │
 │  Mistral-7B summarizer (0.7 GPU) │  online_eval  (hourly)            │
 │  MLflow hot-reload       │       │  offline_eval  (on demand)        │
@@ -36,12 +36,12 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 │  /summarize · /feedback  │                      │ registers candidate
 └──────────────────────────┘                      ▼
                                    ┌───────────────────────────────────┐
-                                   │  MLflow Registry  :5000            │
-                                   │  jitsi-topic-segmenter             │
-                                   │  aliases: production · candidate   │
+                                   │  MLflow Registry  :5000           │
+                                   │  jitsi-topic-segmenter            │
+                                   │  aliases: production · candidate  │
                                    └───────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────┐
-│                     Shared Platform                                   │
+│                     Shared Platform                                  │
 │  Postgres :5432 · MinIO :9000/:9001 · Adminer :5050                  │
 │  Prometheus :9090 · Grafana :3000 · Alertmanager :9093               │
 └──────────────────────────────────────────────────────────────────────┘
