@@ -97,7 +97,7 @@ DEFAULT_RETRAIN_CONFIG = {
     "freeze_backbone": False,
     "lr": 2.29e-5,
     "batch_size": 32,
-    "epochs": 8,
+    "epochs": 2, # for demo, else 8
     "warmup_ratio": 0.105,
     "weight_decay": 0.072,
     "max_seq_len": 128,
