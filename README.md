@@ -92,6 +92,8 @@ ML-Sys-Ops-Project/
 │   ├── proj07-runtime/         # Production service bundle (docker-compose + workers)
 │   ├── proj07-db/              # Postgres schema and migrations
 │   └── initial_implementation/ # Archived standalone scripts
+|   └── emulate_production.py   # Sends synthetic meetings to /recap + injects feedback events
+│
 │
 └── jitsi-deployment/           # Jitsi Meet + meeting portal + transcript uploader
     ├── install-jitsi-vm.sh     # Automated Jitsi installer
@@ -192,6 +194,44 @@ See [`env.example`](env.example) for the full list. Key variables:
 | `BUCKET_NAME` | MLflow artifact bucket (default: `proj07-mlflow-artifacts`) |
 | `RETRAIN_THRESHOLD` | Feedback events to trigger retraining (default: `5` for demo) |
 | `GRAFANA_PASSWORD` | Grafana admin  |
+
+---
+
+## Emulated Production Traffic
+
+[`data/emulate_production.py`](data/emulate_production.py) drives the full production loop without a live Jitsi session. It sends synthetic meeting transcripts to the serving API, then injects realistic user feedback corrections into Postgres — which accumulates against the retrain watcher threshold and triggers automated retraining.
+
+**What it does per meeting:**
+1. Builds a synthetic transcript from 2–3 realistic topic blocks (multi-speaker, ~12–18 utterances)
+2. POSTs to `/recap` — triggers RoBERTa segmentation + Mistral summarization
+3. Randomly selects ~25% of segment boundaries and inserts `merge_segments` / `split_segment` rows into `feedback_events`
+4. Sleeps `DELAY_SECONDS` then repeats
+
+**Run as a background service (continuous loop):**
+```bash
+docker compose --profile emulated-traffic up -d traffic-generator
+docker compose logs traffic-generator -f
+```
+
+**Run once for a controlled demo (5 meetings, fast pace):**
+```bash
+RECAP_URL=http://localhost:8000 \
+DATABASE_URL=postgresql://proj07_user:PASSWORD@localhost:5432/proj07_sql_db \
+MEETING_COUNT=5 DELAY_SECONDS=5 \
+python scripts/emulate_production.py
+```
+
+**Configuration (environment variables):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RECAP_URL` | `http://serving-api:8000` | Serving API base URL |
+| `DATABASE_URL` | see compose | Postgres DSN for feedback injection |
+| `MEETING_COUNT` | `5` | Meetings to send (`0` = run forever) |
+| `DELAY_SECONDS` | `15` | Pause between meetings |
+| `FEEDBACK_RATE` | `0.25` | Fraction of segment boundaries that get a correction event |
+
+With `RETRAIN_THRESHOLD=5` (the demo default) and `FEEDBACK_RATE=0.25`, the watcher fires after roughly 4–6 meetings depending on how many segments each recap produces.
 
 ---
 
