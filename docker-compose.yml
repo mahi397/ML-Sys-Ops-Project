@@ -628,6 +628,34 @@ services:
     profiles:
       - retrain   # docker compose --profile retrain run retrain-job
 
+
+ # Sends synthetic meeting transcripts to /recap and injects feedback corrections.
+  # Drives the full production loop: serving → feedback_events → retrain trigger.
+  # Start with: docker compose --profile emulated-traffic up -d traffic-generator
+  traffic-generator:
+    build: ./train
+    container_name: traffic-generator
+    entrypoint: ["python", "/project/scripts/emulate_production.py"]
+    restart: unless-stopped
+    depends_on:
+      serving-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      RECAP_URL: http://serving-api:8000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      MEETING_COUNT: "0"
+      DELAY_SECONDS: "15"
+      FEEDBACK_RATE: "0.25"
+    volumes:
+      - .:/project:ro
+    networks:
+      - recap-net
+    profiles:
+      - emulated-traffic
+
+
   # Runs online_eval.py hourly — logs correction rate / FPR / FNR to MLflow.
   # Keeps the online-evaluation experiment current for the demo.
   # Start with: docker compose --profile monitoring up -d online-eval
