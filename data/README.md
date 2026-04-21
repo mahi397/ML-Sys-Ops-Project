@@ -106,6 +106,270 @@ source .venv/bin/activate
 
 7. If you tune drift thresholds or monitoring cadence, update `data/.env` and restart the relevant `proj07-runtime` services so the new control-plane settings take effect.
 
+## Runtime service inventory
+
+The modern runtime under `proj07-runtime/` exposes these Docker Compose services:
+
+- `postgres`
+  - runtime database
+- `adminer`
+  - lightweight DB inspection UI
+- `jitsi_transcript_receiver`
+  - transcript ingest API
+- `db_task_worker`
+  - workflow-task dispatcher and validity refresher
+- `stage1_payload_service`
+  - Stage 1 request builder
+- `stage1_forward_service`
+  - Stage 1 endpoint caller
+- `stage2_input_service`
+  - Stage 2 input builder from Stage 1 outputs
+- `stage2_forward_service`
+  - Stage 2 summarization caller
+- `user_summary_materialize_service`
+  - user-summary artifact materializer
+- `retraining_dataset_service`
+  - feedback-pool and retraining-snapshot publisher
+- `production_drift_monitor`
+  - live data-drift monitor
+
+List them directly from Compose:
+
+```bash
+cd proj07-runtime
+docker compose config --services
+```
+
+## Common runtime operations
+
+Start the full runtime stack:
+
+```bash
+cd proj07-runtime
+docker compose up -d
+```
+
+Start only selected services:
+
+```bash
+cd proj07-runtime
+
+# generic pattern
+docker compose up -d postgres SERVICE
+
+# examples
+docker compose up -d postgres jitsi_transcript_receiver
+docker compose up -d postgres db_task_worker
+docker compose up -d postgres stage1_payload_service
+docker compose up -d postgres stage1_forward_service
+docker compose up -d postgres stage2_input_service
+docker compose up -d postgres stage2_forward_service
+docker compose up -d postgres user_summary_materialize_service
+docker compose up -d postgres retraining_dataset_service
+docker compose up -d postgres production_drift_monitor
+docker compose up -d adminer
+```
+
+Inspect service status:
+
+```bash
+cd proj07-runtime
+docker compose ps
+```
+
+Check logs for any individual service:
+
+```bash
+cd proj07-runtime
+
+# generic pattern
+docker compose logs -f SERVICE_NAME
+
+# examples
+docker compose logs -f postgres
+docker compose logs -f adminer
+docker compose logs -f jitsi_transcript_receiver
+docker compose logs -f db_task_worker
+docker compose logs -f stage1_payload_service
+docker compose logs -f stage1_forward_service
+docker compose logs -f stage2_input_service
+docker compose logs -f stage2_forward_service
+docker compose logs -f user_summary_materialize_service
+docker compose logs -f retraining_dataset_service
+docker compose logs -f production_drift_monitor
+```
+
+Show the last 200 lines and continue following:
+
+```bash
+cd proj07-runtime
+docker compose logs -f --tail=200 SERVICE_NAME
+```
+
+Follow several worker services at once:
+
+```bash
+cd proj07-runtime
+docker compose logs -f \
+  db_task_worker \
+  stage1_payload_service \
+  stage1_forward_service \
+  stage2_input_service \
+  stage2_forward_service \
+  user_summary_materialize_service \
+  retraining_dataset_service \
+  production_drift_monitor
+```
+
+The services also write host-side logs under `/mnt/block/ingest_logs/`:
+
+- `jitsi_transcript_receiver`
+  - `/mnt/block/ingest_logs/jitsi_transcript`
+- `db_task_worker`
+  - `/mnt/block/ingest_logs/db_task_worker`
+- `stage1_payload_service`
+  - `/mnt/block/ingest_logs/stage1_payload_service`
+- `stage1_forward_service`
+  - `/mnt/block/ingest_logs/stage1_forward_service`
+- `stage2_input_service`
+  - `/mnt/block/ingest_logs/stage2_input_service`
+- `stage2_forward_service`
+  - `/mnt/block/ingest_logs/stage2_forward_service`
+- `user_summary_materialize_service`
+  - `/mnt/block/ingest_logs/user_summary_materialize_service`
+- `retraining_dataset_service`
+  - `/mnt/block/ingest_logs/retraining_dataset_service`
+- `production_drift_monitor`
+  - `/mnt/block/ingest_logs/production_drift_monitor`
+
+Examples:
+
+```bash
+tail -f /mnt/block/ingest_logs/retraining_dataset_service/*
+tail -f /mnt/block/ingest_logs/production_drift_monitor/*
+tail -f /mnt/block/ingest_logs/stage1_payload_service/*
+tail -f /mnt/block/ingest_logs/jitsi_transcript/*
+```
+
+## Data workflows and one-off jobs
+
+### Generate synthetic Stage 1 bootstrap data
+
+`data/setup.sh` automatically generates synthetic Stage 1 bootstrap artifacts when
+`BOOTSTRAP_SYNTHETIC_STAGE1_ENABLED=true` and the expected manifest is missing. To rerun
+that flow manually:
+
+```bash
+cd data
+source .venv/bin/activate
+set -a
+source .env
+set +a
+
+python initial_implementation/endpoint_replay_runtime/generate_synthetic_endpoint_inputs.py \
+  --output-root "${BLOCK_ROOT:-/mnt/block}/user-behaviour/inference_requests/stage1" \
+  --version "${BOOTSTRAP_SYNTHETIC_STAGE1_VERSION:-1}" \
+  --meeting-count "${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT:-3}" \
+  --seed "${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}" \
+  --upload-artifacts \
+  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
+  --bucket "${OBJECT_BUCKET:-objstore-proj07}" \
+  --stage1-object-prefix "${STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}" \
+  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/synthetic_stage1_bootstrap.log"
+```
+
+Watch the synthetic-data log:
+
+```bash
+tail -f /mnt/block/ingest_logs/synthetic_stage1_bootstrap.log
+```
+
+### Force one retraining dataset cycle
+
+This service builds the next `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN`
+when eligible new meetings and feedback have accumulated. To force one evaluation cycle:
+
+```bash
+cd proj07-runtime
+docker compose up -d postgres retraining_dataset_service
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+Inspect outputs:
+
+```bash
+ls -1 /mnt/block/staging/feedback_loop/datasets/roberta_stage1_feedback_pool
+ls -1 /mnt/block/roberta_stage1
+```
+
+### Force one production drift check
+
+```bash
+cd proj07-runtime
+docker compose up -d postgres production_drift_monitor
+docker compose exec production_drift_monitor \
+  python -m proj07_services.workers.production_drift_monitor --once
+```
+
+Reports are written under:
+
+```text
+/mnt/block/staging/feedback_loop/production_drift_reports
+```
+
+### Bootstrap AMI meetings into Postgres
+
+If the raw AMI corpus already exists in object storage and Postgres is missing fully ingested
+AMI meetings, rerun the bootstrap pipeline directly:
+
+```bash
+cd data
+source .venv/bin/activate
+set -a
+source .env
+set +a
+
+cd proj07-runtime
+python -m proj07_services.pipeline.bootstrap_ami_corpus \
+  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
+  --bucket "${OBJECT_BUCKET:-objstore-proj07}" \
+  --prefix "${AMI_OBJECT_PREFIX:-ami_public_manual_1.6.2}" \
+  --raw-root "${BLOCK_ROOT:-/mnt/block}/staging/current_job/raw" \
+  --processed-root "${BLOCK_ROOT:-/mnt/block}/staging/current_job/processed" \
+  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/ami_corpus_bootstrap.log"
+```
+
+### Restore stored dataset lineage
+
+If historical `roberta_stage1_feedback_pool/vN` or `roberta_stage1/vN` artifacts already exist
+in block storage or object storage, rerun the lineage restore flow:
+
+```bash
+cd data
+source .venv/bin/activate
+set -a
+source .env
+set +a
+
+cd proj07-runtime
+python -m proj07_services.retraining.restore_dataset_lineage \
+  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
+  --bucket "${OBJECT_BUCKET:-objstore-proj07}" \
+  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/retraining_dataset_lineage_restore.log"
+```
+
+### Legacy standalone retraining batch
+
+The original batch-style retraining runtime is preserved under
+`initial_implementation/retraining_dataset_runtime/`. Use it only when you explicitly need the
+archived April 6 workflow instead of the modern long-running service:
+
+```bash
+cd data/initial_implementation/retraining_dataset_runtime
+bash run_retraining_dataset_batch.sh
+```
+
 ## Important note about first-time DB initialization
 
 The SQL files under `proj07-db/init_sql/` are mounted by `proj07-runtime/docker-compose.yml`. On a fresh Postgres data volume they are applied automatically during container initialization, and `data/setup.sh` also reapplies the idempotent post-bootstrap migrations so existing volumes can pick up newer schema changes such as `meetings.is_valid` and `dataset_quality_reports`.
