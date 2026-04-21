@@ -33,20 +33,15 @@ volumes:
 networks:
   recap-net:
     driver: bridge
+  meet.jitsi:
+    driver: bridge
 
 services:
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # NOTE: Jitsi Meet stack (web, prosody, jicofo, jvb, jigasi, vosk,
-  # meeting-portal-app, transcript-uploader) is managed as a SEPARATE compose
-  # project installed by: bash jitsi-deployment/install-jitsi-vm.sh
-  #
-  # It lives in /mnt/block/jitsi/ and uses the meet.jitsi Docker network.
-  # It connects to this ML stack via FLOATING_IP:
-  #   - transcript-uploader  → http://FLOATING_IP:9099/ingest/jitsi-transcript
-  #   - meeting-portal-app   → postgresql://FLOATING_IP:5432/proj07_sql_db
-  #
-  # Set DEPLOY_JITSI=true in setup.sh to auto-install it.
+  # NOTE: Jitsi Meet stack is managed via --profile jitsi (see bottom of file).
+  # First-time setup:   DEPLOY_JITSI=true bash setup.sh  (generates .jitsi.env)
+  # Subsequent starts:  docker compose --profile jitsi up -d
   # ═══════════════════════════════════════════════════════════════════════════
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -584,7 +579,7 @@ services:
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       MODEL_NAME: jitsi-topic-segmenter
       TOKENIZERS_PARALLELISM: "false"
-      DATASET_VERSION: "2"
+      DATASET_VERSION: "1"
     volumes:
       - /mnt/block:/mnt/block
       - /home/cc/.config/rclone:/root/.config/rclone:ro
@@ -617,7 +612,7 @@ services:
       MODEL_NAME: jitsi-topic-segmenter
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       TOKENIZERS_PARALLELISM: "false"
-      DATASET_VERSION: "2"
+      DATASET_VERSION: "1"
       RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
     volumes:
       - /mnt/block:/mnt/block
@@ -765,4 +760,170 @@ services:
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
     networks:
       - recap-net
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 7. JITSI MEET STACK
+  # All services share the meet.jitsi network.
+  # First-time setup:  DEPLOY_JITSI=true bash setup.sh  (generates .jitsi.env,
+  #                    downloads Vosk model, generates XMPP/JWT secrets)
+  # Subsequent:        docker compose --profile jitsi up -d [--build]
+  # Restart:           docker compose --profile jitsi restart
+  # Logs:              docker compose --profile jitsi logs -f
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  jitsi-web:
+    image: local/jitsi-web-custom:${JITSI_IMAGE_VERSION:-stable-10741}
+    build:
+      context: ./jitsi-deployment
+      dockerfile: docker/web/Dockerfile
+      args:
+        JITSI_IMAGE_VERSION: ${JITSI_IMAGE_VERSION:-stable-10741}
+    container_name: jitsi-web
+    restart: unless-stopped
+    ports:
+      - "${HTTPS_PORT:-8443}:443"
+      - "${HTTP_PORT:-8088}:80"
+    volumes:
+      - /mnt/block/jitsi/config/web:/config:Z
+      - /mnt/block/jitsi/config/web/crontabs:/var/spool/cron/crontabs:Z
+      - /mnt/block/jitsi/config/transcripts:/usr/share/jitsi-meet/transcripts:Z
+    env_file:
+      - .env
+      - .jitsi.env
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
+
+  jitsi-prosody:
+    image: local/jitsi-prosody-custom:${JITSI_IMAGE_VERSION:-stable-10741}
+    build:
+      context: ./jitsi-deployment
+      dockerfile: docker/prosody/Dockerfile
+      args:
+        JITSI_IMAGE_VERSION: ${JITSI_IMAGE_VERSION:-stable-10741}
+    container_name: jitsi-prosody
+    restart: unless-stopped
+    volumes:
+      - /mnt/block/jitsi/config/prosody/config:/config:Z
+      - /mnt/block/jitsi/config/prosody/prosody-plugins-custom:/prosody-plugins-custom:Z
+    env_file:
+      - .env
+      - .jitsi.env
+    networks:
+      meet.jitsi:
+        aliases:
+          - ${XMPP_SERVER:-prosody}
+          - ${XMPP_DOMAIN:-meet.jitsi}
+          - auth.${XMPP_DOMAIN:-meet.jitsi}
+          - guest.${XMPP_DOMAIN:-meet.jitsi}
+          - muc.${XMPP_DOMAIN:-meet.jitsi}
+          - internal-muc.${XMPP_DOMAIN:-meet.jitsi}
+          - hidden.${XMPP_DOMAIN:-meet.jitsi}
+    profiles:
+      - jitsi
+
+  jitsi-jicofo:
+    image: jitsi/jicofo:${JITSI_IMAGE_VERSION:-stable-10741}
+    container_name: jitsi-jicofo
+    restart: unless-stopped
+    volumes:
+      - /mnt/block/jitsi/config/jicofo:/config:Z
+    env_file:
+      - .env
+      - .jitsi.env
+    depends_on:
+      - jitsi-prosody
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
+
+  jitsi-jvb:
+    image: jitsi/jvb:${JITSI_IMAGE_VERSION:-stable-10741}
+    container_name: jitsi-jvb
+    restart: unless-stopped
+    ports:
+      - "${JVB_PORT:-10000}:10000/udp"
+    volumes:
+      - /mnt/block/jitsi/config/jvb:/config:Z
+    env_file:
+      - .env
+      - .jitsi.env
+    depends_on:
+      - jitsi-prosody
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
+
+  jitsi-jigasi:
+    image: jitsi/jigasi:${JITSI_IMAGE_VERSION:-stable-10741}
+    container_name: jitsi-jigasi
+    restart: unless-stopped
+    volumes:
+      - /mnt/block/jitsi/config/jigasi:/config:Z
+      - /mnt/block/jitsi/config/transcripts:/usr/share/jigasi/transcripts:Z
+    env_file:
+      - .env
+      - .jitsi.env
+    depends_on:
+      - jitsi-prosody
+      - jitsi-vosk
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
+
+  jitsi-vosk:
+    image: alphacep/kaldi-en:latest
+    container_name: jitsi-vosk
+    restart: unless-stopped
+    volumes:
+      - ${VOSK_MODEL_PATH:-/mnt/block/jitsi/config/models/vosk-model-en-us-0.22-lgraph}:/opt/vosk-model-en/model:ro
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
+
+  jitsi-meeting-portal:
+    image: local/meeting-portal-app:${DEPLOYMENT_IMAGE_TAG:-vm}
+    build:
+      context: ./jitsi-deployment
+      dockerfile: docker/meeting-portal-app/Dockerfile
+    container_name: jitsi-meeting-portal
+    restart: unless-stopped
+    volumes:
+      - /mnt/block/jitsi/config/meeting-portal-app:/data:Z
+      - /mnt/block/jitsi/config/rclone:/root/.config/rclone:ro
+    env_file:
+      - .env
+      - .jitsi.env
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
+
+  jitsi-transcript-uploader:
+    image: local/transcript-uploader:${DEPLOYMENT_IMAGE_TAG:-vm}
+    build:
+      context: ./jitsi-deployment
+      dockerfile: docker/transcript-uploader/Dockerfile
+    container_name: jitsi-transcript-uploader
+    restart: unless-stopped
+    depends_on:
+      - jitsi-meeting-portal
+    volumes:
+      - /mnt/block/jitsi/config/transcripts:/transcripts:ro
+      - /mnt/block/jitsi/config/transcript-uploader:/state:rw
+      - /mnt/block/jitsi/config/meeting-portal-app/room-contexts:/room-contexts:ro
+    env_file:
+      - .env
+      - .jitsi.env
+    networks:
+      - meet.jitsi
+    profiles:
+      - jitsi
 

@@ -14,7 +14,7 @@ REPO_DIR="${REPO_DIR:-${HOME}/ML-Sys-Ops-Project}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-chi_tacc}"
 OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
-DATASET_VERSION="${DATASET_VERSION:-v2}"
+DATASET_VERSION="${DATASET_VERSION:-v1}"
 FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
 DEPLOY_JITSI="${DEPLOY_JITSI:-true}"
 
@@ -347,10 +347,11 @@ done
 echo -e "\n${YELLOW}[10/10] Jitsi deployment...${NC}"
 if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     JITSI_DIR="${REPO_DIR}/jitsi-deployment"
-    STACK_ENV="${JITSI_DIR}/stack.env"
-
-    # Bootstrap stack.env from example if missing
-    [[ ! -f "${STACK_ENV}" ]] && cp "${JITSI_DIR}/stack.env.example" "${STACK_ENV}" && info "Created ${STACK_ENV} from example"
+    JITSI_ENV="${REPO_DIR}/.jitsi.env"
+    JITSI_CONFIG_ROOT="${BLOCK_ROOT}/jitsi/config"
+    _IP="${FLOATING_IP:-$(hostname -I | awk '{print $1}')}"
+    _HP="${HTTPS_PORT:-${JITSI_PORT:-8443}}"
+    _RP="${INGEST_PORT:-9099}"
 
     # Helper: set or append KEY=VALUE in file
     _set_kv() {
@@ -362,55 +363,119 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
         fi
     }
 
-    _IP="${FLOATING_IP:-$(hostname -I | awk '{print $1}')}"
-    _HP="${HTTPS_PORT:-${JITSI_PORT:-8443}}"
-    _RP="${INGEST_PORT:-9099}"
+    if [[ ! -f "${JITSI_ENV}" ]]; then
+        info "First-time Jitsi setup — generating secrets and downloading Vosk model..."
 
-    # Populate stack.env from root .env values
-    _set_kv PUBLIC_URL                              "https://${_IP}:${_HP}"                                          "${STACK_ENV}"
-    _set_kv HTTPS_PORT                              "${_HP}"                                                          "${STACK_ENV}"
-    _set_kv HTTP_PORT                               "${HTTP_PORT:-8000}"                                              "${STACK_ENV}"
-    _set_kv ENABLE_HTTP_REDIRECT                    "${ENABLE_HTTP_REDIRECT:-1}"                                      "${STACK_ENV}"
-    _set_kv JVB_ADVERTISE_IPS                       "${_IP}"                                                          "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_DATABASE_URL             "${MEETING_PORTAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}}" "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_INGEST_URL             "http://${_IP}:${_RP}/ingest/jitsi-transcript"                   "${STACK_ENV}"
-    _set_kv INGEST_TOKEN                            "${INGEST_TOKEN}"                                                 "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_POLL_SECONDS           "${JITSI_TRANSCRIPT_POLL_SECONDS:-5}"                             "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_SETTLE_SECONDS         "${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}"                           "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_UPLOAD_TIMEOUT         "${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}"                         "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_HTTPS_ONLY               "${MEETING_PORTAL_HTTPS_ONLY:-true}"                              "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_TOKEN_TTL_SECONDS        "${MEETING_PORTAL_TOKEN_TTL_SECONDS:-3600}"                       "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_REMOTE            "${MEETING_PORTAL_RCLONE_REMOTE:-${RCLONE_REMOTE:-chi_tacc}}"    "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_BUCKET            "${MEETING_PORTAL_RCLONE_BUCKET:-${BUCKET:-objstore-proj07}}"    "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS   "${MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS:-10}"                    "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED "${MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED:-true}"   "${STACK_ENV}"
-    _set_kv JIGASI_DISABLE_SIP                      "${JIGASI_DISABLE_SIP:-1}"                                        "${STACK_ENV}"
+        # Bootstrap .jitsi.env from example
+        cp "${REPO_DIR}/.jitsi.env.example" "${JITSI_ENV}"
 
-    # Propagate secrets only if already set in root .env (installer generates them otherwise)
-    [[ -n "${JWT_APP_SECRET:-}" ]]                && _set_kv JWT_APP_SECRET                "${JWT_APP_SECRET}"                "${STACK_ENV}"
-    [[ -n "${MEETING_PORTAL_SESSION_SECRET:-}" ]] && _set_kv MEETING_PORTAL_SESSION_SECRET "${MEETING_PORTAL_SESSION_SECRET}" "${STACK_ENV}"
-    [[ -n "${JITSI_HOST_EXTERNAL_KEY:-}" ]]       && _set_kv JITSI_HOST_EXTERNAL_KEY       "${JITSI_HOST_EXTERNAL_KEY}"       "${STACK_ENV}"
-    # SIP creds only forwarded if SIP gateway is enabled
-    if [[ "${JIGASI_DISABLE_SIP:-1}" == "0" ]]; then
-        [[ -n "${JIGASI_SIP_URI:-}" ]]            && _set_kv JIGASI_SIP_URI                "${JIGASI_SIP_URI}"                "${STACK_ENV}"
-        [[ -n "${JIGASI_SIP_PASSWORD:-}" ]]       && _set_kv JIGASI_SIP_PASSWORD           "${JIGASI_SIP_PASSWORD}"           "${STACK_ENV}"
-        [[ -n "${JIGASI_SIP_SERVER:-}" ]]         && _set_kv JIGASI_SIP_SERVER             "${JIGASI_SIP_SERVER}"             "${STACK_ENV}"
+        # Run installer once for secret generation and env setup.
+        # We pass --skip-vosk-download so we can handle the model ourselves below.
+        STACK_ENV="${JITSI_DIR}/stack.env"
+        [[ ! -f "${STACK_ENV}" ]] && cp "${JITSI_DIR}/stack.env.example" "${STACK_ENV}"
+
+        _set_kv PUBLIC_URL              "https://${_IP}:${_HP}"                                                   "${STACK_ENV}"
+        _set_kv HTTPS_PORT              "${_HP}"                                                                   "${STACK_ENV}"
+        _set_kv HTTP_PORT               "${HTTP_PORT:-8088}"                                                       "${STACK_ENV}"
+        _set_kv ENABLE_HTTP_REDIRECT    "${ENABLE_HTTP_REDIRECT:-1}"                                               "${STACK_ENV}"
+        _set_kv JVB_ADVERTISE_IPS       "${_IP}"                                                                   "${STACK_ENV}"
+        _set_kv MEETING_PORTAL_DATABASE_URL \
+            "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}" \
+            "${STACK_ENV}"
+        _set_kv JITSI_TRANSCRIPT_INGEST_URL "http://${_IP}:${_RP}/ingest/jitsi-transcript" "${STACK_ENV}"
+        _set_kv MEETING_PORTAL_RCLONE_REMOTE "${RCLONE_REMOTE:-chi_tacc}"                  "${STACK_ENV}"
+        _set_kv MEETING_PORTAL_RCLONE_BUCKET "${OBJSTORE_BUCKET:-objstore-proj07}"          "${STACK_ENV}"
+        _set_kv JIGASI_DISABLE_SIP           "1"                                            "${STACK_ENV}"
+
+        sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" \
+            --env-file "${STACK_ENV}" \
+            --skip-docker-install \
+            --skip-vosk-download
+        ok "Installer ran — secrets generated"
+
+        # Extract the generated secrets from installer output into .jitsi.env
+        INSTALLER_ENV="${BLOCK_ROOT}/jitsi/jitsi-docker-jitsi-meet/.env"
+        if [[ -f "${INSTALLER_ENV}" ]]; then
+            for key in JWT_APP_SECRET MEETING_PORTAL_SESSION_SECRET INGEST_TOKEN \
+                       JITSI_HOST_EXTERNAL_KEY JICOFO_AUTH_PASSWORD JVB_AUTH_PASSWORD \
+                       JIGASI_XMPP_PASSWORD JIGASI_TRANSCRIBER_PASSWORD \
+                       JIBRI_RECORDER_PASSWORD JIBRI_XMPP_PASSWORD; do
+                val="$(grep "^${key}=" "${INSTALLER_ENV}" | head -1 | cut -d= -f2-)"
+                [[ -n "${val}" ]] && _set_kv "${key}" "${val}" "${JITSI_ENV}"
+            done
+            ok "Generated secrets written to ${JITSI_ENV}"
+        fi
+
+        # Populate the rest of .jitsi.env from root .env values
+        _set_kv PUBLIC_URL              "https://${_IP}:${_HP}"                                                   "${JITSI_ENV}"
+        _set_kv JVB_ADVERTISE_IPS       "${_IP}"                                                                   "${JITSI_ENV}"
+        _set_kv HTTPS_PORT              "${_HP}"                                                                   "${JITSI_ENV}"
+        _set_kv HTTP_PORT               "${HTTP_PORT:-8088}"                                                       "${JITSI_ENV}"
+        _set_kv MEETING_PORTAL_DATABASE_URL \
+            "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}" \
+            "${JITSI_ENV}"
+        _set_kv JITSI_TRANSCRIPT_INGEST_URL "http://${_IP}:${_RP}/ingest/jitsi-transcript" "${JITSI_ENV}"
+        _set_kv MEETING_PORTAL_RCLONE_REMOTE "${RCLONE_REMOTE:-chi_tacc}"                  "${JITSI_ENV}"
+        _set_kv MEETING_PORTAL_RCLONE_BUCKET "${OBJSTORE_BUCKET:-objstore-proj07}"          "${JITSI_ENV}"
+
+        ok ".jitsi.env ready — subsequent restarts use: docker compose --profile jitsi up -d"
+    else
+        ok ".jitsi.env already exists — skipping secret generation"
+        info "To regenerate, delete ${JITSI_ENV} and re-run setup.sh"
     fi
 
-    ok "stack.env populated from root .env"
-    info "Running Jitsi installer (downloads upstream images + Vosk model ~1GB)..."
-    sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" --env-file "${STACK_ENV}"
-    ok "Jitsi deployment complete"
+    # Download Vosk model if not already present
+    VOSK_MODEL_PATH_VAL="$(grep "^VOSK_MODEL_PATH=" "${JITSI_ENV}" | cut -d= -f2-)"
+    VOSK_MODEL_PATH_VAL="${VOSK_MODEL_PATH_VAL:-${JITSI_CONFIG_ROOT}/models/vosk-model-en-us-0.22-lgraph}"
+    if [[ ! -d "${VOSK_MODEL_PATH_VAL}" ]] || [[ -z "$(ls -A "${VOSK_MODEL_PATH_VAL}" 2>/dev/null)" ]]; then
+        info "Downloading Vosk model (~1GB) to ${VOSK_MODEL_PATH_VAL}..."
+        VOSK_URL="https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip"
+        VOSK_TMPDIR="$(mktemp -d)"
+        curl -fL "${VOSK_URL}" -o "${VOSK_TMPDIR}/model.zip"
+        unzip -q "${VOSK_TMPDIR}/model.zip" -d "${VOSK_TMPDIR}"
+        EXTRACTED="$(find "${VOSK_TMPDIR}" -mindepth 1 -maxdepth 1 -type d | head -1)"
+        sudo mkdir -p "$(dirname "${VOSK_MODEL_PATH_VAL}")"
+        sudo mv "${EXTRACTED}" "${VOSK_MODEL_PATH_VAL}"
+        rm -rf "${VOSK_TMPDIR}"
+        ok "Vosk model saved to ${VOSK_MODEL_PATH_VAL}"
+    else
+        ok "Vosk model already present"
+    fi
+    _set_kv VOSK_MODEL_PATH "${VOSK_MODEL_PATH_VAL}" "${JITSI_ENV}"
+
+    # Copy rclone config so the meeting-portal container can reach chi.tacc
+    mkdir -p "${JITSI_CONFIG_ROOT}/rclone"
+    [[ -f "${HOME}/.config/rclone/rclone.conf" ]] && \
+        install -m 600 "${HOME}/.config/rclone/rclone.conf" "${JITSI_CONFIG_ROOT}/rclone/rclone.conf" && \
+        ok "rclone config copied to Jitsi config dir"
+
+    # Create required Jitsi config directories (idempotent)
+    sudo mkdir -p \
+        "${JITSI_CONFIG_ROOT}/web/crontabs" \
+        "${JITSI_CONFIG_ROOT}/prosody/config" \
+        "${JITSI_CONFIG_ROOT}/prosody/prosody-plugins-custom" \
+        "${JITSI_CONFIG_ROOT}/jicofo" \
+        "${JITSI_CONFIG_ROOT}/jvb" \
+        "${JITSI_CONFIG_ROOT}/jigasi" \
+        "${JITSI_CONFIG_ROOT}/transcripts" \
+        "${JITSI_CONFIG_ROOT}/meeting-portal-app/room-contexts" \
+        "${JITSI_CONFIG_ROOT}/transcript-uploader" \
+        "${JITSI_CONFIG_ROOT}/models"
+    sudo chown -R "${USER}:${USER}" "${BLOCK_ROOT}/jitsi"
+
+    # Start/restart the full Jitsi stack via root compose
+    cd "${REPO_DIR}"
+    info "Starting Jitsi stack via root compose (--profile jitsi)..."
+    docker compose --profile jitsi up -d --build --remove-orphans
+    ok "Jitsi stack started"
 
     echo ""
-    echo "  Jitsi web:    https://${_IP}:${_HP}"
-    echo "  After install, copy generated secrets back to root .env:"
-    echo "    grep -E 'JWT_APP_SECRET|MEETING_PORTAL_SESSION_SECRET|JITSI_HOST_EXTERNAL_KEY' /mnt/block/jitsi/jitsi-docker-jitsi-meet/.env"
-    echo "  Then re-run to persist them: DEPLOY_JITSI=true bash setup.sh"
+    echo "  Jitsi web:  https://${_IP}:${_HP}"
+    echo "  To manage:  docker compose --profile jitsi [ps|logs -f|restart|down]"
 else
     info "Skipping Jitsi deployment (set DEPLOY_JITSI=true to include)"
-    echo "  When ready, root .env must have PUBLIC_URL, MEETING_PORTAL_DATABASE_URL,"
-    echo "  JITSI_TRANSCRIPT_INGEST_URL set, then: DEPLOY_JITSI=true bash setup.sh"
+    echo "  When ready:  cp .jitsi.env.example .jitsi.env  # fill in values, then:"
+    echo "               DEPLOY_JITSI=true bash setup.sh"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

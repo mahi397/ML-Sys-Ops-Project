@@ -226,23 +226,24 @@ def trigger_retrain(correction_count, watermark):
         ("build_retraining_snapshot.py", "Build merged training snapshot"),
     ]
     for script_name, description in batch_scripts:
+        script_path = os.path.join("/app", script_name)
+        if not os.path.exists(script_path):
+            log.info(f"  {script_name} not present — skipping "
+                     f"(retraining_dataset_service handles dataset build)")
+            continue
         try:
             log.info(f"  Running {description} ({script_name})...")
             result = subprocess.run(
-                [sys.executable, script_name],
+                [sys.executable, script_path],
                 capture_output=True, text=True, timeout=600,
-                cwd="/app",
             )
             if result.returncode != 0:
                 log.error(f"  {script_name} failed: {result.stderr[:500]}")
                 _log_audit("retrain_batch_failed", {
                     "script": script_name, "stderr": result.stderr[:500]
                 })
-                # Don't abort — the retrain can still run on existing dataset
             else:
                 log.info(f"  {script_name} completed successfully")
-        except FileNotFoundError:
-            log.warning(f"  {script_name} not found — skipping (will use existing dataset)")
         except subprocess.TimeoutExpired:
             log.error(f"  {script_name} timed out after 600s")
 
