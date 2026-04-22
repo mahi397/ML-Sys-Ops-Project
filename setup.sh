@@ -283,11 +283,11 @@ WHERE NOT EXISTS (
 
 # Restore MLflow model registry
 MLFLOW_CONTAINER=$(docker ps --format '{{.Names}}' | grep mlflow | grep -v minio | head -1)
-# if [[ -f "${HOME}/restore_mlflow.py" && -n "${MLFLOW_CONTAINER}" ]]; then
-#     docker cp "${HOME}/restore_mlflow.py" "${MLFLOW_CONTAINER}:/restore_mlflow.py"
-#     docker exec "${MLFLOW_CONTAINER}" python /restore_mlflow.py
+if [[ -f "${HOME}/restore_mlflow.py" && -n "${MLFLOW_CONTAINER}" ]]; then
+    docker cp "${HOME}/restore_mlflow.py" "${MLFLOW_CONTAINER}:/restore_mlflow.py"
+    docker exec "${MLFLOW_CONTAINER}" python /restore_mlflow.py
 
-docker exec "${MLFLOW_CONTAINER}" python -c "
+    docker exec "${MLFLOW_CONTAINER}" python -c "
 import mlflow
 mlflow.set_tracking_uri('http://localhost:5000')
 client = mlflow.tracking.MlflowClient()
@@ -315,10 +315,10 @@ except Exception as e:
     print(f'fallback: {e}')
 print('Registry restore complete')
 " && ok "Model registry restored"
-# else
-#     info "restore_mlflow.py not found at ${HOME}/ — skipping registry restore"
-#     echo "  Copy it there and run manually after stack is up"
-# fi
+else
+    info "restore_mlflow.py not found at ${HOME}/ — skipping registry restore"
+    echo "  Copy it there and run manually after stack is up"
+fi
 
 # Bring up remaining services (including monitoring profile for online-eval)
 info "Bringing up full stack..."
