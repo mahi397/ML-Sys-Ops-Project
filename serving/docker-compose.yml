@@ -24,7 +24,7 @@ services:
     environment:
       - MODEL_PATH=/models/roberta-seg
       - LLM_MODEL_PATH=/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
-      - BOUNDARY_THRESHOLD=0.5
+      - BOUNDARY_THRESHOLD=0.40
       - MAX_SEGMENT_UTTERANCES=200
       - RAY_DEDUP_LOGS=0
       - MODEL_VERSION=roberta-base-v0
