@@ -14,7 +14,7 @@ REPO_DIR="${REPO_DIR:-${HOME}/ML-Sys-Ops-Project}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-chi_tacc}"
 OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
-DATASET_VERSION="${DATASET_VERSION:-v2}"
+DATASET_VERSION="${DATASET_VERSION:-v1}"
 FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
 DEPLOY_JITSI="${DEPLOY_JITSI:-true}"
 
@@ -282,39 +282,39 @@ WHERE NOT EXISTS (
 " && ok "dataset_versions seeded"
 
 # Restore MLflow model registry
-# MLFLOW_CONTAINER=$(docker ps --format '{{.Names}}' | grep mlflow | grep -v minio | head -1)
+MLFLOW_CONTAINER=$(docker ps --format '{{.Names}}' | grep mlflow | grep -v minio | head -1)
 # if [[ -f "${HOME}/restore_mlflow.py" && -n "${MLFLOW_CONTAINER}" ]]; then
 #     docker cp "${HOME}/restore_mlflow.py" "${MLFLOW_CONTAINER}:/restore_mlflow.py"
 #     docker exec "${MLFLOW_CONTAINER}" python /restore_mlflow.py
 
-#     docker exec "${MLFLOW_CONTAINER}" python -c "
-# import mlflow
-# mlflow.set_tracking_uri('http://localhost:5000')
-# client = mlflow.tracking.MlflowClient()
-# try:
-#     client.create_registered_model('jitsi-topic-segmenter',
-#         description='RoBERTa-base full fine-tune, best sweep params, test_pk=0.213')
-# except: pass
+docker exec "${MLFLOW_CONTAINER}" python -c "
+import mlflow
+mlflow.set_tracking_uri('http://localhost:5000')
+client = mlflow.tracking.MlflowClient()
+try:
+    client.create_registered_model('jitsi-topic-segmenter',
+        description='RoBERTa-base full fine-tune, best sweep params, test_pk=0.213')
+except: pass
 
-# try:
-#     mv1 = client.create_model_version('jitsi-topic-segmenter',
-#         source='s3://proj07-mlflow-artifacts/1/fdc4b6d0966b4aa9bbc6f95c01b5fcda/artifacts/model',
-#         description='Optuna trial #10, test_pk=0.213, test_f1=0.232, production model')
-#     client.set_registered_model_alias('jitsi-topic-segmenter', 'production', mv1.version)
-#     print(f'production -> v{mv1.version}')
-# except Exception as e:
-#     print(f'production: {e}')
+try:
+    mv1 = client.create_model_version('jitsi-topic-segmenter',
+        source='s3://proj07-mlflow-artifacts/1/fdc4b6d0966b4aa9bbc6f95c01b5fcda/artifacts/model',
+        description='Optuna trial #10, test_pk=0.213, test_f1=0.232, production model')
+    client.set_registered_model_alias('jitsi-topic-segmenter', 'production', mv1.version)
+    print(f'production -> v{mv1.version}')
+except Exception as e:
+    print(f'production: {e}')
 
-# try:
-#     mv2 = client.create_model_version('jitsi-topic-segmenter',
-#         source='s3://proj07-mlflow-artifacts/1/dbd0cb5d052c42f5bae2e898684be6cc/artifacts/model',
-#         description='distilroberta-base full fine-tune, test_pk=0.286, fallback model')
-#     client.set_registered_model_alias('jitsi-topic-segmenter', 'fallback', mv2.version)
-#     print(f'fallback -> v{mv2.version}')
-# except Exception as e:
-#     print(f'fallback: {e}')
-# print('Registry restore complete')
-# " && ok "Model registry restored"
+try:
+    mv2 = client.create_model_version('jitsi-topic-segmenter',
+        source='s3://proj07-mlflow-artifacts/1/dbd0cb5d052c42f5bae2e898684be6cc/artifacts/model',
+        description='distilroberta-base full fine-tune, test_pk=0.286, fallback model')
+    client.set_registered_model_alias('jitsi-topic-segmenter', 'fallback', mv2.version)
+    print(f'fallback -> v{mv2.version}')
+except Exception as e:
+    print(f'fallback: {e}')
+print('Registry restore complete')
+" && ok "Model registry restored"
 # else
 #     info "restore_mlflow.py not found at ${HOME}/ — skipping registry restore"
 #     echo "  Copy it there and run manually after stack is up"
