@@ -449,6 +449,7 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
         unzip -q "${VOSK_TMPDIR}/model.zip" -d "${VOSK_TMPDIR}"
         EXTRACTED="$(find "${VOSK_TMPDIR}" -mindepth 1 -maxdepth 1 -type d | head -1)"
         sudo mkdir -p "$(dirname "${VOSK_MODEL_PATH_VAL}")"
+        sudo rm -rf "${VOSK_MODEL_PATH_VAL}"
         sudo mv "${EXTRACTED}" "${VOSK_MODEL_PATH_VAL}"
         rm -rf "${VOSK_TMPDIR}"
         ok "Vosk model saved to ${VOSK_MODEL_PATH_VAL}"
