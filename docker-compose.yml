@@ -903,7 +903,9 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
-      - meet.jitsi
+      meet.jitsi:
+        aliases:
+          - meeting-portal-app
     profiles:
       - jitsi
 
