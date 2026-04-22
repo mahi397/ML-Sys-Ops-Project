@@ -192,7 +192,7 @@ See [`.env.example`](.env.example) for the full list. Key variables:
 | `AWS_SECRET_ACCESS_KEY` | CHI@TACC S3 secret |
 | `BUCKET_NAME` | MLflow artifact bucket (default: `proj07-mlflow-artifacts`) |
 | `RETRAIN_THRESHOLD` | Feedback events to trigger retraining (default: `5` for demo) |
-| `GRAFANA_PASSWORD` | Grafana admin  |
+| `GRAFANA_PASSWORD` |admin  |
 
 ---
 
