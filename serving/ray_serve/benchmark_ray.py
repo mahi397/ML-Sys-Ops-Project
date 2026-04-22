@@ -211,5 +211,5 @@ if __name__ == "__main__":
             print(f"\n  Recap error: {e}")
 
     print(f"\n{'='*60}")
-    print("Done! Open Grafana: http://<FLOATING_IP>:3000  (admin / jitsi2026)")
+    print("Done! Open Grafana: http://<FLOATING_IP>:3000  (admin / admin)")
     print(f"{'='*60}")

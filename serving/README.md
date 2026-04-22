@@ -10,7 +10,7 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 |---|---|---|
 | API / Health | http://192.5.87.115:8000/health | — |
 | Recap UI | http://192.5.87.115:8000/ui | — |
-| Grafana | http://192.5.87.115:3000 | `admin` / `jitsi2026` |
+| Grafana | http://192.5.87.115:3000 | `admin` / `admin` |
 | Prometheus | http://192.5.87.115:9090 | — |
 | Alertmanager | http://192.5.87.115:9093 | — |
 | Ray Dashboard | http://192.5.87.115:8265 | — |

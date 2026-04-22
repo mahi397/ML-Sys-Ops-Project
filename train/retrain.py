@@ -108,13 +108,13 @@ DEFAULT_RETRAIN_CONFIG = {
     "debug_subsample": False,
     "warm_start_model_alias": "production",
     # Data paths
-    "data_dir": "/mnt/block/roberta_stage1/v2",
+    "data_dir": "/mnt/block/roberta_stage1/v1",
     "feedback_data_dir": None,
     "feedback_weight": 2.0,
     # Object storage
     "objstore_bucket": "objstore-proj07",
     "staging_base": "/mnt/block",
-    "rclone_remote": "chi_tacc",
+    "rclone_remote": "rclone_s3",
     # MLflow
     "experiment_name": "retraining",
     "model_registry_name": "jitsi-topic-segmenter",

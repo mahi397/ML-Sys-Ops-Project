@@ -524,7 +524,8 @@ class SegmenterDeployment:
                 # ── Load model: MLflow registry → local path → base weights ──
         self.model = None
         self.model_version = "base"
-        self.current_mlflow_version = "unknown" 
+        self.current_mlflow_version = "unknown"
+        self.threshold = BOUNDARY_THRESHOLD  # default fallback 
 
         # 1. Try MLflow registry
         if MLFLOW_TRACKING_URI:
@@ -537,6 +538,13 @@ class SegmenterDeployment:
                 _client = mlflow.tracking.MlflowClient()
                 _alias_mv = _client.get_model_version_by_alias(MLFLOW_MODEL_NAME, MODEL_ALIAS)
                 self.current_mlflow_version = str(_alias_mv.version)
+                # ★ READ best_threshold FROM MODEL VERSION TAGS ★
+                tags = _alias_mv.tags or {}
+                if "best_threshold" in tags:
+                    self.threshold = float(tags["best_threshold"])
+                    print(f"[segmenter] Using best_threshold={self.threshold} from MLflow v{_alias_mv.version}")
+                else:
+                    print(f"[segmenter] No best_threshold tag on v{_alias_mv.version}, using default {self.threshold}")
                 print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
             except Exception as e:
                 print(f"[segmenter] MLflow @{MODEL_ALIAS} failed ({e}), trying @fallback")
@@ -544,6 +552,12 @@ class SegmenterDeployment:
                     fallback_uri = f"models:/{MLFLOW_MODEL_NAME}@fallback"
                     self.model = mlflow.pytorch.load_model(fallback_uri)
                     self.model_version = "mlflow@fallback"
+                    # Also read threshold from fallback version
+                    _fb_mv = _client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "fallback")
+                    fb_tags = _fb_mv.tags or {}
+                    if "best_threshold" in fb_tags:
+                        self.threshold = float(fb_tags["best_threshold"])
+                        print(f"[segmenter] Using fallback best_threshold={self.threshold}")
                     print(f"[segmenter] Loaded fallback model from MLflow")
                 except Exception as e2:
                     print(f"[segmenter] MLflow fallback also failed ({e2}), using local path")
@@ -592,10 +606,15 @@ class SegmenterDeployment:
                     )
                     new_model.to(self.device)
                     new_model.eval()
+
+                     #  READ NEW THRESHOLD 
+                    tags = alias_mv.tags or {}
+                    new_threshold = float(tags.get("best_threshold", self.threshold))
                     with self._model_lock:
                         self.model = new_model
                         self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"  # ← consistent format
                         self.current_mlflow_version = new_version
+                        self.threshold = new_threshold 
                     print(f"[segmenter] Model reloaded: {new_version}")
                     self.metrics.record.remote({
                         "endpoint": "segment", "model_loaded": True,

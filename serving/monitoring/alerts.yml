@@ -91,13 +91,13 @@ groups:
           summary: "Median boundary confidence < 0.3 — possible data drift"
 
       - alert: RetrainingThresholdReached
-        expr: jitsi_pending_corrections >= 500
+        expr: jitsi_pending_corrections >= 5
         for: 5m
         labels:
           severity: warning
           action: retrain
         annotations:
-          summary: "500 corrections accumulated — trigger retraining"
+          summary: "5 corrections accumulated — trigger retraining"
           
   - name: user_feedback_drift
     rules:
