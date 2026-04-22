@@ -18,7 +18,6 @@
 # Single docker compose up brings up the entire system.
 # Profiles:
 #   --profile retrain          triggers retraining pipeline
-#   --profile emulated-traffic starts the traffic generator only when explicitly requested
 ###############################################################################
 
 volumes:
@@ -627,27 +626,6 @@ services:
       - recap-net
     profiles:
       - retrain   # docker compose --profile retrain run retrain-job
-
-  # Manual-only traffic generator.
-  # It is excluded from the default stack and only starts when explicitly requested:
-  # docker compose --profile emulated-traffic up -d traffic-generator
-  traffic-generator:
-    build: ./train
-    entrypoint: ["python", "/app/data/emulate_production.py"]
-    env_file:
-      - ./data/.env
-    depends_on:
-      jitsi_transcript_receiver:
-        condition: service_started
-    environment:
-      HOST_EXTERNAL_KEY: emulated-traffic-generator
-      MEETING_COUNT: "0"
-      DELAY_SECONDS: "15"
-    networks:
-      - recap-net
-    profiles:
-      - emulated-traffic
-
 
   # Runs online_eval.py hourly — logs correction rate / FPR / FNR to MLflow.
   # Keeps the online-evaluation experiment current for the demo.

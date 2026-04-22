@@ -342,3 +342,27 @@ services:
       - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
       - /mnt/block/roberta_stage1:/mnt/block/roberta_stage1
       - /mnt/block/ingest_logs/production_drift_monitor:/mnt/block/ingest_logs/production_drift_monitor
+
+  # Manual-only traffic generator for archived and synthetic Jitsi transcript uploads.
+  # It is excluded from the default runtime startup and only starts when explicitly requested:
+  # docker compose --profile emulated-traffic up -d traffic-generator
+  traffic-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    depends_on:
+      jitsi_transcript_receiver:
+        condition: service_started
+    environment:
+      HOST_EXTERNAL_KEY: emulated-traffic-generator
+      MEETING_SOURCE_MODE: "mixed"
+      MEETING_COUNT: "0"
+      DELAY_SECONDS: "15"
+    command: ["python", "/app/emulate_production.py"]
+    volumes:
+      - ../emulate_production.py:/app/emulate_production.py:ro
+      - ../initial_implementation/mock_jitsi_meet:/app/initial_implementation/mock_jitsi_meet:ro
+    profiles:
+      - emulated-traffic

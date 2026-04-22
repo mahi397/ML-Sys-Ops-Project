@@ -21,6 +21,10 @@ Environment variables:
   INGEST_TOKEN                Bearer token for ingest, if enabled (default: none)
   HOST_EXTERNAL_KEY           Stable uploader identity
                               (default: emulated-traffic-generator)
+  MEETING_SOURCE_MODE         synthetic | archived | mixed
+                              (default: mixed)
+  ARCHIVED_TRANSCRIPT_ROOT    Root folder for archived Jitsi mock transcripts
+                              (default: ./initial_implementation/mock_jitsi_meet)
   IDENTITY_SOURCE             Identity source sent with synthetic participants
                               (default: emulate_production)
   MEETING_NAME_PREFIX         Prefix for synthetic meeting names
@@ -41,6 +45,7 @@ import textwrap
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -66,6 +71,13 @@ HOST_EXTERNAL_KEY = os.environ.get(
     "HOST_EXTERNAL_KEY",
     os.environ.get("JITSI_HOST_EXTERNAL_KEY", "emulated-traffic-generator"),
 ).strip()
+MEETING_SOURCE_MODE = os.environ.get("MEETING_SOURCE_MODE", "mixed").strip().lower() or "mixed"
+ARCHIVED_TRANSCRIPT_ROOT = Path(
+    os.environ.get(
+        "ARCHIVED_TRANSCRIPT_ROOT",
+        str(Path(__file__).resolve().parent / "initial_implementation" / "mock_jitsi_meet"),
+    )
+).expanduser()
 IDENTITY_SOURCE = os.environ.get("IDENTITY_SOURCE", "emulate_production").strip()
 MEETING_NAME_PREFIX = os.environ.get("MEETING_NAME_PREFIX", "synthetic").strip() or "synthetic"
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "120"))
@@ -75,6 +87,9 @@ TRANSCRIPT_FILENAME_RE = re.compile(
     r"^transcript_(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z_(?P<uuid8>[0-9a-fA-F]{8})[0-9a-fA-F-]*\.txt$"
 )
 TRANSCRIPT_SEPARATOR = "_" * 80
+HEADER_RE = re.compile(r"^Transcript of conference held at (?P<date>.+?) in room (?P<room>.+)$")
+EVENT_RE = re.compile(r"^<(?P<time>[^>]+)> (?P<body>.+)$")
+SPOKEN_RE = re.compile(r"^(?P<speaker>[^:]+): (?P<text>.+)$")
 
 # --- realistic meeting content ----------------------------------------------
 
@@ -214,6 +229,7 @@ def meeting_log_fields(payload: dict[str, Any]) -> dict[str, Any]:
         "meeting_name": payload["meeting_name"],
         "meeting_room": payload["meeting_room"],
         "original_filename": payload["original_filename"],
+        "meeting_source": payload["meeting_source"],
         "mock_user_id": mock_user["user_id"],
         "mock_user_display_name": mock_user["display_name"],
         "mock_user_email": mock_user["email"],
@@ -250,6 +266,83 @@ def make_original_filename(meeting_start: datetime) -> str:
 
 def make_meeting_name(meeting_id: str) -> str:
     return f"{MEETING_NAME_PREFIX}-{meeting_id}"
+
+
+def list_archived_transcripts(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    return sorted(path for path in root.glob("transcript_*.txt") if path.is_file())
+
+
+def append_unique(items: list[str], value: str | None) -> None:
+    normalized = (value or "").strip()
+    if normalized and normalized not in items:
+        items.append(normalized)
+
+
+def summarize_archived_transcript_text(text: str) -> dict[str, Any]:
+    meeting_room = ""
+    participants: list[str] = []
+    speaker_names: list[str] = []
+    utterance_count = 0
+    in_initial_people = False
+    current_speaker: str | None = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+
+        header_match = HEADER_RE.match(line)
+        if header_match:
+            meeting_room = header_match.group("room").strip()
+            continue
+
+        if line.startswith("Initial people present at "):
+            in_initial_people = True
+            current_speaker = None
+            continue
+
+        if line.startswith("Transcript, started at "):
+            in_initial_people = False
+            current_speaker = None
+            continue
+
+        if in_initial_people:
+            append_unique(participants, line.strip())
+            continue
+
+        if not line or line.startswith("_"):
+            continue
+
+        event_match = EVENT_RE.match(line)
+        if event_match:
+            current_speaker = None
+            body = event_match.group("body").strip()
+            spoken_match = SPOKEN_RE.match(body)
+            if spoken_match:
+                speaker_name = spoken_match.group("speaker").strip()
+                append_unique(speaker_names, speaker_name)
+                append_unique(participants, speaker_name)
+                utterance_count += 1
+                current_speaker = speaker_name
+            else:
+                for suffix in (" joined the conference", " left the conference"):
+                    if body.endswith(suffix):
+                        append_unique(participants, body[: -len(suffix)].strip())
+                        break
+            continue
+
+        if raw_line.startswith(" ") and current_speaker:
+            continue
+
+    if not speaker_names:
+        speaker_names = list(participants)
+
+    return {
+        "meeting_room": meeting_room,
+        "participants": participants,
+        "speaker_names": speaker_names,
+        "utterance_count": utterance_count,
+    }
 
 
 def build_utterances(rng: random.Random) -> list[dict[str, Any]]:
@@ -319,7 +412,7 @@ def render_transcript(
     return "\n".join(lines) + "\n"
 
 
-def build_meeting_payload(rng: random.Random) -> dict[str, Any]:
+def build_synthetic_meeting_payload(rng: random.Random) -> dict[str, Any]:
     meeting_start = datetime.now(timezone.utc).replace(microsecond=0)
     original_filename = make_original_filename(meeting_start)
     meeting_id = derive_meeting_id_from_original_filename(original_filename)
@@ -340,7 +433,62 @@ def build_meeting_payload(rng: random.Random) -> dict[str, Any]:
         "mock_user": mock_user,
         "room_participants": room_participants,
         "transcript_text": transcript_text,
+        "utterance_count": len(utterances),
+        "meeting_source": "synthetic",
     }
+
+
+def build_archived_meeting_payload(path: Path, rng: random.Random) -> dict[str, Any]:
+    transcript_text = path.read_text(encoding="utf-8", errors="replace")
+    metadata = summarize_archived_transcript_text(transcript_text)
+    original_filename = path.name
+    meeting_id = derive_meeting_id_from_original_filename(original_filename)
+    meeting_room = metadata["meeting_room"] or make_meeting_name(meeting_id)
+    speaker_names = metadata["speaker_names"] or ["Archived Speaker"]
+    participant_names = metadata["participants"] or speaker_names
+    mock_user = select_mock_user(speaker_names, rng)
+    room_participants = build_room_participants(participant_names)
+    return {
+        "meeting_id": meeting_id,
+        "meeting_name": meeting_room,
+        "meeting_room": meeting_room,
+        "original_filename": original_filename,
+        "speaker_names": speaker_names,
+        "mock_user": mock_user,
+        "room_participants": room_participants,
+        "transcript_text": transcript_text,
+        "utterance_count": int(metadata["utterance_count"]),
+        "meeting_source": "archived",
+        "archived_transcript_path": str(path),
+    }
+
+
+def choose_meeting_source(meeting_number: int, archived_paths: list[Path]) -> str:
+    if MEETING_SOURCE_MODE == "synthetic":
+        return "synthetic"
+    if MEETING_SOURCE_MODE == "archived":
+        return "archived"
+    if MEETING_SOURCE_MODE == "mixed":
+        if archived_paths and meeting_number % 2 == 0:
+            return "archived"
+        return "synthetic"
+    raise ValueError(f"Unsupported MEETING_SOURCE_MODE: {MEETING_SOURCE_MODE}")
+
+
+def build_meeting_payload(
+    rng: random.Random,
+    *,
+    meeting_number: int,
+    archived_paths: list[Path],
+    archived_index: int,
+) -> tuple[dict[str, Any], int]:
+    source = choose_meeting_source(meeting_number, archived_paths)
+    if source == "archived":
+        if not archived_paths:
+            raise RuntimeError("MEETING_SOURCE_MODE requires archived transcripts, but none were found")
+        path = archived_paths[archived_index % len(archived_paths)]
+        return build_archived_meeting_payload(path, rng), archived_index + 1
+    return build_synthetic_meeting_payload(rng), archived_index
 
 
 def post_transcript(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -418,17 +566,32 @@ def wait_for_endpoint(name: str, url: str, max_wait: int = 120) -> bool:
     return False
 
 
-def run_batch(rng: random.Random, batch_size: int) -> None:
+def run_batch(
+    rng: random.Random,
+    batch_size: int,
+    *,
+    start_meeting_number: int,
+    archived_paths: list[Path],
+    archived_index: int,
+) -> tuple[int, int]:
     for index in range(batch_size):
-        payload = build_meeting_payload(rng)
+        meeting_number = start_meeting_number + index
+        payload, archived_index = build_meeting_payload(
+            rng,
+            meeting_number=meeting_number,
+            archived_paths=archived_paths,
+            archived_index=archived_index,
+        )
         structured_log(
             "info",
             "meeting_generated",
             **meeting_log_fields(payload),
+            meeting_number=meeting_number,
             batch_index=index + 1,
             batch_size=batch_size,
-            utterance_count=len(payload["utterances"]),
+            utterance_count=payload["utterance_count"],
             speaker_names=payload["speaker_names"],
+            archived_transcript_path=payload.get("archived_transcript_path"),
         )
 
         ingest_response = post_transcript(payload)
@@ -448,16 +611,29 @@ def run_batch(rng: random.Random, batch_size: int) -> None:
         "batch_complete",
         batch_size=batch_size,
     )
+    return start_meeting_number + batch_size, archived_index
 
 
 def main() -> None:
     ingest_health_url = f"{ingest_base_url()}/health"
+    archived_paths = list_archived_transcripts(ARCHIVED_TRANSCRIPT_ROOT)
+    archived_count = len(archived_paths)
+
+    if MEETING_SOURCE_MODE not in {"synthetic", "archived", "mixed"}:
+        raise ValueError("MEETING_SOURCE_MODE must be one of: synthetic, archived, mixed")
+    if MEETING_SOURCE_MODE == "archived" and not archived_paths:
+        raise ValueError(
+            f"MEETING_SOURCE_MODE=archived but no transcripts were found under {ARCHIVED_TRANSCRIPT_ROOT}"
+        )
 
     structured_log(
         "info",
         "emulator_start",
         ingest_url=INGEST_URL,
         host_external_key=HOST_EXTERNAL_KEY,
+        meeting_source_mode=MEETING_SOURCE_MODE,
+        archived_transcript_root=str(ARCHIVED_TRANSCRIPT_ROOT),
+        archived_transcript_count=archived_count,
         meeting_name_prefix=MEETING_NAME_PREFIX,
         meeting_count=MEETING_COUNT if MEETING_COUNT > 0 else "infinite",
         delay_seconds=DELAY_SECONDS,
@@ -468,15 +644,29 @@ def main() -> None:
         sys.exit(1)
 
     rng = random.Random(SEED)
+    meeting_number = 1
+    archived_index = 0
     if MEETING_COUNT > 0:
-        run_batch(rng, MEETING_COUNT)
+        meeting_number, archived_index = run_batch(
+            rng,
+            MEETING_COUNT,
+            start_meeting_number=meeting_number,
+            archived_paths=archived_paths,
+            archived_index=archived_index,
+        )
         return
 
     batch = 0
     while True:
         batch += 1
         structured_log("info", "continuous_batch_start", batch_number=batch)
-        run_batch(rng, 5)
+        meeting_number, archived_index = run_batch(
+            rng,
+            5,
+            start_meeting_number=meeting_number,
+            archived_paths=archived_paths,
+            archived_index=archived_index,
+        )
         structured_log(
             "info",
             "continuous_batch_sleep",
