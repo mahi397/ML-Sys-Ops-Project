@@ -31,8 +31,8 @@ This bundle assumes:
   - canonical shared environment template for the whole `data/` bundle
   - copy it to `.env` and use that one file as the main place to update DB, object-store, Stage 1, and Stage 2 settings
 - `setup.sh`
-  - global bootstrap for the modern stack
-  - creates the Python environment, copies the shared `.env` template if needed, prepares block-storage folders, uploads the raw AMI corpus to object storage if needed, bootstraps synthetic Stage 1 inputs if missing, checks for existing runtime containers and Postgres data, applies idempotent DB migrations, starts the integrated runtime stack only when needed, backfills AMI meetings into Postgres through the modern `proj07-runtime` pipeline when the object-store corpus exists but the DB is missing fully-ingested AMI rows, and replays stored Stage 1 dataset lineage into block storage and Postgres when historical dataset versions still exist
+- global bootstrap for the modern stack
+  - creates the Python environment, copies the shared `.env` template if needed, prepares block-storage folders, uploads the raw AMI corpus to object storage if needed, bootstraps synthetic Stage 1 inputs if missing, checks for existing runtime containers and Postgres data, applies idempotent DB migrations, starts the integrated runtime stack only when needed, backfills AMI meetings into Postgres through the modern `proj07-runtime` pipeline when the object-store corpus exists but the DB is missing fully-ingested AMI rows, replays stored Stage 1 dataset lineage into block storage and Postgres when historical dataset versions still exist, and bootstraps an initial AMI-backed `roberta_stage1/v1` baseline when no published Stage 1 snapshot is available locally
 
 ## Lineage map
 

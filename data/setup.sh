@@ -39,6 +39,7 @@ BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT="${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_C
 BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
 BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
 BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
+BOOTSTRAP_STAGE1_BASELINE_ENABLED="${BOOTSTRAP_STAGE1_BASELINE_ENABLED:-true}"
 RUNTIME_CONTAINER_NAMES=(
   postgres
   adminer
@@ -264,6 +265,7 @@ function load_runtime_env() {
   BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
   BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
   BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
+  BOOTSTRAP_STAGE1_BASELINE_ENABLED="${BOOTSTRAP_STAGE1_BASELINE_ENABLED:-true}"
 }
 
 function postgres_data_initialized() {
@@ -533,6 +535,27 @@ function restore_dataset_lineage() {
   )
 }
 
+function bootstrap_stage1_baseline_dataset() {
+  local dataset_root="${DATASET_ROOT:-${BLOCK_ROOT}/roberta_stage1}"
+  local version_dirs=("${dataset_root}"/v*)
+
+  if ! is_truthy "${BOOTSTRAP_STAGE1_BASELINE_ENABLED}"; then
+    banner "Skipping Stage 1 baseline bootstrap because BOOTSTRAP_STAGE1_BASELINE_ENABLED=${BOOTSTRAP_STAGE1_BASELINE_ENABLED}"
+    return
+  fi
+
+  if [[ -d "${version_dirs[0]:-}" ]]; then
+    banner "Skipping Stage 1 baseline bootstrap because versioned dataset snapshots already exist under ${dataset_root}"
+    return
+  fi
+
+  banner "Bootstrapping an initial Stage 1 dataset baseline from AMI meetings"
+  (
+    cd "${PROJ07_RUNTIME_DIR}"
+    python -m proj07_services.retraining.bootstrap_stage1_baseline
+  )
+}
+
 function seed_mock_transcripts() {
   local transcript=""
   local seeded_any=0
@@ -641,6 +664,7 @@ bootstrap_synthetic_stage1_inputs
 start_runtime_stack
 bootstrap_ami_corpus_into_db
 restore_dataset_lineage
+bootstrap_stage1_baseline_dataset
 
 seed_mock_transcripts
 

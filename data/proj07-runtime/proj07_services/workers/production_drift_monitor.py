@@ -21,9 +21,8 @@ from proj07_services.quality.drift_control import (
     build_reference_profile,
     compare_feature_columns_to_reference,
     extract_live_feature_columns,
-    load_reference_profile,
 )
-from proj07_services.retraining.runtime import latest_version
+from proj07_services.retraining.runtime import latest_reference_profile
 
 
 APP_NAME = "production_drift_monitor"
@@ -133,10 +132,7 @@ def fetch_recent_valid_meeting_ids(conn, *, since: datetime) -> list[str]:
 
 
 def load_current_reference_profile(config: ProductionDriftMonitorConfig) -> tuple[int | None, dict | None]:
-    version = latest_version(config.dataset_root)
-    if version is None:
-        return None, None
-    return version, load_reference_profile(config.dataset_root / f"v{version}" / "profile.json")
+    return latest_reference_profile(config.dataset_root)
 
 
 def monitor_gate_config(config: ProductionDriftMonitorConfig) -> DriftGateConfig:
@@ -156,7 +152,9 @@ class ProductionDriftMonitor:
     def run_cycle(self) -> bool:
         reference_version, reference_profile = load_current_reference_profile(self.config)
         if reference_profile is None:
-            self.logger.info("Skipping production drift check because no approved reference profile was found")
+            self.logger.info(
+                "Skipping production drift check because no usable Stage 1 reference profile was found"
+            )
             return False
 
         until = datetime.now(timezone.utc)

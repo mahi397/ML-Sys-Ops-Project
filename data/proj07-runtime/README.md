@@ -76,6 +76,8 @@ The runtime also owns the AMI historical-data bootstrap path used by `../setup.s
   - parses one staged AMI meeting, uploads processed transcript/summary artifacts, inserts `meetings`, `users`, `meeting_participants`, `meeting_speakers`, `utterances`, `topic_segments`, `utterance_transitions`, `meeting_artifacts`, and `summaries`, and repairs partial AMI rows by replacing the existing meeting when needed
 - `restore_dataset_lineage.py`
   - restores historical `roberta_stage1_feedback_pool/vN` and `roberta_stage1/vN` directories from block storage or object storage, upserts their `dataset_versions` manifests, attempts to recover any lineage-referenced historical `jitsi_*` meetings from stored parsed transcript payloads plus verified Stage 1 / Stage 2 artifacts, and then replays per-meeting `dataset_version` / `dataset_split` stamps
+- `bootstrap_stage1_baseline.py`
+  - builds an initial AMI-backed `roberta_stage1/v1` snapshot with `profile.json` and `quality_report.json` when no published Stage 1 dataset exists locally, so retraining gates and live production drift monitoring have a usable reference baseline on fresh environments
 
 Manual trigger:
 
@@ -83,6 +85,7 @@ Manual trigger:
 cd proj07-runtime
 python -m proj07_services.pipeline.bootstrap_ami_corpus
 python -m proj07_services.retraining.restore_dataset_lineage
+python -m proj07_services.retraining.bootstrap_stage1_baseline
 ```
 
 `restore_dataset_lineage.py` is intentionally conservative. It will only recover missing historical Jitsi meetings when the stored parsed transcript payload and any claimed artifact files actually exist in object storage; otherwise it still fails instead of silently restamping the wrong lineage. For a truly fresh environment, clear those stored dataset prefixes or disable `BOOTSTRAP_DATASET_LINEAGE_ENABLED` before running `../setup.sh`.

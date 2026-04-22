@@ -24,6 +24,7 @@ from proj07_services.common.feedback_common import (
     write_json,
     write_jsonl,
 )
+from proj07_services.common.task_service_common import env_int
 from proj07_services.quality.drift_control import (
     DriftGateConfig,
     build_reference_profile,
@@ -130,11 +131,41 @@ def quality_report_allows_publish(report: dict[str, Any], *, reference_version: 
     )
 
 
+def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
+    profile_path = version_root / "profile.json"
+    profile = load_reference_profile(profile_path)
+    if profile is not None:
+        return profile
+
+    split_paths = (
+        version_root / "train.jsonl",
+        version_root / "val.jsonl",
+        version_root / "test.jsonl",
+    )
+    if not all(path.exists() for path in split_paths):
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for path in split_paths:
+        rows.extend(_read_jsonl(path))
+    if not rows:
+        return None
+
+    feature_columns, metadata = extract_stage1_feature_columns(rows, include_label=True)
+    profile = build_reference_profile(
+        feature_columns,
+        metadata=metadata,
+        bin_count=env_int("RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT", 10),
+    )
+    write_json(profile_path, profile)
+    return profile
+
+
 def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
     version = latest_version(root)
     if version is None:
         return None, None
-    return version, load_reference_profile(root / f"v{version}" / "profile.json")
+    return version, load_or_build_dataset_profile(root / f"v{version}")
 
 
 def candidate_staging_root(base_root: Path, version_hint: int) -> Path:
