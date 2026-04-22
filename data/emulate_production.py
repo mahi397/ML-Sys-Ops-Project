@@ -60,7 +60,7 @@ log = logging.getLogger("emulate_production")
 
 INGEST_URL = os.environ.get(
     "INGEST_URL",
-    "http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript",
+    "http://http://192.5.86.182:9000/ingest/jitsi-transcript",
 ).rstrip("/")
 MEETING_COUNT = int(os.environ.get("MEETING_COUNT", "5"))
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "10"))
