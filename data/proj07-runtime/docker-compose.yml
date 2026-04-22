@@ -186,7 +186,7 @@ services:
       STAGE1_RESPONSE_ROOT: /mnt/block/user-behaviour/inference_responses/stage1
       STAGE2_INPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage2
       SEGMENTS_ROOT: /mnt/block/user-behaviour/reconstructed_segments
-      STAGE2_BOUNDARY_THRESHOLD: ${STAGE2_BOUNDARY_THRESHOLD:-0.5}
+      STAGE2_BOUNDARY_THRESHOLD: ${STAGE2_BOUNDARY_THRESHOLD:-0.4}
       STAGE2_UPLOAD_ARTIFACTS: ${STAGE2_UPLOAD_ARTIFACTS:-true}
       STAGE2_OBJECT_PREFIX: ${STAGE2_OBJECT_PREFIX:-production/inference_requests/stage2}
       SEGMENTS_PREFIX: ${SEGMENTS_PREFIX:-production/reconstructed_segments}

@@ -100,7 +100,7 @@ class Stage2InputServiceConfig:
     segments_root: Path = Path(
         os.getenv("SEGMENTS_ROOT", "/mnt/block/user-behaviour/reconstructed_segments")
     )
-    boundary_threshold: float = env_float("STAGE2_BOUNDARY_THRESHOLD", 0.5)
+    boundary_threshold: float = env_float("STAGE2_BOUNDARY_THRESHOLD", 0.4)
     upload_artifacts: bool = env_flag("STAGE2_UPLOAD_ARTIFACTS", True)
     stage2_object_prefix: str = os.getenv(
         "STAGE2_OBJECT_PREFIX",
