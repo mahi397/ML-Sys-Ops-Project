@@ -59,27 +59,10 @@ log = logging.getLogger("emulate_production")
 
 # --- config -----------------------------------------------------------------
 
-
-def resolve_ingest_url() -> str:
-    ingest_url = os.environ.get(
-        "INGEST_URL",
-        "http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript",
-    ).strip().rstrip("/")
-    if ingest_url.count("://") != 1:
-        raise SystemExit(
-            f"INGEST_URL must be a single full URL like "
-            f"'http://192.5.86.182:9000/ingest/jitsi-transcript'; got {ingest_url!r}"
-        )
-    parts = urlsplit(ingest_url)
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
-        raise SystemExit(
-            f"INGEST_URL must be a full http(s) URL like "
-            f"'http://192.5.86.182:9000/ingest/jitsi-transcript'; got {ingest_url!r}"
-        )
-    return ingest_url
-
-
-INGEST_URL = resolve_ingest_url()
+INGEST_URL = os.environ.get(
+    "INGEST_URL",
+    "http://129.114.25.64:9000/ingest/jitsi-transcript",
+).rstrip("/")
 MEETING_COUNT = int(os.environ.get("MEETING_COUNT", "5"))
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "10"))
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "").strip()
