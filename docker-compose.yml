@@ -13,13 +13,14 @@
 #   4. Training/MLOps    — retrain watcher + job (standalone Ray, GPU via nvidia runtime)
 #   5. Monitoring        — Prometheus, Grafana, AlertManager, Node Exporter
 #
-# Jitsi stack is a separate compose project: bash jitsi-deployment/install-jitsi-vm.sh
-#
 # Single docker compose up brings up the entire system.
 # Profiles:
+#   --profile jitsi            Jitsi Meet stack (first-time: DEPLOY_JITSI=true bash setup.sh)
 #   --profile retrain          triggers retraining pipeline
 #   --profile emulated-traffic runs data generator for ongoing operation
 ###############################################################################
+
+name: proj07
 
 volumes:
   prometheus_data:
