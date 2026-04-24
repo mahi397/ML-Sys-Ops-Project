@@ -3,7 +3,7 @@
 #
 # Usage:
 #   cp .env.example .env        # fill in secrets + floating IP
-#   docker compose up -d        # brings up everything
+#   docker compose up -d        # brings up runtime services
 #   docker compose logs -f      # watch logs
 #
 # Services are grouped:
@@ -16,8 +16,8 @@
 # Jitsi stack is a separate compose project: bash jitsi-deployment/install-jitsi-vm.sh
 #
 # Single docker compose up brings up the entire system.
-# Profiles:
-#   --profile retrain          triggers retraining pipeline
+# Profile:
+#   --profile emulated-traffic starts the manual traffic generator
 ###############################################################################
 
 volumes:
@@ -60,11 +60,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-proj07_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       # Default DB is proj07_sql_db; mlflowdb is created separately
-      POSTGRES_DB: proj07_sql_db
+      POSTGRES_DB: ${POSTGRES_DB:-proj07_sql_db}
     volumes:
       # Bind mount to block storage — survives VM restarts and reattachment
       - /mnt/block/postgres_data:/var/lib/postgresql/data
-      - ./platform/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./data/proj07-db/init_sql:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -179,6 +179,7 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       JITSI_SAVE_DIR: /mnt/block/user-behaviour/received_transcripts
       JITSI_LOG_DIR: /mnt/block/ingest_logs/jitsi_transcript
+      JITSI_TRANSCRIPT_TIMEZONE: ${JITSI_TRANSCRIPT_TIMEZONE:-UTC}
       JITSI_BUILD_STAGE1_AFTER_INGEST: ${JITSI_BUILD_STAGE1_AFTER_INGEST:-false}
       JITSI_STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
       JITSI_STAGE1_WINDOW_SIZE: ${JITSI_STAGE1_WINDOW_SIZE:-7}
@@ -593,43 +594,40 @@ services:
     networks:
       - recap-net
 
-  retrain-job:
-    build: ./train
-    container_name: retrain-job
-    command: retrain.py
-    runtime: nvidia
-    shm_size: '10g'
+  # Manual-only traffic generator for archived and synthetic Jitsi transcript uploads.
+  # It is excluded from default startup; start it explicitly with:
+  # docker compose --profile emulated-traffic up -d traffic-generator
+  traffic-generator:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: traffic-generator
     depends_on:
-      postgres:
-        condition: service_healthy
-      mlflow:
+      jitsi_transcript_receiver:
         condition: service_started
-      minio:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
-      AWS_ENDPOINT_URL: http://minio:9000
-      RAY_STORAGE: s3://ray-checkpoints
-      MODEL_NAME: jitsi-topic-segmenter
-      OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
-      TOKENIZERS_PARALLELISM: "false"
-      DATASET_VERSION: "2"
-      RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
+      INGEST_URL: http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript
+      INGEST_TOKEN: ${INGEST_TOKEN:-}
+      HOST_EXTERNAL_KEY: ${JITSI_HOST_EXTERNAL_KEY:-emulated-traffic-generator}
+      MEETING_SOURCE_MODE: ${MEETING_SOURCE_MODE:-mixed}
+      MEETING_COUNT: ${MEETING_COUNT:-0}
+      DELAY_SECONDS: ${DELAY_SECONDS:-15}
+      ARCHIVED_TRANSCRIPT_ROOT: /app/traffic_samples/mock_jitsi_meet
+      IDENTITY_SOURCE: ${IDENTITY_SOURCE:-emulate_production}
+      MEETING_NAME_PREFIX: ${MEETING_NAME_PREFIX:-synthetic}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-120}
+      SEED: ${SEED:-42}
+    command: ["python", "/app/emulate_production.py"]
     volumes:
-      - /mnt/block:/mnt/block
-      - /home/cc/.config/rclone:/root/.config/rclone:ro
-      - /home/cc/nltk_data:/root/nltk_data:ro
+      - ./data/emulate_production.py:/app/emulate_production.py:ro
+      - ./data/proj07-runtime/traffic_samples/mock_jitsi_meet:/app/traffic_samples/mock_jitsi_meet:ro
     networks:
       - recap-net
     profiles:
-      - retrain   # docker compose --profile retrain run retrain-job
+      - emulated-traffic
 
   # Runs online_eval.py hourly — logs correction rate / FPR / FNR to MLflow.
   # Keeps the online-evaluation experiment current for the demo.
-  # Start with: docker compose --profile monitoring up -d online-eval
   online-eval:
     build: ./train
     container_name: online-eval
@@ -656,9 +654,6 @@ services:
       - /mnt/block:/mnt/block
     networks:
       - recap-net
-    profiles:
-      - monitoring  # docker compose --profile monitoring up -d online-eval
-
   # ═══════════════════════════════════════════════════════════════════════════
   # 6. MONITORING — Prometheus + Grafana + Alertmanager + Node Exporter
   # ═══════════════════════════════════════════════════════════════════════════

@@ -24,7 +24,7 @@ Environment variables:
   MEETING_SOURCE_MODE         synthetic | archived | mixed
                               (default: mixed)
   ARCHIVED_TRANSCRIPT_ROOT    Root folder for archived Jitsi mock transcripts
-                              (default: ./initial_implementation/mock_jitsi_meet)
+                              (default: ./proj07-runtime/traffic_samples/mock_jitsi_meet)
   IDENTITY_SOURCE             Identity source sent with synthetic participants
                               (default: emulate_production)
   MEETING_NAME_PREFIX         Prefix for synthetic meeting names
@@ -74,7 +74,7 @@ MEETING_SOURCE_MODE = os.environ.get("MEETING_SOURCE_MODE", "mixed").strip().low
 ARCHIVED_TRANSCRIPT_ROOT = Path(
     os.environ.get(
         "ARCHIVED_TRANSCRIPT_ROOT",
-        str(Path(__file__).resolve().parent / "initial_implementation" / "mock_jitsi_meet"),
+        str(Path(__file__).resolve().parent / "proj07-runtime" / "traffic_samples" / "mock_jitsi_meet"),
     )
 ).expanduser()
 IDENTITY_SOURCE = os.environ.get("IDENTITY_SOURCE", "emulate_production").strip()

@@ -317,12 +317,12 @@ WHERE NOT EXISTS (
 # " && ok "Model registry restored"
 # else
 #     info "restore_mlflow.py not found at ${HOME}/ — skipping registry restore"
-#     echo "  Copy it there and run manually after stack is up"
+a#     echo "  Copy it there and run manually after stack is up"
 # fi
 
-# Bring up remaining services (including monitoring profile for online-eval)
+# Bring up remaining services. The traffic generator remains profile-gated.
 info "Bringing up full stack..."
-docker compose --profile monitoring up -d --remove-orphans
+docker compose up -d --remove-orphans
 ok "Full stack started"
 
 # ── 9. Monitoring infra dirs ───────────────────────────────────────────────────
@@ -347,10 +347,7 @@ done
 echo -e "\n${YELLOW}[10/10] Jitsi deployment...${NC}"
 if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     JITSI_DIR="${REPO_DIR}/jitsi-deployment"
-    STACK_ENV="${JITSI_DIR}/stack.env"
-
-    # Bootstrap stack.env from example if missing
-    [[ ! -f "${STACK_ENV}" ]] && cp "${JITSI_DIR}/stack.env.example" "${STACK_ENV}" && info "Created ${STACK_ENV} from example"
+    GLOBAL_ENV="${REPO_DIR}/.env"
 
     # Helper: set or append KEY=VALUE in file
     _set_kv() {
@@ -366,47 +363,47 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     _HP="${HTTPS_PORT:-${JITSI_PORT:-8443}}"
     _RP="${INGEST_PORT:-9099}"
 
-    # Populate stack.env from root .env values
-    _set_kv PUBLIC_URL                              "https://${_IP}:${_HP}"                                          "${STACK_ENV}"
-    _set_kv HTTPS_PORT                              "${_HP}"                                                          "${STACK_ENV}"
-    _set_kv HTTP_PORT                               "${HTTP_PORT:-8000}"                                              "${STACK_ENV}"
-    _set_kv ENABLE_HTTP_REDIRECT                    "${ENABLE_HTTP_REDIRECT:-1}"                                      "${STACK_ENV}"
-    _set_kv JVB_ADVERTISE_IPS                       "${_IP}"                                                          "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_DATABASE_URL             "${MEETING_PORTAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}}" "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_INGEST_URL             "http://${_IP}:${_RP}/ingest/jitsi-transcript"                   "${STACK_ENV}"
-    _set_kv INGEST_TOKEN                            "${INGEST_TOKEN}"                                                 "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_POLL_SECONDS           "${JITSI_TRANSCRIPT_POLL_SECONDS:-5}"                             "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_SETTLE_SECONDS         "${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}"                           "${STACK_ENV}"
-    _set_kv JITSI_TRANSCRIPT_UPLOAD_TIMEOUT         "${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}"                         "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_HTTPS_ONLY               "${MEETING_PORTAL_HTTPS_ONLY:-true}"                              "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_TOKEN_TTL_SECONDS        "${MEETING_PORTAL_TOKEN_TTL_SECONDS:-3600}"                       "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_REMOTE            "${MEETING_PORTAL_RCLONE_REMOTE:-${RCLONE_REMOTE:-chi_tacc}}"    "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_BUCKET            "${MEETING_PORTAL_RCLONE_BUCKET:-${BUCKET:-objstore-proj07}}"    "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS   "${MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS:-10}"                    "${STACK_ENV}"
-    _set_kv MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED "${MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED:-true}"   "${STACK_ENV}"
-    _set_kv JIGASI_DISABLE_SIP                      "${JIGASI_DISABLE_SIP:-1}"                                        "${STACK_ENV}"
+    # Populate the single global env file used by both root compose and Jitsi.
+    _set_kv PUBLIC_URL                              "https://${_IP}:${_HP}"                                          "${GLOBAL_ENV}"
+    _set_kv TZ                                      "${TZ:-UTC}"                                                     "${GLOBAL_ENV}"
+    _set_kv HTTPS_PORT                              "${_HP}"                                                          "${GLOBAL_ENV}"
+    _set_kv HTTP_PORT                               "${HTTP_PORT:-8000}"                                              "${GLOBAL_ENV}"
+    _set_kv ENABLE_HTTP_REDIRECT                    "${ENABLE_HTTP_REDIRECT:-1}"                                      "${GLOBAL_ENV}"
+    _set_kv JVB_ADVERTISE_IPS                       "${_IP}"                                                          "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_DATABASE_URL             "${MEETING_PORTAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}}" "${GLOBAL_ENV}"
+    _set_kv JITSI_TRANSCRIPT_INGEST_URL             "http://${_IP}:${_RP}/ingest/jitsi-transcript"                   "${GLOBAL_ENV}"
+    _set_kv INGEST_TOKEN                            "${INGEST_TOKEN}"                                                 "${GLOBAL_ENV}"
+    _set_kv JITSI_TRANSCRIPT_POLL_SECONDS           "${JITSI_TRANSCRIPT_POLL_SECONDS:-5}"                             "${GLOBAL_ENV}"
+    _set_kv JITSI_TRANSCRIPT_SETTLE_SECONDS         "${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}"                           "${GLOBAL_ENV}"
+    _set_kv JITSI_TRANSCRIPT_UPLOAD_TIMEOUT         "${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}"                         "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_HTTPS_ONLY               "${MEETING_PORTAL_HTTPS_ONLY:-true}"                              "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_TOKEN_TTL_SECONDS        "${MEETING_PORTAL_TOKEN_TTL_SECONDS:-3600}"                       "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_RCLONE_REMOTE            "${MEETING_PORTAL_RCLONE_REMOTE:-${RCLONE_REMOTE:-chi_tacc}}"    "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_RCLONE_BUCKET            "${MEETING_PORTAL_RCLONE_BUCKET:-${BUCKET:-objstore-proj07}}"    "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS   "${MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS:-10}"                    "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED "${MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED:-true}"   "${GLOBAL_ENV}"
+    _set_kv JIGASI_DISABLE_SIP                      "${JIGASI_DISABLE_SIP:-1}"                                        "${GLOBAL_ENV}"
 
     # Propagate secrets only if already set in root .env (installer generates them otherwise)
-    [[ -n "${JWT_APP_SECRET:-}" ]]                && _set_kv JWT_APP_SECRET                "${JWT_APP_SECRET}"                "${STACK_ENV}"
-    [[ -n "${MEETING_PORTAL_SESSION_SECRET:-}" ]] && _set_kv MEETING_PORTAL_SESSION_SECRET "${MEETING_PORTAL_SESSION_SECRET}" "${STACK_ENV}"
-    [[ -n "${JITSI_HOST_EXTERNAL_KEY:-}" ]]       && _set_kv JITSI_HOST_EXTERNAL_KEY       "${JITSI_HOST_EXTERNAL_KEY}"       "${STACK_ENV}"
+    [[ -n "${JWT_APP_SECRET:-}" ]]                && _set_kv JWT_APP_SECRET                "${JWT_APP_SECRET}"                "${GLOBAL_ENV}"
+    [[ -n "${MEETING_PORTAL_SESSION_SECRET:-}" ]] && _set_kv MEETING_PORTAL_SESSION_SECRET "${MEETING_PORTAL_SESSION_SECRET}" "${GLOBAL_ENV}"
+    [[ -n "${JITSI_HOST_EXTERNAL_KEY:-}" ]]       && _set_kv JITSI_HOST_EXTERNAL_KEY       "${JITSI_HOST_EXTERNAL_KEY}"       "${GLOBAL_ENV}"
     # SIP creds only forwarded if SIP gateway is enabled
     if [[ "${JIGASI_DISABLE_SIP:-1}" == "0" ]]; then
-        [[ -n "${JIGASI_SIP_URI:-}" ]]            && _set_kv JIGASI_SIP_URI                "${JIGASI_SIP_URI}"                "${STACK_ENV}"
-        [[ -n "${JIGASI_SIP_PASSWORD:-}" ]]       && _set_kv JIGASI_SIP_PASSWORD           "${JIGASI_SIP_PASSWORD}"           "${STACK_ENV}"
-        [[ -n "${JIGASI_SIP_SERVER:-}" ]]         && _set_kv JIGASI_SIP_SERVER             "${JIGASI_SIP_SERVER}"             "${STACK_ENV}"
+        [[ -n "${JIGASI_SIP_URI:-}" ]]            && _set_kv JIGASI_SIP_URI                "${JIGASI_SIP_URI}"                "${GLOBAL_ENV}"
+        [[ -n "${JIGASI_SIP_PASSWORD:-}" ]]       && _set_kv JIGASI_SIP_PASSWORD           "${JIGASI_SIP_PASSWORD}"           "${GLOBAL_ENV}"
+        [[ -n "${JIGASI_SIP_SERVER:-}" ]]         && _set_kv JIGASI_SIP_SERVER             "${JIGASI_SIP_SERVER}"             "${GLOBAL_ENV}"
     fi
 
-    ok "stack.env populated from root .env"
+    ok "Global .env populated for Jitsi"
     info "Running Jitsi installer (downloads upstream images + Vosk model ~1GB)..."
-    sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" --env-file "${STACK_ENV}"
+    sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" --env-file "${GLOBAL_ENV}"
     ok "Jitsi deployment complete"
 
     echo ""
     echo "  Jitsi web:    https://${_IP}:${_HP}"
-    echo "  After install, copy generated secrets back to root .env:"
-    echo "    grep -E 'JWT_APP_SECRET|MEETING_PORTAL_SESSION_SECRET|JITSI_HOST_EXTERNAL_KEY' /mnt/block/jitsi/jitsi-docker-jitsi-meet/.env"
-    echo "  Then re-run to persist them: DEPLOY_JITSI=true bash setup.sh"
+    echo "  Generated Jitsi secrets are written back to the root .env when possible:"
+    echo "    grep -E 'JWT_APP_SECRET|MEETING_PORTAL_SESSION_SECRET|JITSI_HOST_EXTERNAL_KEY' ${GLOBAL_ENV}"
 else
     info "Skipping Jitsi deployment (set DEPLOY_JITSI=true to include)"
     echo "  When ready, root .env must have PUBLIC_URL, MEETING_PORTAL_DATABASE_URL,"
@@ -439,11 +436,10 @@ echo "    roberta_stage1/${DATASET_VERSION}"
 echo "    roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
 echo ""
 echo "  To trigger a retrain manually:"
-echo "    docker compose --profile retrain run retrain-job"
+echo "    docker compose exec retrain-watcher python /app/retrain.py"
 echo ""
 echo "  To deploy Jitsi:"
-echo "    Fill in jitsi-deployment/stack.env, then:"
-echo "    DEPLOY_JITSI=true bash setup.sh"
+echo "    Fill in root .env, then: DEPLOY_JITSI=true bash setup.sh"
 echo ""
 echo "  Running services:"
 docker compose ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || docker compose ps

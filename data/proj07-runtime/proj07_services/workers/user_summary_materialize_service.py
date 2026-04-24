@@ -11,7 +11,6 @@ from typing import Any
 from psycopg.types.json import Json
 
 from proj07_services.common.feedback_common import (
-    build_emulated_summary_bullets,
     fetch_meeting_utterance_lookup,
     get_conn,
     upload_file,
@@ -143,13 +142,11 @@ def build_auto_segment_state(
     segment: dict[str, Any],
     utterance_lookup: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    topic_label = build_default_topic_label(segment, utterance_lookup)
-    utterances = utterance_rows_for_segment(segment, utterance_lookup)
     return {
         **segment,
-        "topic_label": topic_label,
-        "summary_bullets": build_emulated_summary_bullets(topic_label, utterances),
-        "status": "draft",
+        "topic_label": str(segment.get("topic_label") or "").strip(),
+        "summary_bullets": normalize_summary_bullets(segment.get("summary_bullets")),
+        "status": str(segment.get("status") or "draft"),
     }
 
 
@@ -508,13 +505,56 @@ class UserSummaryMaterializeService:
                     "segment_summary_id": None,
                     "start_utterance_index": int(current["start_utterance_index"]),
                     "end_utterance_index": int(following["end_utterance_index"]),
-                    "topic_label": current.get("topic_label") or following.get("topic_label") or "",
+                    "topic_label": self.merge_topic_labels(current, following),
+                    "summary_bullets": self.merge_summary_bullets(current, following),
+                    "status": self.merge_status(current, following),
                 },
                 utterance_lookup,
             )
             next_segments = segments[:index] + [merged_segment] + segments[index + 2 :]
             return normalize_segments(next_segments, utterance_lookup)
         return segments
+
+    def merge_topic_labels(
+        self,
+        current: dict[str, Any],
+        following: dict[str, Any],
+    ) -> str:
+        current_label = str(current.get("topic_label") or "").strip()
+        following_label = str(following.get("topic_label") or "").strip()
+        if not current_label:
+            return following_label
+        if not following_label or following_label.casefold() == current_label.casefold():
+            return current_label
+        return f"{current_label} / {following_label}"
+
+    def merge_summary_bullets(
+        self,
+        current: dict[str, Any],
+        following: dict[str, Any],
+    ) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for bullet in normalize_summary_bullets(current.get("summary_bullets")) + normalize_summary_bullets(
+            following.get("summary_bullets")
+        ):
+            key = bullet.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(bullet)
+        return merged
+
+    def merge_status(
+        self,
+        current: dict[str, Any],
+        following: dict[str, Any],
+    ) -> str:
+        statuses = {
+            str(current.get("status") or "draft").strip(),
+            str(following.get("status") or "draft").strip(),
+        }
+        return "complete" if statuses == {"complete"} else "draft"
 
     def apply_segment_text_edit(
         self,
@@ -626,18 +666,6 @@ class UserSummaryMaterializeService:
                 "summary_bullets": normalize_summary_bullets(segment.get("summary_bullets")),
                 "status": str(segment.get("status") or "draft"),
             }
-            if not complete_segment["topic_label"]:
-                complete_segment["topic_label"] = build_default_topic_label(
-                    complete_segment,
-                    utterance_lookup,
-                )
-            if not complete_segment["summary_bullets"]:
-                utterances = utterance_rows_for_segment(complete_segment, utterance_lookup)
-                complete_segment["summary_bullets"] = build_emulated_summary_bullets(
-                    complete_segment["topic_label"],
-                    utterances,
-                )
-                complete_segment["status"] = "draft"
             final_segments.append(complete_segment)
 
         next_version = self.fetch_next_user_summary_version(conn, meeting_id)

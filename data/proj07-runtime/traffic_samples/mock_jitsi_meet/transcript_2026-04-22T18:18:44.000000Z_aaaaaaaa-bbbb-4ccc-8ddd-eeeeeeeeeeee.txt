@@ -1,0 +1,29 @@
+Transcript of conference held at Apr 22, 2026 in room recapreview@muc.meet.jitsi
+Initial people present at 6:18:44 PM:
+	Aneesh
+	Carol
+	Dave
+
+Transcript, started at 6:18:44 PM:
+________________________________________________________________________________
+<6:18:44 PM> Aneesh joined the conference
+<6:18:46 PM> Carol joined the conference
+<6:18:48 PM> Dave joined the conference
+<6:19:02 PM> Aneesh: I want to review the edited recap and confirm only user
+                      changes appear in the user edits artifact
+<6:19:13 PM> Carol: the generated bullets should remain unchanged unless a
+                    person explicitly changes a boundary or text
+<6:19:25 PM> Dave: that makes the audit record much cleaner because we can
+                   separate model output from human corrections
+<6:19:43 PM> Aneesh: next let's verify the materializer keeps existing segment
+                      labels when people merge adjacent sections
+<6:19:55 PM> Carol: if a user splits a segment the new entry should preserve
+                    the original text and only record the chosen split point
+<6:20:09 PM> Dave: I will check the object store path and compare it with the
+                   feedback event payload in Postgres
+<6:20:28 PM> Aneesh: perfect then we can close this once the manual traffic
+                      generator posts one archived meeting successfully
+________________________________________________________________________________
+
+
+End of transcript at Apr 22, 2026, 6:20:41 PM

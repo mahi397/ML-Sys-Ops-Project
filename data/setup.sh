@@ -2,19 +2,13 @@
 set -euo pipefail
 
 DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_ENV_EXAMPLE="${DATA_DIR}/.env.example"
-COMMON_ENV_FILE="${DATA_DIR}/.env"
+REPO_ROOT="$(cd "${DATA_DIR}/.." && pwd)"
+COMMON_ENV_EXAMPLE="${REPO_ROOT}/.env.example"
+COMMON_ENV_FILE="${REPO_ROOT}/.env"
 PROJ07_DB_DIR="${DATA_DIR}/proj07-db"
 PROJ07_RUNTIME_DIR="${DATA_DIR}/proj07-runtime"
-RUNTIME_ENV_FILE="${PROJ07_RUNTIME_DIR}/.env"
-RUNTIME_COMPOSE_PROJECT="${RUNTIME_COMPOSE_PROJECT:-$(basename "${PROJ07_RUNTIME_DIR}")}"
-INITIAL_IMPLEMENTATION_DIR="${DATA_DIR}/initial_implementation"
-EXTERNAL_DATA_TRAINING_DIR="${INITIAL_IMPLEMENTATION_DIR}/external_data_training_runtime"
-ENDPOINT_REPLAY_DIR="${INITIAL_IMPLEMENTATION_DIR}/endpoint_replay_runtime"
-ONLINE_INFERENCE_DIR="${INITIAL_IMPLEMENTATION_DIR}/online_inference_workflow_runtime"
-RETRAINING_DATASET_DIR="${INITIAL_IMPLEMENTATION_DIR}/retraining_dataset_runtime"
-MOCK_JITSI_DIR="${INITIAL_IMPLEMENTATION_DIR}/mock_jitsi_meet"
-INITIAL_SETUP_SCRIPT="${INITIAL_IMPLEMENTATION_DIR}/setup.sh"
+REPO_BASENAME="$(basename "${REPO_ROOT}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
+RUNTIME_COMPOSE_PROJECT="${RUNTIME_COMPOSE_PROJECT:-${REPO_BASENAME}}"
 VENV_DIR="${VENV_DIR:-${DATA_DIR}/.venv}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 LEGACY_TRANSCRIPT_ROOT="${LEGACY_TRANSCRIPT_ROOT:-${BLOCK_ROOT}/user-behaviour/Transcripts}"
@@ -40,6 +34,8 @@ BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
 BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
 BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
 BOOTSTRAP_STAGE1_BASELINE_ENABLED="${BOOTSTRAP_STAGE1_BASELINE_ENABLED:-true}"
+SETUP_CONTINUE_ON_ERROR="${SETUP_CONTINUE_ON_ERROR:-true}"
+SETUP_FAILED_STEPS=()
 RUNTIME_CONTAINER_NAMES=(
   postgres
   adminer
@@ -53,6 +49,7 @@ RUNTIME_CONTAINER_NAMES=(
   retraining_dataset_service
   production_drift_monitor
 )
+RUNTIME_SERVICES=("${RUNTIME_CONTAINER_NAMES[@]}")
 
 function banner() {
   printf '\n[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -100,6 +97,26 @@ function is_truthy() {
     1|true|yes|on) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+function run_resumable_step() {
+  local label="$1"
+  shift
+
+  if ( set -euo pipefail; "$@" ); then
+    return 0
+  fi
+
+  local status=$?
+  SETUP_FAILED_STEPS+=("${label} (exit ${status})")
+  banner "Step failed but setup will continue: ${label} (exit ${status})"
+
+  if ! is_truthy "${SETUP_CONTINUE_ON_ERROR}"; then
+    echo "Stopping because SETUP_CONTINUE_ON_ERROR=${SETUP_CONTINUE_ON_ERROR}" >&2
+    exit "${status}"
+  fi
+
+  return 0
 }
 
 function join_by() {
@@ -254,7 +271,7 @@ function load_runtime_env() {
   POSTGRES_USER="${POSTGRES_USER:-proj07_user}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-proj07}"
   POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-  POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-${BLOCK_ROOT}/postgres-data}"
+  POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-${BLOCK_ROOT}/postgres_data}"
   ADMINER_PORT="${ADMINER_PORT:-5050}"
   RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
   OBJECT_BUCKET="${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}"
@@ -289,15 +306,12 @@ function postgres_data_initialized() {
 }
 
 function runtime_defined_services() {
-  (
-    cd "${PROJ07_RUNTIME_DIR}"
-    docker compose config --services
-  )
+  printf '%s\n' "${RUNTIME_SERVICES[@]}"
 }
 
 function runtime_running_services() {
   (
-    cd "${PROJ07_RUNTIME_DIR}"
+    cd "${REPO_ROOT}"
     docker compose ps --status running --services 2>/dev/null || true
   )
 }
@@ -364,7 +378,9 @@ function bootstrap_synthetic_stage1_inputs() {
   ensure_writable_dir "${BLOCK_ROOT}/ingest_logs" "Ingest log root"
 
   banner "Generating synthetic Stage 1 bootstrap artifacts under ${FINAL_STAGE1_ROOT}"
-  python "${ENDPOINT_REPLAY_DIR}/generate_synthetic_endpoint_inputs.py" \
+  (
+    cd "${PROJ07_RUNTIME_DIR}"
+    python -m proj07_services.pipeline.generate_synthetic_stage1_inputs \
     --output-root "${FINAL_STAGE1_ROOT}" \
     --version "${BOOTSTRAP_SYNTHETIC_STAGE1_VERSION}" \
     --meeting-count "${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT}" \
@@ -374,6 +390,7 @@ function bootstrap_synthetic_stage1_inputs() {
     --bucket "${OBJECT_BUCKET}" \
     --stage1-object-prefix "${STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}" \
     --log-file "${BLOCK_ROOT}/ingest_logs/synthetic_stage1_bootstrap.log"
+  )
 }
 
 function wait_for_postgres() {
@@ -477,7 +494,7 @@ function start_runtime_stack() {
     if [[ ${#missing_core_services[@]} -gt 0 ]]; then
       banner "Starting core runtime services first: $(join_by ', ' "${missing_core_services[@]}")"
       (
-        cd "${PROJ07_RUNTIME_DIR}"
+        cd "${REPO_ROOT}"
         docker compose up -d "${missing_core_services[@]}"
       )
     fi
@@ -489,7 +506,7 @@ function start_runtime_stack() {
   if [[ ${#missing_runtime_workers[@]} -gt 0 ]]; then
     banner "Starting runtime workers after schema updates: $(join_by ', ' "${missing_runtime_workers[@]}")"
     (
-      cd "${PROJ07_RUNTIME_DIR}"
+      cd "${REPO_ROOT}"
       docker compose up -d "${missing_runtime_workers[@]}"
     )
   fi
@@ -556,46 +573,6 @@ function bootstrap_stage1_baseline_dataset() {
   )
 }
 
-function seed_mock_transcripts() {
-  local transcript=""
-  local seeded_any=0
-  local legacy_seed_enabled=0
-  local final_seed_enabled=0
-
-  banner "Seeding mock Jitsi transcripts into ${LEGACY_TRANSCRIPT_ROOT} and ${FINAL_RECEIVED_TRANSCRIPT_ROOT}"
-
-  if prepare_optional_writable_dir "${LEGACY_TRANSCRIPT_ROOT}" "legacy transcript seed root"; then
-    legacy_seed_enabled=1
-  fi
-  if prepare_optional_writable_dir "${FINAL_RECEIVED_TRANSCRIPT_ROOT}" "received transcript seed root"; then
-    final_seed_enabled=1
-  fi
-
-  if [[ ${legacy_seed_enabled} -eq 0 && ${final_seed_enabled} -eq 0 ]]; then
-    banner "Skipping mock transcript seeding because neither transcript destination is writable"
-    return
-  fi
-
-  for transcript in "${MOCK_JITSI_DIR}"/transcript_*.txt; do
-    if [[ ! -f "${transcript}" ]]; then
-      continue
-    fi
-
-    if [[ ${legacy_seed_enabled} -eq 1 ]]; then
-      copy_file_if_absent "${transcript}" "${LEGACY_TRANSCRIPT_ROOT}"
-      seeded_any=1
-    fi
-    if [[ ${final_seed_enabled} -eq 1 ]]; then
-      copy_file_if_absent "${transcript}" "${FINAL_RECEIVED_TRANSCRIPT_ROOT}"
-      seeded_any=1
-    fi
-  done
-
-  if [[ ${seeded_any} -eq 0 ]]; then
-    banner "No mock Jitsi transcripts were copied because they were already present"
-  fi
-}
-
 require_cmd python3
 require_cmd docker
 require_cmd rclone
@@ -609,36 +586,43 @@ else
 fi
 
 banner "Creating Python virtual environment at ${VENV_DIR}"
-python3 -m venv "${VENV_DIR}"
+if python3 -m venv "${VENV_DIR}"; then
+  :
+else
+  status=$?
+  SETUP_FAILED_STEPS+=("create Python virtual environment (exit ${status})")
+  banner "Virtual environment creation failed; setup will continue with the current Python environment"
+  if ! is_truthy "${SETUP_CONTINUE_ON_ERROR}"; then
+    exit "${status}"
+  fi
+fi
 
-# shellcheck disable=SC1091
-source "${VENV_DIR}/bin/activate"
+if [[ -f "${VENV_DIR}/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
+else
+  banner "Virtual environment activation skipped because ${VENV_DIR}/bin/activate is missing"
+fi
 
 banner "Installing Python dependencies"
-python -m pip install --upgrade pip
-python -m pip install -r "${DATA_DIR}/requirements.txt"
+run_resumable_step "upgrade pip" python -m pip install --upgrade pip
+run_resumable_step "install data runtime Python dependencies" python -m pip install -r "${DATA_DIR}/requirements.txt"
 
 banner "Preparing environment files"
-copy_if_missing "${COMMON_ENV_EXAMPLE}" "${COMMON_ENV_FILE}"
-ensure_symlink "../.env" "${RUNTIME_ENV_FILE}"
-copy_if_missing "${EXTERNAL_DATA_TRAINING_DIR}/external_data_training.env.example" "${EXTERNAL_DATA_TRAINING_DIR}/external_data_training.env"
-copy_if_missing "${ENDPOINT_REPLAY_DIR}/endpoint_replay.env.example" "${ENDPOINT_REPLAY_DIR}/endpoint_replay.env"
-copy_if_missing "${ONLINE_INFERENCE_DIR}/online_inference_workflow.env.example" "${ONLINE_INFERENCE_DIR}/online_inference_workflow.env"
-copy_if_missing "${RETRAINING_DATASET_DIR}/retraining_dataset.env.example" "${RETRAINING_DATASET_DIR}/retraining_dataset.env"
+if [[ ! -f "${COMMON_ENV_FILE}" ]]; then
+  echo "Missing global environment file: ${COMMON_ENV_FILE}" >&2
+  echo "Copy ${COMMON_ENV_EXAMPLE} to ${COMMON_ENV_FILE}, fill in the required values, and rerun." >&2
+  exit 1
+fi
 
 load_runtime_env
 
-banner "Marking batch scripts executable"
+banner "Marking setup script executable"
 chmod +x "${DATA_DIR}/setup.sh"
-chmod +x "${INITIAL_SETUP_SCRIPT}"
-chmod +x "${EXTERNAL_DATA_TRAINING_DIR}/run_external_data_training_batch.sh"
-chmod +x "${ENDPOINT_REPLAY_DIR}/run_endpoint_replay_batch.sh"
-chmod +x "${ONLINE_INFERENCE_DIR}/run_online_inference_workflow_batch.sh"
-chmod +x "${RETRAINING_DATASET_DIR}/run_retraining_dataset_batch.sh"
 
 banner "Preparing block-storage layout"
 mkdir -p \
-  "${BLOCK_ROOT}/postgres-data" \
+  "${BLOCK_ROOT}/postgres_data" \
   "${BLOCK_ROOT}/ingest_logs" \
   "${BLOCK_ROOT}/ingest_logs/retraining_dataset_service" \
   "${BLOCK_ROOT}/staging/current_job/raw" \
@@ -659,14 +643,16 @@ mkdir -p \
   "${LEGACY_RECAP_ROOT}" \
   "${FINAL_USER_SUMMARY_ROOT}"
 
-stage_ami_corpus_to_object_store
-bootstrap_synthetic_stage1_inputs
-start_runtime_stack
-bootstrap_ami_corpus_into_db
-restore_dataset_lineage
-bootstrap_stage1_baseline_dataset
+run_resumable_step "stage AMI corpus to object storage" stage_ami_corpus_to_object_store
+run_resumable_step "bootstrap synthetic Stage 1 inputs" bootstrap_synthetic_stage1_inputs
+run_resumable_step "start runtime stack and apply schema updates" start_runtime_stack
+run_resumable_step "bootstrap AMI corpus into Postgres" bootstrap_ami_corpus_into_db
+run_resumable_step "restore dataset lineage" restore_dataset_lineage
+run_resumable_step "bootstrap Stage 1 baseline dataset" bootstrap_stage1_baseline_dataset
 
-seed_mock_transcripts
+if [[ ${#SETUP_FAILED_STEPS[@]} -gt 0 ]]; then
+  banner "Setup completed with skipped/failed step(s): $(join_by '; ' "${SETUP_FAILED_STEPS[@]}")"
+fi
 
 cat <<EOF
 
@@ -680,16 +666,8 @@ Next steps:
    source "${VENV_DIR}/bin/activate"
 2. Shared environment file:
    ${COMMON_ENV_FILE}
-3. The integrated runtime stack is now running from:
-   ${PROJ07_RUNTIME_DIR}
-4. Read the integrated runtime guide:
-   ${PROJ07_RUNTIME_DIR}/README.md
-5. If you want the archived standalone bundle only:
-   bash "${INITIAL_SETUP_SCRIPT}"
-6. Legacy batch runtimes from the initial implementation remain available under:
-   ${INITIAL_IMPLEMENTATION_DIR}
-   bash "${EXTERNAL_DATA_TRAINING_DIR}/run_external_data_training_batch.sh"
-   bash "${ENDPOINT_REPLAY_DIR}/run_endpoint_replay_batch.sh"
-   bash "${ONLINE_INFERENCE_DIR}/run_online_inference_workflow_batch.sh"
-   bash "${RETRAINING_DATASET_DIR}/run_retraining_dataset_batch.sh"
+3. The integrated runtime stack is now running from the root compose file:
+   ${REPO_ROOT}/docker-compose.yml
+4. Traffic generation remains manual-only:
+   cd "${REPO_ROOT}" && docker compose --profile emulated-traffic up -d traffic-generator
 EOF

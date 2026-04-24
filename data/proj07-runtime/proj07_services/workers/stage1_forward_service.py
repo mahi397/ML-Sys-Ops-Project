@@ -166,6 +166,36 @@ def extract_response_rows(response_payload: object) -> list[dict] | None:
     return None
 
 
+def response_float(row: dict, *keys: str) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def response_bool(row: dict, *keys: str) -> bool | None:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+    return None
+
+
 def load_stage1_manifest(request_root: Path, meeting_id: str, version: int) -> dict:
     request_paths = stage1_local_artifact_paths(request_root, meeting_id, version)
     manifest_path = request_paths["stage1_manifest_json"]
@@ -365,9 +395,22 @@ class Stage1ForwardService:
                 if response_paths["stage1_responses_jsonl"].exists()
                 else None
             )
+            request_paths = stage1_local_artifact_paths(
+                self.config.request_root,
+                meeting_id,
+                version,
+            )
+            request_jsonl_path = request_paths["stage1_requests_jsonl"]
             if not response_paths["stage1_responses_json"].exists():
                 raise RuntimeError(
                     f"Cannot resume Stage 1 response upload for {meeting_id}; local response json is missing"
+                )
+            if response_jsonl_path is not None and request_jsonl_path.exists():
+                self.persist_transition_predictions(
+                    conn=conn,
+                    meeting_id=meeting_id,
+                    request_rows=load_jsonl_rows(request_jsonl_path),
+                    response_rows=load_jsonl_rows(response_jsonl_path),
                 )
             self.register_response_artifacts(
                 conn=conn,
@@ -466,6 +509,12 @@ class Stage1ForwardService:
         if response_rows:
             response_jsonl_path = response_paths["stage1_responses_jsonl"]
             write_jsonl(response_jsonl_path, response_rows)
+            self.persist_transition_predictions(
+                conn=conn,
+                meeting_id=meeting_id,
+                request_rows=request_rows,
+                response_rows=response_rows,
+            )
 
         self.register_response_artifacts(
             conn=conn,
@@ -558,6 +607,84 @@ class Stage1ForwardService:
                     version,
                 )
         conn.commit()
+
+    def persist_transition_predictions(
+        self,
+        *,
+        conn,
+        meeting_id: str,
+        request_rows: list[dict],
+        response_rows: list[dict],
+    ) -> None:
+        request_by_id: dict[str, dict] = {}
+        request_by_left_model_index: dict[int, dict] = {}
+        for request_row in request_rows:
+            request_id = str(request_row.get("request_id") or "").strip()
+            if request_id:
+                request_by_id[request_id] = request_row
+
+            metadata = request_row.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+
+            try:
+                request_by_left_model_index[int(metadata["left_model_index"])] = request_row
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        updates: list[tuple[float | None, bool | None, str, int]] = []
+        for response_row in response_rows:
+            request_row: dict | None = None
+            request_id = str(response_row.get("request_id") or "").strip()
+            if request_id:
+                request_row = request_by_id.get(request_id)
+
+            if request_row is None and response_row.get("left_model_index") is not None:
+                try:
+                    request_row = request_by_left_model_index.get(int(response_row["left_model_index"]))
+                except (TypeError, ValueError):
+                    request_row = None
+
+            if request_row is None:
+                continue
+
+            metadata = request_row.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+
+            try:
+                left_utterance_id = int(metadata["left_source_utterance_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            probability = response_float(response_row, "boundary_probability", "pred_boundary_prob", "score", "confidence")
+            label = response_bool(response_row, "is_boundary", "pred_boundary_label", "boundary_label")
+            updates.append((probability, label, meeting_id, left_utterance_id))
+
+        if not updates:
+            self.logger.warning(
+                "No Stage 1 transition predictions could be mapped to DB utterances | meeting_id=%s",
+                meeting_id,
+            )
+            return
+
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                UPDATE utterance_transitions
+                SET pred_boundary_prob = COALESCE(%s, pred_boundary_prob),
+                    pred_boundary_label = COALESCE(%s, pred_boundary_label)
+                WHERE meeting_id = %s
+                  AND left_utterance_id = %s
+                """,
+                updates,
+            )
+
+        self.logger.info(
+            "Persisted Stage 1 transition predictions | meeting_id=%s | rows=%d",
+            meeting_id,
+            len(updates),
+        )
 
 
 def validate_config(config: ForwardServiceConfig) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -23,6 +23,22 @@ def format_display_datetime(value: datetime | str | None) -> str:
             return value
 
     return value.astimezone().strftime("%b %d, %Y at %I:%M %p")
+
+
+def format_datetime_iso(value: datetime | str | None) -> str:
+    if not value:
+        return ""
+
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def format_duration_label(total_seconds: float | int | None) -> str:
@@ -127,9 +143,13 @@ def fetch_recaps_for_user(user_id: str) -> list[dict[str, Any]]:
                 "summary_version": row["summary_version"],
                 "recap_status": "complete" if row["is_complete"] else "draft",
                 "started_at": format_display_datetime(row.get("started_at")),
+                "started_at_iso": format_datetime_iso(row.get("started_at")),
                 "ended_at": format_display_datetime(row.get("ended_at")),
+                "ended_at_iso": format_datetime_iso(row.get("ended_at")),
                 "summary_created_at": format_display_datetime(row.get("summary_created_at")),
+                "summary_created_at_iso": format_datetime_iso(row.get("summary_created_at")),
                 "summary_updated_at": format_display_datetime(row.get("summary_updated_at")),
+                "summary_updated_at_iso": format_datetime_iso(row.get("summary_updated_at")),
                 "model_version": row.get("model_version") or "",
                 "has_recap": True,
                 "recap_url": f"{APP_PREFIX}/recaps/{quote(meeting_id)}",
@@ -222,7 +242,9 @@ def fetch_recap_for_user(
                 "summary_type_label": summary_source_label(str(variant["summary_type"])),
                 "summary_version": int(variant["summary_version"] or 0),
                 "summary_created_at": format_display_datetime(variant.get("summary_created_at")),
+                "summary_created_at_iso": format_datetime_iso(variant.get("summary_created_at")),
                 "summary_updated_at": format_display_datetime(variant.get("summary_updated_at")),
+                "summary_updated_at_iso": format_datetime_iso(variant.get("summary_updated_at")),
                 "segment_count": int(variant.get("segment_count") or 0),
                 "is_complete": bool(variant.get("is_complete")),
                 "model_version": variant.get("model_version") or "",

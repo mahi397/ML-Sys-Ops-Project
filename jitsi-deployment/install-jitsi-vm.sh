@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 INSTALL_ROOT="/mnt/block/jitsi"
 ENV_SOURCE=""
@@ -15,7 +16,7 @@ Usage:
   bash install-jitsi-vm.sh [options]
 
 Options:
-  --env-file PATH         Deployment env file to merge into .env
+  --env-file PATH         Global env file to merge into the Jitsi runtime .env
   --install-root PATH     Persistent install root (default: /mnt/block/jitsi)
   --project-name NAME     Docker Compose project name (default: jitsi-vm)
   --skip-docker-install   Do not install Docker automatically
@@ -560,7 +561,6 @@ sync_deployment_bundle() {
     rsync -a \
         --delete \
         --exclude '.git/' \
-        --exclude 'stack.env' \
         --exclude '__pycache__/' \
         --exclude '*.pyc' \
         "${SCRIPT_DIR}/" "${BUNDLE_ROOT}/"
@@ -583,7 +583,7 @@ normalize_script_permissions() {
 ensure_env_source() {
     local default_env_source
 
-    default_env_source="${SCRIPT_DIR}/stack.env"
+    default_env_source="${REPO_ROOT}/.env"
 
     if [ -n "$ENV_SOURCE" ]; then
         [ -f "$ENV_SOURCE" ] || fatal "Env file not found: $ENV_SOURCE"
@@ -595,8 +595,12 @@ ensure_env_source() {
         return 0
     fi
 
-    cp "${SCRIPT_DIR}/stack.env.example" "$default_env_source"
-    fatal "Created ${default_env_source}. Fill in the required values and rerun the installer."
+    if [ -f "${REPO_ROOT}/.env.example" ]; then
+        cp "${REPO_ROOT}/.env.example" "$default_env_source"
+        fatal "Created ${default_env_source}. Fill in the required values and rerun the installer."
+    fi
+
+    fatal "Global env file not found: ${default_env_source}"
 }
 
 ensure_env_target() {
@@ -673,6 +677,47 @@ generate_jitsi_passwords_if_needed() {
     fi
 }
 
+sync_generated_values_to_env_source() {
+    local keys key value
+
+    if [ -z "$ENV_SOURCE" ] || [ "$ENV_SOURCE" = "$ENV_TARGET" ]; then
+        return 0
+    fi
+
+    if [ ! -w "$ENV_SOURCE" ]; then
+        warn "Cannot write generated Jitsi values back to ${ENV_SOURCE}; runtime .env was still prepared."
+        return 0
+    fi
+
+    keys=(
+        MEETING_PORTAL_SESSION_SECRET
+        JWT_APP_SECRET
+        INGEST_TOKEN
+        JITSI_HOST_EXTERNAL_KEY
+        JICOFO_AUTH_PASSWORD
+        JVB_AUTH_PASSWORD
+        JIGASI_XMPP_PASSWORD
+        JIBRI_RECORDER_PASSWORD
+        JIBRI_XMPP_PASSWORD
+        JIGASI_TRANSCRIBER_PASSWORD
+        PUBLIC_URL
+        JVB_ADVERTISE_IPS
+        VOSK_MODEL_URL
+        VOSK_MODEL_PATH
+    )
+
+    for key in "${keys[@]}"; do
+        value="$(read_env_value "$key" "$ENV_TARGET")"
+        if [ -n "$value" ]; then
+            set_env_value "$key" "$value" "$ENV_SOURCE"
+        fi
+    done
+
+    if [ -n "${SUDO_UID:-}" ]; then
+        chown "${SUDO_UID}:${SUDO_GID:-${SUDO_UID}}" "$ENV_SOURCE" 2>/dev/null || true
+    fi
+}
+
 validate_env() {
     validate_auth_and_prosody_env
     validate_jigasi_env
@@ -703,6 +748,7 @@ prepare_env() {
     generate_if_needed INGEST_TOKEN "$ENV_TARGET"
     generate_if_needed JITSI_HOST_EXTERNAL_KEY "$ENV_TARGET"
     generate_jitsi_passwords_if_needed
+    sync_generated_values_to_env_source
     chmod 644 "$ENV_TARGET"
 
     validate_env

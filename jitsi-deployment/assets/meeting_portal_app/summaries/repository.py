@@ -14,7 +14,7 @@ def user_can_edit_summary(user_id: str, meeting_id: str) -> bool:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT can_view_summary
+            SELECT can_edit_summary
             FROM meeting_participants
             WHERE user_id = %s
               AND meeting_id = %s
@@ -23,7 +23,7 @@ def user_can_edit_summary(user_id: str, meeting_id: str) -> bool:
             (user_id, meeting_id),
         )
         row = cur.fetchone()
-    return bool(row and row.get("can_view_summary"))
+    return bool(row and row.get("can_edit_summary"))
 
 
 def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
@@ -146,7 +146,7 @@ def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[
                 mp.meeting_id,
                 COALESCE(m.source_name, mp.meeting_id) AS meeting_title,
                 mp.role,
-                mp.can_view_summary AS can_edit_summary,
+                mp.can_edit_summary AS can_edit_summary,
                 latest.summary_id,
                 latest.summary_type,
                 latest.summary_version,

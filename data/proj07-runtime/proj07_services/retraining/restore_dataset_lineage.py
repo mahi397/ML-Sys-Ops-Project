@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,13 @@ def default_local_tmp_root() -> Path:
             os.getenv("LOCAL_TMP_ROOT", "/mnt/block/staging/feedback_loop"),
         )
     )
+
+
+def env_flag(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,6 +215,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("/mnt/block/ingest_logs/retraining_dataset_lineage_restore.log"),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=env_flag("DATASET_LINEAGE_RESTORE_STRICT", False),
+        help="Fail on lineage mismatches instead of logging and continuing.",
+    )
     return parser.parse_args()
 
 
@@ -400,6 +414,64 @@ def content_type_for_artifact(artifact_type: str) -> str:
     return ARTIFACT_CONTENT_TYPES.get(artifact_type, "application/octet-stream")
 
 
+def parse_datetime_value(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def parse_jitsi_meeting_start_from_id(meeting_id: str) -> datetime | None:
+    match = re.match(r"^jitsi_(\d{8}T\d{6})Z_", meeting_id)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def datetime_to_db_string(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def normalize_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_role(value: Any, default: str = "participant") -> str:
+    role = str(value or "").strip().lower()
+    return role if role in {"host", "participant"} else default
+
+
+def normalize_summary_bullets(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return []
+
+
 def find_latest_jitsi_parsed_payload(
     meeting_id: str,
     *,
@@ -495,6 +567,34 @@ def normalize_parsed_jitsi_payload(
             or ""
         ).strip(),
     }
+
+    meeting_start = (
+        parse_datetime_value(
+            meeting.get("started_at")
+            or meeting.get("meeting_start")
+            or meeting.get("start_time")
+            or normalized_payload.get("meeting_start")
+        )
+        or parse_jitsi_meeting_start_from_id(meeting_id)
+    )
+    meeting_end = parse_datetime_value(
+        meeting.get("ended_at")
+        or meeting.get("meeting_end")
+        or meeting.get("end_time")
+        or normalized_payload.get("meeting_end")
+    )
+    source_name = str(
+        meeting.get("source_name")
+        or meeting.get("meeting_room")
+        or meeting.get("room")
+        or normalized_payload.get("meeting_room")
+        or meeting_id
+    ).strip()
+    raw_folder_prefix = str(
+        meeting.get("raw_folder_prefix")
+        or normalized_payload.get("raw_folder_prefix")
+        or f"production/jitsi/raw_transcripts/{meeting_id}/"
+    ).strip()
     
 
     # Backward-compatible participants normalization:
@@ -595,6 +695,7 @@ def normalize_parsed_jitsi_payload(
 
         raw_user_id = participant.get("user_id")
         normalized_user_id = str(raw_user_id).strip() if raw_user_id is not None else ""
+        display_name = str(participant.get("display_name") or normalized_user_id).strip()
 
         # meeting_participants.user_id is NOT NULL + FK to users.
         # If we do not know the user_id, we must skip this participant row.
@@ -607,13 +708,13 @@ def normalize_parsed_jitsi_payload(
                 "meeting_id": str(participant.get("meeting_id") or meeting_id).strip(),
                 "user_id": normalized_user_id,
                 "external_key": str(participant.get("external_key") or "").strip(),
-                "display_name": str(participant.get("display_name") or "").strip(),
-                "email": str(participant.get("email") or "").strip(),
-                "role": str(participant.get("role") or "participant").strip(),
-                "can_view_summary": bool(participant.get("can_view_summary", True)),
-                "can_edit_summary": bool(participant.get("can_edit_summary", True)),
-                "joined_at": participant.get("joined_at"),
-                "left_at": participant.get("left_at"),
+                "display_name": display_name or normalized_user_id,
+                "email": str(participant.get("email") or "").strip().lower() or None,
+                "role": normalize_role(participant.get("role")),
+                "can_view_summary": normalize_bool(participant.get("can_view_summary"), True),
+                "can_edit_summary": normalize_bool(participant.get("can_edit_summary"), True),
+                "joined_at": participant.get("joined_at") or datetime_to_db_string(meeting_start),
+                "left_at": participant.get("left_at") or datetime_to_db_string(meeting_end),
             }
         )
 
@@ -622,6 +723,23 @@ def normalize_parsed_jitsi_payload(
             "Dropped %d participant row(s) without user_id during restore | meeting_id=%s",
             dropped_missing_user_id,
             meeting_id,
+        )
+
+    host_user_id = str(normalized_payload["host"].get("user_id") or "").strip()
+    if not normalized_participants and host_user_id:
+        normalized_participants.append(
+            {
+                "meeting_id": meeting_id,
+                "user_id": host_user_id,
+                "external_key": str(normalized_payload["host"].get("external_key") or "").strip(),
+                "display_name": str(normalized_payload["host"].get("display_name") or host_user_id).strip(),
+                "email": str(normalized_payload["host"].get("email") or "").strip().lower() or None,
+                "role": "host",
+                "can_view_summary": True,
+                "can_edit_summary": True,
+                "joined_at": datetime_to_db_string(meeting_start),
+                "left_at": datetime_to_db_string(meeting_end),
+            }
         )
 
     normalized_payload["participants"] = normalized_participants
@@ -661,6 +779,19 @@ def normalize_parsed_jitsi_payload(
             if utterance.get("normalized_text") is not None
             else utterance.get("text")
         )
+        speaker_label = str(
+            utterance.get("speaker_label")
+            or utterance.get("speaker")
+            or utterance.get("speaker_id")
+            or utterance.get("meeting_speaker_id")
+            or f"S{idx + 1}"
+        ).strip()
+        speaker_display_name = str(
+            utterance.get("display_name")
+            or utterance.get("speaker_name")
+            or utterance.get("speaker")
+            or speaker_label
+        ).strip()
 
         normalized_utterances.append(
             {
@@ -679,6 +810,8 @@ def normalize_parsed_jitsi_payload(
                     if utterance.get("utterance_index") is not None
                     else idx
                 ),
+                "speaker_label": speaker_label or f"S{idx + 1}",
+                "speaker_display_name": speaker_display_name or speaker_label or f"Speaker {idx + 1}",
                 "start_time_sec": float(start_time_sec) if start_time_sec is not None else None,
                 "end_time_sec": float(end_time_sec) if end_time_sec is not None else None,
                 "raw_text": str(raw_text or "").strip(),
@@ -692,7 +825,12 @@ def normalize_parsed_jitsi_payload(
     dropped_utterances = 0
 
     for utterance in normalized_payload["utterances"]:
-        if utterance["start_time_sec"] is None or utterance["end_time_sec"] is None:
+        if (
+            utterance["start_time_sec"] is None
+            or utterance["end_time_sec"] is None
+            or utterance["end_time_sec"] < utterance["start_time_sec"]
+            or not utterance["raw_text"]
+        ):
             dropped_utterances += 1
             continue
         filtered_utterances.append(utterance)
@@ -706,8 +844,93 @@ def normalize_parsed_jitsi_payload(
 
     normalized_payload["utterances"] = filtered_utterances
 
-        # Backward-compatible utterance transition normalization:
-    transition_rows = normalized_payload.get("utterance_transitions")
+    if meeting_start is not None and meeting_end is None and filtered_utterances:
+        max_end_seconds = max(float(row["end_time_sec"]) for row in filtered_utterances)
+        meeting_end = datetime.fromtimestamp(
+            meeting_start.timestamp() + max_end_seconds,
+            tz=timezone.utc,
+        )
+
+    normalized_payload["meeting"] = {
+        **meeting,
+        "meeting_id": meeting_id,
+        "source_type": "jitsi",
+        "source_name": source_name or meeting_id,
+        "started_at": datetime_to_db_string(meeting_start),
+        "ended_at": datetime_to_db_string(meeting_end),
+        "raw_folder_prefix": raw_folder_prefix or f"production/jitsi/raw_transcripts/{meeting_id}/",
+    }
+
+    speaker_rows = normalized_payload.get("meeting_speakers")
+    if not isinstance(speaker_rows, list):
+        speaker_rows = meeting.get("meeting_speakers") if isinstance(meeting.get("meeting_speakers"), list) else []
+    if not speaker_rows and isinstance(normalized_payload.get("speakers"), list):
+        speaker_rows = normalized_payload["speakers"]
+    if not speaker_rows and isinstance(meeting.get("speakers"), list):
+        speaker_rows = meeting["speakers"]
+
+    speakers_by_label: dict[str, dict[str, Any]] = {}
+    participant_user_by_name = {
+        str(participant.get("display_name") or "").strip().casefold(): str(participant.get("user_id") or "").strip()
+        for participant in normalized_participants
+        if participant.get("display_name") and participant.get("user_id")
+    }
+    participant_user_by_name.update(
+        {
+            str(participant.get("user_id") or "").strip().casefold(): str(participant.get("user_id") or "").strip()
+            for participant in normalized_participants
+            if participant.get("user_id")
+        }
+    )
+
+    for speaker in speaker_rows:
+        if not isinstance(speaker, dict):
+            continue
+        speaker_label = str(
+            speaker.get("speaker_label")
+            or speaker.get("speaker_id")
+            or speaker.get("label")
+            or speaker.get("display_name")
+            or speaker.get("speaker_name")
+            or ""
+        ).strip()
+        display_name = str(
+            speaker.get("display_name")
+            or speaker.get("speaker_name")
+            or speaker_label
+        ).strip()
+        if not speaker_label:
+            continue
+        user_id = str(speaker.get("user_id") or "").strip() or None
+        if user_id is None and display_name:
+            user_id = participant_user_by_name.get(display_name.casefold()) or None
+        speakers_by_label[speaker_label] = {
+            "meeting_id": meeting_id,
+            "user_id": user_id,
+            "speaker_label": speaker_label,
+            "display_name": display_name or speaker_label,
+            "role": str(speaker.get("role") or "").strip() or None,
+        }
+
+    for utterance in normalized_payload["utterances"]:
+        speaker_label = str(utterance.get("speaker_label") or "").strip()
+        if not speaker_label or speaker_label in speakers_by_label:
+            continue
+        display_name = str(utterance.get("speaker_display_name") or speaker_label).strip()
+        speakers_by_label[speaker_label] = {
+            "meeting_id": meeting_id,
+            "user_id": participant_user_by_name.get(display_name.casefold()) or None,
+            "speaker_label": speaker_label,
+            "display_name": display_name or speaker_label,
+            "role": None,
+        }
+
+    normalized_payload["meeting_speakers"] = list(speakers_by_label.values())
+
+    # Backward-compatible utterance transition normalization:
+    transition_rows = normalized_payload.get("transition_placeholders")
+    if not isinstance(transition_rows, list):
+        transition_rows = normalized_payload.get("utterance_transitions")
     if not isinstance(transition_rows, list):
         transition_rows = (
             meeting.get("utterance_transitions")
@@ -801,6 +1024,7 @@ def normalize_parsed_jitsi_payload(
         )
 
     normalized_payload["utterance_transitions"] = normalized_transitions
+    normalized_payload["transition_placeholders"] = normalized_transitions
 
     artifact_rows = normalized_payload.get("meeting_artifacts")
     if not isinstance(artifact_rows, list):
@@ -1077,13 +1301,14 @@ def restore_missing_jitsi_meetings(
             continue
 
         parsed_object_key, parsed_version = parsed_payload_info
-        parsed_payload = read_remote_json(
-            remote=remote,
-            bucket=bucket,
-            object_key=parsed_object_key,
-            logger=logger,
-        )
-        normalized_payload, artifact_version = normalize_parsed_jitsi_payload(
+        try:
+            parsed_payload = read_remote_json(
+                remote=remote,
+                bucket=bucket,
+                object_key=parsed_object_key,
+                logger=logger,
+            )
+            normalized_payload, artifact_version = normalize_parsed_jitsi_payload(
                 parsed_payload,
                 meeting_id=meeting_id,
                 parsed_object_key=parsed_object_key,
@@ -1091,7 +1316,14 @@ def restore_missing_jitsi_meetings(
                 remote=remote,
                 bucket=bucket,
                 conn=conn,
-        )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Skipping historical Jitsi recovery for %s because parsed payload normalization failed: %s",
+                meeting_id,
+                exc,
+            )
+            continue
 
         logger.info(
             "Restoring historical Jitsi meeting from stored parsed payload | meeting_id=%s parsed_version=v%s artifact_version=%s",
@@ -1100,36 +1332,48 @@ def restore_missing_jitsi_meetings(
             artifact_version,
         )
 
-        if not dry_run:
-            insert_jitsi_rows(
-                conn=conn,
-                payload=normalized_payload,
-                replace_existing=False,
-                artifact_version=artifact_version,
-                logger=logger,
-            )
+        try:
+            if not dry_run:
+                insert_jitsi_rows(
+                    conn=conn,
+                    payload=normalized_payload,
+                    replace_existing=False,
+                    artifact_version=artifact_version,
+                    logger=logger,
+                )
 
-        restored_artifacts = restore_verified_artifact_rows(
-            conn,
-            meeting_id=meeting_id,
-            version=artifact_version,
-            remote=remote,
-            bucket=bucket,
-            config=config,
-            logger=logger,
-            dry_run=dry_run,
-        )
-        restore_materialized_summary_rows(
-            conn,
-            meeting_id=meeting_id,
-            version=artifact_version,
-            restored_artifacts=restored_artifacts,
-            remote=remote,
-            bucket=bucket,
-            config=config,
-            logger=logger,
-            dry_run=dry_run,
-        )
+            restored_artifacts = restore_verified_artifact_rows(
+                conn,
+                meeting_id=meeting_id,
+                version=artifact_version,
+                remote=remote,
+                bucket=bucket,
+                config=config,
+                logger=logger,
+                dry_run=dry_run,
+            )
+            restore_materialized_summary_rows(
+                conn,
+                meeting_id=meeting_id,
+                version=artifact_version,
+                restored_artifacts=restored_artifacts,
+                remote=remote,
+                bucket=bucket,
+                config=config,
+                logger=logger,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "Skipping historical Jitsi recovery for %s because DB/artifact restore failed: %s",
+                meeting_id,
+                exc,
+            )
+            continue
         restored_ids.add(meeting_id)
 
     if restored_ids:
@@ -1146,6 +1390,7 @@ def determine_authoritative_versions(
     remote: str,
     bucket: str,
     logger: logging.Logger,
+    strict: bool,
 ) -> tuple[str, list[int]]:
     local_versions = set(existing_versions(family.local_root))
     remote_versions = set(
@@ -1160,15 +1405,32 @@ def determine_authoritative_versions(
     if remote_versions:
         unexpected_local = sorted(local_versions - remote_versions)
         if unexpected_local:
-            raise RuntimeError(
+            message = (
                 f"{family.label} has local versions not present in object storage: "
-                f"{', '.join(f'v{version}' for version in unexpected_local)}. "
-                "Either clear the stale local lineage for a fresh start or restore object storage first."
+                f"{', '.join(f'v{version}' for version in unexpected_local)}"
             )
+            if strict:
+                raise RuntimeError(
+                    f"{message}. Either clear stale local lineage or restore object storage first."
+                )
+            logger.warning("%s; ignoring stale local-only versions", message)
         return "remote", sorted(remote_versions)
 
     if local_versions:
-        return "local", sorted(local_versions)
+        if strict:
+            return "local", sorted(local_versions)
+        complete_versions = [
+            version for version in sorted(local_versions)
+            if version_dir_complete(family, version)
+        ]
+        skipped_versions = sorted(local_versions - set(complete_versions))
+        if skipped_versions:
+            logger.warning(
+                "Ignoring incomplete local %s: %s",
+                family.label,
+                ", ".join(f"v{version}" for version in skipped_versions),
+            )
+        return "local", complete_versions
 
     return "none", []
 
@@ -1254,7 +1516,7 @@ def infer_source_type(
         "production_feedback_bootstrap",
     }:
         return "production_feedback"
-    if candidate == "synthetic":
+    if candidate in {"synthetic", "synthetic_endpoint_replay"}:
         return "synthetic"
 
     if "augmentation" in manifest:
@@ -1263,7 +1525,7 @@ def infer_source_type(
     metadata_source_type = str(metadata.get("source_type") or "").strip().lower()
     if metadata_source_type == "ami":
         return "ami"
-    if metadata_source_type == "synthetic":
+    if metadata_source_type in {"synthetic", "synthetic_endpoint_replay"}:
         return "synthetic"
 
     return family.default_source_type
@@ -1345,27 +1607,40 @@ def build_stored_versions(
     remote: str,
     bucket: str,
     logger: logging.Logger,
+    strict: bool,
 ) -> list[StoredVersion]:
     stored_versions: list[StoredVersion] = []
     for version in versions:
-        manifest = load_json_for_version(
-            family,
-            version,
-            "manifest.json",
-            source=source,
-            remote=remote,
-            bucket=bucket,
-            logger=logger,
-        )
-        metadata = load_json_for_version(
-            family,
-            version,
-            family.metadata_filename,
-            source=source,
-            remote=remote,
-            bucket=bucket,
-            logger=logger,
-        )
+        try:
+            manifest = load_json_for_version(
+                family,
+                version,
+                "manifest.json",
+                source=source,
+                remote=remote,
+                bucket=bucket,
+                logger=logger,
+            )
+            metadata = load_json_for_version(
+                family,
+                version,
+                family.metadata_filename,
+                source=source,
+                remote=remote,
+                bucket=bucket,
+                logger=logger,
+            )
+        except Exception as exc:
+            if strict:
+                raise
+            logger.warning(
+                "Skipping %s v%s because lineage metadata could not be loaded: %s",
+                family.label,
+                version,
+                exc,
+            )
+            continue
+
         source_type = infer_source_type(
             family=family,
             manifest=manifest,
@@ -1377,12 +1652,24 @@ def build_stored_versions(
             metadata=metadata,
         )
         if family.restore_meeting_assignments:
-            validate_split_assignments(
-                family=family,
-                version=version,
-                metadata=metadata,
-                split_assignments=split_assignments,
-            )
+            try:
+                validate_split_assignments(
+                    family=family,
+                    version=version,
+                    metadata=metadata,
+                    split_assignments=split_assignments,
+                )
+            except Exception as exc:
+                if strict:
+                    raise
+                logger.warning(
+                    "Skipping meeting assignment replay for %s v%s because split metadata did not match: %s",
+                    family.label,
+                    version,
+                    exc,
+                )
+                stamp_version = None
+                split_assignments = {}
 
         dataset_name = str(manifest.get("dataset_name") or family.dataset_name_fallback).strip()
         object_key = f"{family.object_prefix.strip('/')}/v{version}/manifest.json"
@@ -1535,6 +1822,7 @@ def validate_referenced_meetings_present(
     missing_meeting_config: MissingMeetingRecoveryConfig,
     logger: logging.Logger,
     dry_run: bool,
+    strict: bool,
 ) -> dict[str, dict[str, Any]]:
     meeting_ids = collect_referenced_meeting_ids(stored_versions)
     meeting_states = fetch_meeting_states(conn, meeting_ids)
@@ -1566,12 +1854,15 @@ def validate_referenced_meetings_present(
     if missing:
         sample = ", ".join(missing[:10])
         extra = "" if len(missing) <= 10 else f" (+{len(missing) - 10} more)"
-        raise RuntimeError(
+        message = (
             "Stored dataset lineage references meetings that are not present in Postgres: "
-            f"{sample}{extra}. "
-            "For a true fresh start, clear the stored lineage in object storage/local dataset roots. "
-            "Otherwise restore those meetings before replaying dataset lineage."
+            f"{sample}{extra}"
         )
+        if strict:
+            raise RuntimeError(
+                f"{message}. For a true fresh start, clear stored lineage or restore those meetings first."
+            )
+        logger.warning("%s; assignment replay will skip those meetings", message)
 
     return meeting_states
 
@@ -1583,6 +1874,7 @@ def apply_meeting_assignments(
     meeting_states: dict[str, dict[str, Any]],
     logger: logging.Logger,
     dry_run: bool,
+    strict: bool,
 ) -> None:
     for stored in stored_versions:
         if stored.meeting_stamp_version is None or not stored.split_assignments:
@@ -1595,7 +1887,11 @@ def apply_meeting_assignments(
 
             to_update: list[str] = []
             conflicts: list[str] = []
+            missing: list[str] = []
             for meeting_id in meeting_ids:
+                if meeting_id not in meeting_states:
+                    missing.append(meeting_id)
+                    continue
                 state = meeting_states[meeting_id]
                 current_version = state["dataset_version"]
                 current_split = state["dataset_split"]
@@ -1618,13 +1914,27 @@ def apply_meeting_assignments(
                     f"{meeting_id} currently has dataset_version={current_version} dataset_split={current_split!r}"
                 )
 
+            if missing:
+                sample = ", ".join(missing[:5])
+                extra = "" if len(missing) <= 5 else f" (+{len(missing) - 5} more)"
+                message = (
+                    f"Cannot replay {stored.family.label} v{stored.version} for split {split_name}; "
+                    f"missing meetings: {sample}{extra}"
+                )
+                if strict:
+                    raise RuntimeError(message)
+                logger.warning("%s; continuing with present meetings", message)
+
             if conflicts:
                 sample = "; ".join(conflicts[:5])
                 extra = "" if len(conflicts) <= 5 else f" (+{len(conflicts) - 5} more)"
-                raise RuntimeError(
+                message = (
                     f"Cannot replay {stored.family.label} v{stored.version} for split {split_name}: "
                     f"{sample}{extra}"
                 )
+                if strict:
+                    raise RuntimeError(message)
+                logger.warning("%s; conflicting meetings will not be restamped", message)
 
             if not to_update:
                 logger.info(
@@ -1677,12 +1987,14 @@ def plan_family_restore(
     remote: str,
     bucket: str,
     logger: logging.Logger,
+    strict: bool,
 ) -> PlannedFamilyRestore | None:
     source, versions = determine_authoritative_versions(
         family,
         remote=remote,
         bucket=bucket,
         logger=logger,
+        strict=strict,
     )
     if not versions:
         logger.info("No stored %s were found; skipping", family.label)
@@ -1701,6 +2013,7 @@ def plan_family_restore(
         remote=remote,
         bucket=bucket,
         logger=logger,
+        strict=strict,
     )
     return PlannedFamilyRestore(
         family=family,
@@ -1718,20 +2031,27 @@ def materialize_family_restore(
     conn,
     logger: logging.Logger,
     dry_run: bool,
+    strict: bool,
 ) -> list[StoredVersion]:
     family = plan.family
 
-    if plan.source == "remote":
-        sync_remote_versions_to_local(
-            family,
-            plan.versions,
-            remote=remote,
-            bucket=bucket,
-            logger=logger,
-            dry_run=dry_run,
-        )
-    else:
-        ensure_local_versions_complete(family, plan.versions)
+    try:
+        if plan.source == "remote":
+            sync_remote_versions_to_local(
+                family,
+                plan.versions,
+                remote=remote,
+                bucket=bucket,
+                logger=logger,
+                dry_run=dry_run,
+            )
+        else:
+            ensure_local_versions_complete(family, plan.versions)
+    except Exception as exc:
+        if strict:
+            raise
+        logger.warning("Skipping local materialization for %s because sync/check failed: %s", family.label, exc)
+        return []
 
     for stored in plan.stored_versions:
         logger.info(
@@ -1808,6 +2128,7 @@ def main() -> int:
                     remote=args.rclone_remote,
                     bucket=args.bucket,
                     logger=logger,
+                    strict=args.strict,
                 )
                 if plan is not None:
                     planned_restores.append(plan)
@@ -1826,6 +2147,7 @@ def main() -> int:
                 missing_meeting_config=missing_meeting_recovery_config(args),
                 logger=logger,
                 dry_run=args.dry_run,
+                strict=args.strict,
             )
 
             for plan in planned_restores:
@@ -1836,6 +2158,7 @@ def main() -> int:
                     conn=conn,
                     logger=logger,
                     dry_run=args.dry_run,
+                    strict=args.strict,
                 )
             apply_meeting_assignments(
                 meeting_versions,
@@ -1843,6 +2166,7 @@ def main() -> int:
                 meeting_states=meeting_states,
                 logger=logger,
                 dry_run=args.dry_run,
+                strict=args.strict,
             )
     except Exception:
         logger.exception("Dataset lineage restore failed")

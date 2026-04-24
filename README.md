@@ -72,9 +72,9 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 
 ```
 ML-Sys-Ops-Project/
-├── docker-compose.yml          # Full system: platform + data pipeline + serving + training + monitoring
+├── docker-compose.yml          # Single compose entry point for platform, data, serving, training, monitoring
 ├── setup.sh                    # One-command bootstrap for a fresh Chameleon GPU node
-├── env.example                 # Environment variable template — copy to .env
+├── .env.example                # Global environment template — copy to .env
 │
 ├── serving/                    # Ray Serve, RoBERTa + Mistral, Prometheus/Grafana
 │   ├── ray_serve/              # serve.py, storage.py, Dockerfile.ray
@@ -89,14 +89,13 @@ ML-Sys-Ops-Project/
 │   └── Dockerfile              # Training container image
 │
 ├── data/                       # ingest, workflow workers, dataset pipeline
-│   ├── proj07-runtime/         # Production service bundle (docker-compose + workers)
+│   ├── proj07-runtime/         # Production service package and Docker image context
 │   ├── proj07-db/              # Postgres schema and migrations
-│   └── initial_implementation/ # Archived standalone scripts
+│   └── initial_implementation/ # Archived independent standalone scripts
 │
 │
 └── jitsi-deployment/           # Jitsi Meet + meeting portal + transcript uploader
     ├── install-jitsi-vm.sh     # Automated Jitsi installer
-    ├── stack.env.example       # Jitsi environment template
     └── compose/                # Custom service definitions (portal, uploader, vosk)
 ```
 
@@ -139,7 +138,7 @@ ML-Sys-Ops-Project/
 ```bash
 git clone https://github.com/mahi397/ML-Sys-Ops-Project.git
 cd ML-Sys-Ops-Project
-cp env.example .env
+cp .env.example .env
 # Edit .env: set FLOATING_IP, POSTGRES_PASSWORD, MINIO_PASSWORD,
 #            AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BUCKET_NAME
 nano .env
@@ -154,7 +153,7 @@ bash setup.sh
 DEPLOY_JITSI=true bash setup.sh
 ```
 
-`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, RoBERTa + Mistral model downloads, Postgres schema init + migrations, MLflow startup + model registry restore, and `docker compose up -d` for all services.
+`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, RoBERTa + Mistral model downloads, Postgres schema init + migrations, MLflow startup + model registry restore, and root `docker compose up -d` for all default services. The traffic generator is the only manual profile service.
 
 ### 3. Verify
 

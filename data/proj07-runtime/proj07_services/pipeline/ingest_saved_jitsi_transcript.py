@@ -59,7 +59,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--original-filename", required=True)
     parser.add_argument("--host-external-key", required=True)
     parser.add_argument("--metadata-path", type=Path, default=None)
-    parser.add_argument("--timezone", default="America/New_York")
+    parser.add_argument(
+        "--timezone",
+        default=os.getenv("JITSI_TRANSCRIPT_TIMEZONE", "UTC"),
+        help="Timezone used by the Jitsi transcript text. Defaults to UTC/GMT.",
+    )
     parser.add_argument("--version", type=int, default=1)
     parser.add_argument(
         "--local-output-root",
