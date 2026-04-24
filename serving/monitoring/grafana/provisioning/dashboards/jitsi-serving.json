@@ -415,7 +415,7 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "jitsi_feedback_events_total or vector(0)",
+          "expr": "jitsi_feedback_events_total",
           "legendFormat": "Total"
         }
       ],
@@ -437,11 +437,11 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "jitsi_feedback_corrections_total{action=\"overall_positive\"} or vector(0)",
+          "expr": "jitsi_feedback_corrections_total{action=\"overall_positive\"}",
           "legendFormat": "Positive"
         },
         {
-          "expr": "jitsi_feedback_corrections_total{action=\"overall_negative\"} or vector(0)",
+          "expr": "jitsi_feedback_corrections_total{action=\"overall_negative\"}",
           "legendFormat": "Negative"
         }
       ],
@@ -462,11 +462,11 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "jitsi_feedback_edits_total{edit_type=\"edit_topic_label\"} or vector(0)",
+          "expr": "jitsi_feedback_edits_total{edit_type=\"edit_topic_label\"}",
           "legendFormat": "Topic label edits"
         },
         {
-          "expr": "jitsi_feedback_edits_total{edit_type=\"edit_summary_bullets\"} or vector(0)",
+          "expr": "jitsi_feedback_edits_total{edit_type=\"edit_summary_bullets\"}",
           "legendFormat": "Bullet edits"
         }
       ],
@@ -546,11 +546,11 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "increase(jitsi_feedback_corrections_total[24h]) or vector(0)",
+          "expr": "increase(jitsi_feedback_corrections_total[24h])",
           "legendFormat": "Boundary corrections"
         },
         {
-          "expr": "increase(jitsi_feedback_edits_total[24h]) or vector(0)",
+          "expr": "increase(jitsi_feedback_edits_total[24h])",
           "legendFormat": "Summary edits"
         }
       ],
