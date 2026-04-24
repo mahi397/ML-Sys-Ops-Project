@@ -700,7 +700,3 @@ Typical `workflow_tasks` progression:
 - missing Stage 1 request artifacts in DB or on local disk cause the build path to reconcile
 - missing Stage 1 response artifacts cause the forward path to reconcile
 - task retries and stale-task recovery are DB-backed
-
-Current limitation:
-- external HTTP posting to `/segment` is retry-safe, but not mathematically exact-once across a crash immediately after remote success and before local persistence
-- true exact-once would need endpoint-side idempotency keys or an outbox-style integration contract

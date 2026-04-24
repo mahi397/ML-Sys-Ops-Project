@@ -132,6 +132,8 @@ The modern runtime under `proj07-runtime/` exposes these Docker Compose services
   - feedback-pool and retraining-snapshot publisher
 - `production_drift_monitor`
   - live data-drift monitor
+- `traffic-generator`
+  - manual-only synthetic transcript uploader for emulated production traffic
 
 List them directly from Compose:
 
@@ -169,6 +171,67 @@ docker compose up -d postgres retraining_dataset_service
 docker compose up -d postgres production_drift_monitor
 docker compose up -d adminer
 ```
+
+Start the manual-only traffic generator:
+
+```bash
+cd proj07-runtime
+docker compose --profile emulated-traffic up -d traffic-generator
+docker compose logs -f traffic-generator
+```
+
+Run a fixed number of meetings instead of continuous traffic:
+
+```bash
+cd proj07-runtime
+docker compose --profile emulated-traffic rm -sf traffic-generator
+MEETING_COUNT=5 DELAY_SECONDS=5 docker compose --profile emulated-traffic up -d traffic-generator
+docker compose logs -f traffic-generator
+```
+
+Force only archived mock transcripts or only generated meetings:
+
+```bash
+cd proj07-runtime
+docker compose --profile emulated-traffic rm -sf traffic-generator
+MEETING_SOURCE_MODE=archived MEETING_COUNT=9 docker compose --profile emulated-traffic up -d traffic-generator
+
+docker compose --profile emulated-traffic rm -sf traffic-generator
+MEETING_SOURCE_MODE=synthetic MEETING_COUNT=9 docker compose --profile emulated-traffic up -d traffic-generator
+```
+
+Stop it:
+
+```bash
+cd proj07-runtime
+docker compose --profile emulated-traffic stop traffic-generator
+```
+
+It is not part of the default `docker compose up -d` startup.
+
+Traffic generator behavior:
+
+- The compose service default is `MEETING_SOURCE_MODE=mixed`, `MEETING_COUNT=0`, and `DELAY_SECONDS=15`.
+- `MEETING_COUNT=0` means it runs continuously until a human stops it.
+- In continuous mode, the emulator sends meetings in batches of 5, waits `15` seconds between meetings inside the batch, then sleeps `45` seconds between batches.
+- With the current compose defaults, it will therefore keep ingesting meetings forever and the exact total count depends on when you stop it.
+- If you set `MEETING_COUNT=N`, it sends exactly `N` meetings once and then exits.
+- `MEETING_SOURCE_MODE=mixed` alternates between generated synthetic meetings and archived mock transcript files.
+- You can override the source mode per run with `MEETING_SOURCE_MODE=synthetic` or `MEETING_SOURCE_MODE=archived`.
+
+How synthetic meetings are generated:
+
+- The emulator in [`../emulate_production.py`](./emulate_production.py) does not replay a fixed transcript list by default.
+- Instead, it samples 2-3 content blocks from the in-code `TOPIC_BLOCKS` pool, assigns random utterance durations, chooses one speaker as the mock uploader, and renders the result into the same Jitsi-style plain-text transcript format that the ingest parser expects.
+- Each generated meeting gets a fresh original filename like `transcript_YYYY-MM-DDTHH:MM:SS(.fraction)Z_<uuid>.txt`.
+- The internal `meeting_id` is derived from that filename, and the transcript room/meeting name is set to `synthetic-{meeting_id}`.
+
+How to increase unique mock meetings:
+
+- The fastest way is to expand the `TOPIC_BLOCKS` list in [`../emulate_production.py`](./emulate_production.py) with more topics, speakers, and utterances.
+- Even with the current pool, different 2-3 block combinations, utterance timing jitter, fresh filenames, and changing mock uploaders already create many distinct meetings.
+- If you want a larger library of fixed, hand-authored transcript examples, refer to [`../initial_implementation/mock_jitsi_meet`](./initial_implementation/mock_jitsi_meet), which contains archived Jitsi-style mock transcript files plus a manifest.
+- The runtime traffic generator now supports both modes: generated meetings from `TOPIC_BLOCKS` and rotating archived transcript files from that mock transcript folder.
 
 Inspect service status:
 
