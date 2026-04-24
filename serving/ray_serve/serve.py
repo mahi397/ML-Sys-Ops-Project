@@ -325,7 +325,7 @@ MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
 DEVICE             = "cuda"  # overridden per-actor in __init__
 
 # MLflow model registry 
-MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://129.114.25.185:8000")
+MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 MODEL_ALIAS           = os.getenv("MODEL_ALIAS", "production")   # switch to "fallback" to rollback
 MLFLOW_MODEL_NAME     = "jitsi-topic-segmenter"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -438,6 +438,10 @@ class MetricsDeployment:
             'jitsi_feedback_corrections_total', 'User boundary corrections',
             ['action'], registry=self.registry
         )
+        # Initialize all label combinations so Prometheus exposes them from startup
+        # (without this, panels show "No data" until the first feedback is submitted)
+        for _action in ("remove_boundary", "add_boundary", "overall_good", "overall_bad"):
+            self.feedback_corrections.labels(action=_action)
 
     def _update_system(self):
         try:
@@ -532,10 +536,11 @@ class SegmenterDeployment:
             try:
                 import mlflow.pytorch
                 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+                # Instantiate client once here so it's available in the fallback block
+                _client = mlflow.tracking.MlflowClient()
                 mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
                 self.model = mlflow.pytorch.load_model(mlflow_uri)
                 self.model_version = f"mlflow@{MODEL_ALIAS}"
-                _client = mlflow.tracking.MlflowClient()
                 _alias_mv = _client.get_model_version_by_alias(MLFLOW_MODEL_NAME, MODEL_ALIAS)
                 self.current_mlflow_version = str(_alias_mv.version)
                 # ★ READ best_threshold FROM MODEL VERSION TAGS ★
@@ -549,6 +554,9 @@ class SegmenterDeployment:
             except Exception as e:
                 print(f"[segmenter] MLflow @{MODEL_ALIAS} failed ({e}), trying @fallback")
                 try:
+                    import mlflow.pytorch
+                    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+                    _client = mlflow.tracking.MlflowClient()
                     fallback_uri = f"models:/{MLFLOW_MODEL_NAME}@fallback"
                     self.model = mlflow.pytorch.load_model(fallback_uri)
                     self.model_version = "mlflow@fallback"
