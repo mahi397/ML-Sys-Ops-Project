@@ -409,9 +409,81 @@
       "collapsed": false
     },
     {
+      "title": "Total Feedback Events (from DB)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 47 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "jitsi_feedback_events_total or vector(0)",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Overall Ratings",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 9, "x": 6, "y": 47 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "jitsi_feedback_corrections_total{action=\"overall_positive\"} or vector(0)",
+          "legendFormat": "Positive"
+        },
+        {
+          "expr": "jitsi_feedback_corrections_total{action=\"overall_negative\"} or vector(0)",
+          "legendFormat": "Negative"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Summary Edits",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 9, "x": 15, "y": 47 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "jitsi_feedback_edits_total{edit_type=\"edit_topic_label\"} or vector(0)",
+          "legendFormat": "Topic label edits"
+        },
+        {
+          "expr": "jitsi_feedback_edits_total{edit_type=\"edit_summary_bullets\"} or vector(0)",
+          "legendFormat": "Bullet edits"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
       "title": "Boundary Corrections (per hour)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 47 },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 51 },
       "datasource": "Prometheus",
       "targets": [
         {
@@ -442,13 +514,13 @@
       }
     },
     {
-      "title": "Correction Rate (% of recaps corrected)",
+      "title": "Correction Rate (% of segment requests)",
       "type": "gauge",
-      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 47 },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 51 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "rate(jitsi_feedback_corrections_total[10m]) / rate(jitsi_requests_total{endpoint=\"segment\", status=\"success\"}[10m]) * 100",
+          "expr": "rate(jitsi_feedback_corrections_total[10m]) / (rate(jitsi_requests_total{endpoint=\"segment\", status=\"success\"}[10m]) + 0.001) * 100",
           "legendFormat": "Correction %"
         }
       ],
@@ -468,14 +540,18 @@
       }
     },
     {
-      "title": "Pending Corrections (retraining trigger)",
+      "title": "New Corrections (last 24 h)",
       "type": "stat",
-      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 47 },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 51 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "jitsi_feedback_corrections_total - (jitsi_feedback_corrections_total offset 24h) or vector(0)",
-          "legendFormat": "Pending (24h)"
+          "expr": "increase(jitsi_feedback_corrections_total[24h]) or vector(0)",
+          "legendFormat": "Boundary corrections"
+        },
+        {
+          "expr": "increase(jitsi_feedback_edits_total[24h]) or vector(0)",
+          "legendFormat": "Summary edits"
         }
       ],
       "fieldConfig": {

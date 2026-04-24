@@ -438,10 +438,79 @@ class MetricsDeployment:
             'jitsi_feedback_corrections_total', 'User boundary corrections',
             ['action'], registry=self.registry
         )
-        # Initialize all label combinations so Prometheus exposes them from startup
-        # (without this, panels show "No data" until the first feedback is submitted)
-        for _action in ("remove_boundary", "add_boundary", "overall_good", "overall_bad"):
+        self.feedback_edits = Counter(
+            'jitsi_feedback_edits_total', 'User summary edit events',
+            ['edit_type'], registry=self.registry
+        )
+        self.feedback_total_gauge = Gauge(
+            'jitsi_feedback_events_total', 'Total feedback events in DB',
+            registry=self.registry
+        )
+        # Initialize label sets so Prometheus exposes them from startup (not just after first event)
+        for _action in ("remove_boundary", "add_boundary", "overall_positive", "overall_negative"):
             self.feedback_corrections.labels(action=_action)
+        for _edit in ("edit_topic_label", "edit_summary_bullets"):
+            self.feedback_edits.labels(edit_type=_edit)
+
+        # DB polling state — tracks the last feedback_event_id we already counted
+        self._last_feedback_id = 0
+        if DATABASE_URL:
+            threading.Thread(target=self._poll_feedback_db, daemon=True).start()
+
+    def _poll_feedback_db(self):
+        """Poll Postgres feedback_events table and drive Prometheus feedback metrics.
+
+        Feedback goes: Jitsi UI → meeting-portal-app → Postgres (bypasses serve.py).
+        This thread bridges that gap so Grafana panels show real data.
+        event_type → action/edit_type mapping mirrors summaries/service.py logic.
+        """
+        # event_type values written by meeting-portal-app (summaries/service.py)
+        boundary_map = {
+            "merge_segments": "remove_boundary",
+            "split_segment":  "add_boundary",
+            "accept_summary":        "overall_positive",
+            "boundary_correction":   "overall_negative",
+        }
+        edit_types = {"edit_topic_label", "edit_summary_bullets"}
+        poll_interval = 60
+
+        while True:
+            time.sleep(poll_interval)
+            try:
+                import psycopg2
+                import psycopg2.extras
+                with psycopg2.connect(DATABASE_URL) as conn:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        cur.execute(
+                            """
+                            SELECT event_type, COUNT(*) AS cnt,
+                                   MAX(feedback_event_id) AS max_id
+                            FROM feedback_events
+                            WHERE feedback_event_id > %s
+                            GROUP BY event_type
+                            """,
+                            (self._last_feedback_id,),
+                        )
+                        rows = cur.fetchall()
+
+                        cur.execute("SELECT COUNT(*) AS total FROM feedback_events")
+                        total = cur.fetchone()["total"]
+
+                max_seen = self._last_feedback_id
+                for row in rows:
+                    etype = row["event_type"]
+                    cnt   = int(row["cnt"])
+                    if row["max_id"] and row["max_id"] > max_seen:
+                        max_seen = row["max_id"]
+                    if etype in boundary_map:
+                        self.feedback_corrections.labels(action=boundary_map[etype]).inc(cnt)
+                    elif etype in edit_types:
+                        self.feedback_edits.labels(edit_type=etype).inc(cnt)
+
+                self._last_feedback_id = max_seen
+                self.feedback_total_gauge.set(total)
+            except Exception as e:
+                print(f"[metrics] feedback DB poll failed: {e}")
 
     def _update_system(self):
         try:
