@@ -139,6 +139,63 @@ set_env_value() {
     mv "$tmp" "$file"
 }
 
+get_env_source_value() {
+    local key="$1"
+
+    if [ -z "${ENV_SOURCE:-}" ] || [ ! -f "$ENV_SOURCE" ]; then
+        printf '\n'
+        return 0
+    fi
+
+    strip_wrapping_quotes "$(read_env_value "$key" "$ENV_SOURCE")"
+}
+
+set_project_default() {
+    local key="$1"
+    local value="$2"
+    local source_value current_value
+
+    source_value="$(get_env_source_value "$key")"
+    if [ -n "$source_value" ]; then
+        return 0
+    fi
+
+    current_value="$(strip_wrapping_quotes "$(read_env_value "$key" "$ENV_TARGET")")"
+    if ! value_is_blank_or_placeholder "$current_value"; then
+        return 0
+    fi
+
+    set_env_value "$key" "$value" "$ENV_TARGET"
+}
+
+extract_url_host() {
+    local url="$1"
+    local host="$url"
+
+    host="${host#http://}"
+    host="${host#https://}"
+    host="${host#ws://}"
+    host="${host#wss://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+
+    printf '%s\n' "$host"
+}
+
+default_object_bucket() {
+    local value
+
+    for key in OBJECT_BUCKET BUCKET OBJSTORE_BUCKET; do
+        value="$(get_env_source_value "$key")"
+        if [ -n "$value" ]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+
+    printf 'objstore-proj07\n'
+}
+
 merge_env_file() {
     local src="$1"
     local dst="$2"
@@ -610,28 +667,101 @@ ensure_env_target() {
 }
 
 set_inferred_network_values() {
-    local public_url advertised_ips public_host inferred_ip
+    local public_url advertised_ips public_host inferred_ip https_port
 
     public_url="$(read_env_value PUBLIC_URL "$ENV_TARGET")"
     advertised_ips="$(read_env_value JVB_ADVERTISE_IPS "$ENV_TARGET")"
     inferred_ip="$(detect_primary_ipv4 || true)"
+    https_port="$(strip_wrapping_quotes "$(read_env_value HTTPS_PORT "$ENV_TARGET")")"
+    if [ -z "$https_port" ]; then
+        https_port="$(strip_wrapping_quotes "$(read_env_value JITSI_PORT "$ENV_TARGET")")"
+    fi
+    https_port="${https_port:-8443}"
 
     if [ -z "$public_url" ] && [ -n "$inferred_ip" ]; then
-        set_env_value PUBLIC_URL "https://${inferred_ip}" "$ENV_TARGET"
-        public_url="https://${inferred_ip}"
+        set_env_value PUBLIC_URL "https://${inferred_ip}:${https_port}" "$ENV_TARGET"
+        public_url="https://${inferred_ip}:${https_port}"
     fi
 
     if [ -z "$advertised_ips" ]; then
-        public_host="${public_url#http://}"
-        public_host="${public_host#https://}"
-        public_host="${public_host%%/*}"
-        public_host="${public_host%%:*}"
+        public_host="$(extract_url_host "$public_url")"
 
         if [[ "$public_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             set_env_value JVB_ADVERTISE_IPS "$public_host" "$ENV_TARGET"
         elif [ -n "$inferred_ip" ]; then
             set_env_value JVB_ADVERTISE_IPS "$inferred_ip" "$ENV_TARGET"
         fi
+    fi
+}
+
+set_project_env_defaults() {
+    local public_url public_host postgres_user postgres_password postgres_db ingest_port
+    local rclone_remote object_bucket
+
+    set_project_default TZ UTC
+    set_project_default HTTPS_PORT 8443
+    set_project_default HTTP_PORT 8088
+    set_project_default ENABLE_HTTP_REDIRECT 1
+    set_project_default JITSI_IMAGE_VERSION stable-10741
+    set_project_default DEPLOYMENT_IMAGE_TAG vm
+
+    set_project_default ENABLE_AUTH 1
+    set_project_default ENABLE_GUESTS 1
+    set_project_default AUTH_TYPE jwt
+    set_project_default JWT_APP_ID meeting_portal_app
+    set_project_default JWT_ACCEPTED_ISSUERS meeting_portal_app
+    set_project_default JWT_ACCEPTED_AUDIENCES jitsi
+    set_project_default JWT_ALLOW_EMPTY 0
+    set_project_default TOKEN_AUTH_URL '/?auth=login'
+    set_project_default JICOFO_ENABLE_AUTH 0
+    set_project_default WAIT_FOR_HOST_DISABLE_AUTO_OWNERS 1
+
+    set_project_default XMPP_DOMAIN meet.jitsi
+    set_project_default XMPP_SERVER prosody
+    set_project_default XMPP_BOSH_URL_BASE http://prosody:5280
+    set_project_default XMPP_AUTH_DOMAIN auth.meet.jitsi
+    set_project_default XMPP_GUEST_DOMAIN guest.meet.jitsi
+    set_project_default XMPP_MUC_DOMAIN muc.meet.jitsi
+    set_project_default XMPP_INTERNAL_MUC_DOMAIN internal-muc.meet.jitsi
+    set_project_default XMPP_HIDDEN_DOMAIN hidden.meet.jitsi
+
+    set_project_default ENABLE_TRANSCRIPTIONS 1
+    set_project_default ENABLE_P2P 0
+    set_project_default JIGASI_DISABLE_SIP 1
+    set_project_default JIGASI_TRANSCRIBER_ENABLE_SAVING 1
+    set_project_default JIGASI_TRANSCRIBER_RECORD_AUDIO true
+    set_project_default JIGASI_TRANSCRIBER_FILTER_SILENCE 0
+    set_project_default JIGASI_TRANSCRIBER_CUSTOM_SERVICE org.jitsi.jigasi.transcription.VoskTranscriptionService
+    set_project_default JIGASI_TRANSCRIBER_VOSK_URL ws://vosk:2700
+
+    set_project_default MEETING_PORTAL_HTTPS_ONLY true
+    set_project_default MEETING_PORTAL_TOKEN_TTL_SECONDS 3600
+    set_project_default MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS 10
+    set_project_default MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED true
+    set_project_default JITSI_TRANSCRIPT_POLL_SECONDS 5
+    set_project_default JITSI_TRANSCRIPT_SETTLE_SECONDS 3
+    set_project_default JITSI_TRANSCRIPT_UPLOAD_TIMEOUT 120
+    set_project_default ENABLE_LETSENCRYPT 0
+
+    public_url="$(strip_wrapping_quotes "$(read_env_value PUBLIC_URL "$ENV_TARGET")")"
+    public_host="$(extract_url_host "$public_url")"
+    postgres_user="$(get_env_source_value POSTGRES_USER)"
+    postgres_user="${postgres_user:-proj07_user}"
+    postgres_password="$(get_env_source_value POSTGRES_PASSWORD)"
+    postgres_db="$(get_env_source_value POSTGRES_DB)"
+    postgres_db="${postgres_db:-proj07_sql_db}"
+    ingest_port="$(get_env_source_value INGEST_PORT)"
+    ingest_port="${ingest_port:-9099}"
+    rclone_remote="$(get_env_source_value RCLONE_REMOTE)"
+    rclone_remote="${rclone_remote:-rclone_s3}"
+    object_bucket="$(default_object_bucket)"
+
+    set_project_default MEETING_PORTAL_RCLONE_REMOTE "$rclone_remote"
+    set_project_default MEETING_PORTAL_RCLONE_BUCKET "$object_bucket"
+
+    if [ -n "$public_host" ] && [ -n "$postgres_password" ]; then
+        set_project_default MEETING_PORTAL_DATABASE_URL "postgresql://${postgres_user}:${postgres_password}@${public_host}:5432/${postgres_db}"
+        set_project_default JITSI_TRANSCRIPT_INGEST_URL "http://${public_host}:${ingest_port}/ingest/jitsi-transcript"
     fi
 }
 
@@ -737,10 +867,9 @@ prepare_env() {
     merge_env_file "$ENV_SOURCE" "$ENV_TARGET"
 
     set_env_value CONFIG "$CONFIG_ROOT" "$ENV_TARGET"
-    if [ -z "$(strip_wrapping_quotes "$(read_env_value JIGASI_DISABLE_SIP "$ENV_TARGET")")" ]; then
-        set_env_value JIGASI_DISABLE_SIP 1 "$ENV_TARGET"
-    fi
+    set_project_env_defaults
     set_inferred_network_values
+    set_project_env_defaults
     set_vosk_paths
 
     generate_if_needed MEETING_PORTAL_SESSION_SECRET "$ENV_TARGET"

@@ -47,7 +47,7 @@ python -m proj07_services.pipeline.generate_synthetic_stage1_inputs \
   --seed "${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}" \
   --upload-artifacts \
   --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
-  --bucket "${OBJECT_BUCKET:-objstore-proj07}"
+  --bucket "${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}"
 ```
 
 Force one retraining dataset cycle:
@@ -70,6 +70,6 @@ Restore stored dataset lineage:
 cd data/proj07-runtime
 python -m proj07_services.retraining.restore_dataset_lineage \
   --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
-  --bucket "${OBJECT_BUCKET:-objstore-proj07}" \
+  --bucket "${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}" \
   --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/retraining_dataset_lineage_restore.log"
 ```

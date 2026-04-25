@@ -45,7 +45,7 @@ services:
   #
   # It lives in /mnt/block/jitsi/ and uses the meet.jitsi Docker network.
   # It connects to this ML stack via FLOATING_IP:
-  #   - transcript-uploader  → http://FLOATING_IP:9000/ingest/jitsi-transcript
+  #   - transcript-uploader  → http://FLOATING_IP:9099/ingest/jitsi-transcript
   #   - meeting-portal-app   → postgresql://FLOATING_IP:5432/proj07_sql_db
   #
   # Set DEPLOY_JITSI=true in setup.sh to auto-install it.
@@ -201,7 +201,7 @@ services:
       JITSI_STAGE1_OBJECT_PREFIX: ${JITSI_STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     ports:
       - "${INGEST_PORT:-9099}:9000"
     volumes:
@@ -278,7 +278,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.stage1_payload_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
@@ -314,7 +314,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.stage1_forward_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
@@ -351,7 +351,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.stage2_input_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
@@ -392,7 +392,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.stage2_forward_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage2:/mnt/block/user-behaviour/inference_requests/stage2
@@ -423,7 +423,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.user_summary_materialize_service"]
     volumes:
       - /mnt/block/user-behaviour/user_summary_edits:/mnt/block/user-behaviour/user_summary_edits
@@ -464,7 +464,7 @@ services:
       RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT: ${RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT:-10}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.retraining_dataset_service"]
     volumes:
       - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
@@ -534,7 +534,7 @@ services:
       RAY_DEDUP_LOGS: "0"
       MODEL_VERSION: roberta-base-v0
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
       MODEL_ALIAS: production
       MODEL_RELOAD_INTERVAL_SECONDS: "300"
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
@@ -589,12 +589,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
       AWS_ENDPOINT_URL: http://minio:9000
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      OBJSTORE_BUCKET: ${OBJECT_BUCKET:-${OBJSTORE_BUCKET:-objstore-proj07}}
       MODEL_NAME: jitsi-topic-segmenter
       TOKENIZERS_PARALLELISM: "false"
       DATASET_VERSION: "2"
@@ -661,7 +661,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480

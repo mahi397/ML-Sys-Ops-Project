@@ -139,7 +139,9 @@ ML-Sys-Ops-Project/
 git clone https://github.com/mahi397/ML-Sys-Ops-Project.git
 cd ML-Sys-Ops-Project
 cp .env.example .env
-# Edit .env: set FLOATING_IP, POSTGRES_PASSWORD, MINIO_PASSWORD, BUCKET_NAME
+# Edit .env: set FLOATING_IP, POSTGRES_PASSWORD,
+# and for full mode also MINIO_PASSWORD / GRAFANA_PASSWORD.
+# If MLflow is on another host, set MLFLOW_TRACKING_URI too.
 nano .env
 ```
 
@@ -150,6 +152,10 @@ SETUP_MODE=data-jitsi
 STAGE1_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/segment
 STAGE2_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/summarize
 ```
+
+You do not need to hand-build `DATABASE_URL`, `MEETING_PORTAL_DATABASE_URL`, or
+`JITSI_TRANSCRIPT_INGEST_URL` in the root `.env`. The setup/installer scripts
+derive those from `FLOATING_IP`, `POSTGRES_*`, and `INGEST_PORT`.
 
 ### 2. Bootstrap
 
@@ -198,19 +204,25 @@ docker compose ps
 
 ## Environment Variables
 
-See [`.env.example`](.env.example) for the full list. Key variables:
+The root [`.env.example`](.env.example) is intentionally short. Most worker
+settings, Jitsi auth defaults, meeting-portal DB wiring, and generated secrets
+are now derived by `setup.sh` and `install-jitsi-vm.sh`. The main values you
+typically edit are:
 
 | Variable | Description |
 |----------|-------------|
-| `FLOATING_IP` | Public IP of the Chameleon node |
-| `POSTGRES_PASSWORD` | Postgres password |
-| `POSTGRES_DATA_DIR` | Existing Postgres block-storage directory, default `/mnt/block/postgres-data` |
-| `MINIO_PASSWORD` | MinIO root password |
+| `FLOATING_IP` | Public IP of the data/Jitsi VM, or the single full-stack VM |
+| `POSTGRES_PASSWORD` | Shared Postgres password for the runtime DB and meeting portal |
+| `OBJECT_BUCKET` | Main object-storage bucket used by the data pipeline |
+| `MLFLOW_TRACKING_URI` | Optional MLflow server URI when it lives on a different host than this VM |
+| `MINIO_PASSWORD` | MinIO root password for full mode |
 | `AWS_ACCESS_KEY_ID` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
 | `AWS_SECRET_ACCESS_KEY` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
-| `BUCKET_NAME` | MLflow artifact bucket (default: `proj07-mlflow-artifacts`) |
+| `BUCKET_NAME` | MLflow artifact bucket; this can differ from `OBJECT_BUCKET` |
+| `STAGE1_FORWARD_URL` | Stage 1 serving endpoint; set this to the serving VM in `data-jitsi` mode |
+| `STAGE2_FORWARD_URL` | Stage 2 serving endpoint; set this to the serving VM in `data-jitsi` mode |
 | `RETRAIN_THRESHOLD` | Feedback events to trigger retraining (default: `5` for demo) |
-| `GRAFANA_PASSWORD` |admin  |
+| `GRAFANA_PASSWORD` | Grafana admin password in full mode |
 
 ## Manual Operations
 

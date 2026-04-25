@@ -14,7 +14,13 @@ Or run the installer directly:
 sudo bash jitsi-deployment/install-jitsi-vm.sh --env-file .env
 ```
 
-The installer downloads the upstream `docker-jitsi-meet` release into `/mnt/block/jitsi`, merges the root `.env` into the runtime Jitsi `.env`, generates missing secrets, and writes generated values such as `JWT_APP_SECRET`, `MEETING_PORTAL_SESSION_SECRET`, `INGEST_TOKEN`, and `JITSI_HOST_EXTERNAL_KEY` back to the root `.env` when possible.
+The installer downloads the upstream `docker-jitsi-meet` release into
+`/mnt/block/jitsi`, merges the root `.env` into the runtime Jitsi `.env`,
+derives the meeting-portal DB DSN and transcript ingest URL from the shared
+Postgres/data host settings when needed, generates missing secrets, and writes
+generated values such as `JWT_APP_SECRET`, `MEETING_PORTAL_SESSION_SECRET`,
+`INGEST_TOKEN`, and `JITSI_HOST_EXTERNAL_KEY` back to the root `.env` when
+possible.
 
 The installer still uses upstream Jitsi compose files internally because that is how the Jitsi project is packaged. Project services remain controlled from the root `docker-compose.yml`; Jitsi deployment configuration remains controlled from the root `.env`.
 

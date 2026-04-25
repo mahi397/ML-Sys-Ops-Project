@@ -25,7 +25,7 @@ ENV_POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR-}"
 REPO_DIR="${REPO_DIR:-${HOME}/ML-Sys-Ops-Project}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
-OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
+OBJECT_BUCKET="${OBJECT_BUCKET:-${BUCKET:-${OBJSTORE_BUCKET:-objstore-proj07}}}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
 FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
 DEPLOY_JITSI="${DEPLOY_JITSI:-false}"
@@ -216,6 +216,10 @@ else
 fi
 
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
+OBJECT_BUCKET="${OBJECT_BUCKET:-${BUCKET:-${OBJSTORE_BUCKET:-objstore-proj07}}}"
+BUCKET="${BUCKET:-${OBJECT_BUCKET}}"
+OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-${OBJECT_BUCKET}}"
+export OBJECT_BUCKET BUCKET OBJSTORE_BUCKET
 
 [[ -n "${ENV_SETUP_MODE}" ]] && SETUP_MODE="${ENV_SETUP_MODE}"
 [[ -n "${ENV_DOWNLOAD_ML_MODELS}" ]] && DOWNLOAD_ML_MODELS="${ENV_DOWNLOAD_ML_MODELS}"
@@ -353,15 +357,15 @@ if [[ ! -f "${HOME}/.config/rclone/rclone.conf" ]]; then
     record_step_failure "rclone config missing" 1
 else
     populate_aws_credentials_from_rclone
-    info "Verifying ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ ..."
-    if rclone lsd "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/" >/dev/null 2>&1; then
+    info "Verifying ${RCLONE_REMOTE}:${OBJECT_BUCKET}/ ..."
+    if rclone lsd "${RCLONE_REMOTE}:${OBJECT_BUCKET}/" >/dev/null 2>&1; then
         RCLONE_READY=1
         ok "rclone remote OK"
     else
-        err "Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — setup will skip object-store staging"
+        err "Cannot access ${RCLONE_REMOTE}:${OBJECT_BUCKET}/ — setup will skip object-store staging"
         info "Available rclone remotes:"
         rclone listremotes 2>/dev/null || true
-        info "Check RCLONE_REMOTE, OBJSTORE_BUCKET, and ~/.config/rclone/rclone.conf"
+        info "Check RCLONE_REMOTE, OBJECT_BUCKET, and ~/.config/rclone/rclone.conf"
         record_step_failure "rclone object-store access check" 1
     fi
 fi
@@ -405,7 +409,7 @@ else
     else
         info "Downloading roberta_stage1/${DATASET_VERSION} ..."
         if ! rclone copy \
-            "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1/${DATASET_VERSION}/" \
+            "${RCLONE_REMOTE}:${OBJECT_BUCKET}/datasets/roberta_stage1/${DATASET_VERSION}/" \
             "${DATASET_LOCAL}/" --progress; then
             record_step_failure "download roberta_stage1/${DATASET_VERSION}" 1
         fi
@@ -416,7 +420,7 @@ else
     else
         info "Downloading roberta_stage1_feedback_pool/${FEEDBACK_VERSION} ..."
         if ! rclone copy \
-            "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/" \
+            "${RCLONE_REMOTE}:${OBJECT_BUCKET}/datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/" \
             "${FEEDBACK_LOCAL}/" --progress; then
             record_step_failure "download roberta_stage1_feedback_pool/${FEEDBACK_VERSION}" 1
         fi
@@ -715,7 +719,7 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     _set_kv PUBLIC_URL                              "https://${_IP}:${_HP}"                                          "${GLOBAL_ENV}"
     _set_kv TZ                                      "${TZ:-UTC}"                                                     "${GLOBAL_ENV}"
     _set_kv HTTPS_PORT                              "${_HP}"                                                          "${GLOBAL_ENV}"
-    _set_kv HTTP_PORT                               "${HTTP_PORT:-8000}"                                              "${GLOBAL_ENV}"
+    _set_kv HTTP_PORT                               "${HTTP_PORT:-8088}"                                              "${GLOBAL_ENV}"
     _set_kv ENABLE_HTTP_REDIRECT                    "${ENABLE_HTTP_REDIRECT:-1}"                                      "${GLOBAL_ENV}"
     _set_kv JVB_ADVERTISE_IPS                       "${_IP}"                                                          "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_DATABASE_URL             "${MEETING_PORTAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}}" "${GLOBAL_ENV}"
@@ -727,7 +731,7 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     _set_kv MEETING_PORTAL_HTTPS_ONLY               "${MEETING_PORTAL_HTTPS_ONLY:-true}"                              "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_TOKEN_TTL_SECONDS        "${MEETING_PORTAL_TOKEN_TTL_SECONDS:-3600}"                       "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_RCLONE_REMOTE            "${MEETING_PORTAL_RCLONE_REMOTE:-${RCLONE_REMOTE:-rclone_s3}}"   "${GLOBAL_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_BUCKET            "${MEETING_PORTAL_RCLONE_BUCKET:-${BUCKET:-objstore-proj07}}"    "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_RCLONE_BUCKET            "${MEETING_PORTAL_RCLONE_BUCKET:-${OBJECT_BUCKET:-objstore-proj07}}" "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS   "${MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS:-10}"                    "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED "${MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED:-true}"   "${GLOBAL_ENV}"
     _set_kv JIGASI_DISABLE_SIP                      "${JIGASI_DISABLE_SIP:-1}"                                        "${GLOBAL_ENV}"
@@ -757,8 +761,9 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     fi
 else
     info "Skipping Jitsi deployment (set DEPLOY_JITSI=true to include)"
-    echo "  When ready, root .env must have PUBLIC_URL, MEETING_PORTAL_DATABASE_URL,"
-    echo "  JITSI_TRANSCRIPT_INGEST_URL set, then: DEPLOY_JITSI=true bash setup.sh"
+    echo "  Root .env can stay minimal. setup.sh + the installer will derive the"
+    echo "  Jitsi URLs, fill project defaults, and generate secrets as needed."
+    echo "  When ready, run: DEPLOY_JITSI=true bash setup.sh"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

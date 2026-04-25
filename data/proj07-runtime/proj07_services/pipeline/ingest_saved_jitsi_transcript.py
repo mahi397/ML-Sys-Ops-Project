@@ -158,6 +158,13 @@ def require_env(name: str) -> str:
     return value
 
 
+def require_object_bucket() -> str:
+    bucket = os.getenv("OBJECT_BUCKET", "").strip() or os.getenv("BUCKET", "").strip()
+    if not bucket:
+        raise RuntimeError("Missing required environment variable: OBJECT_BUCKET or BUCKET")
+    return bucket
+
+
 def get_db_conn():
     if project_get_conn is not None:
         return project_get_conn()
@@ -189,7 +196,7 @@ def upload_artifact(local_path: Path, object_key: str, logger: logging.Logger) -
         return
 
     remote = require_env("RCLONE_REMOTE")
-    bucket = require_env("BUCKET")
+    bucket = require_object_bucket()
     cmd = ["rclone", "copyto", str(local_path), f"{remote}:{bucket}/{object_key}", "-P"]
 
     logger.info("START | upload file %s", local_path.name)
@@ -1197,7 +1204,7 @@ def main() -> None:
     write_json(parsed_path, payload)
 
     require_env("RCLONE_REMOTE")
-    require_env("BUCKET")
+    require_object_bucket()
 
     upload_artifact(transcript_path, raw_object_key, logger)
     upload_artifact(parsed_path, parsed_object_key, logger)
