@@ -271,7 +271,15 @@ function load_runtime_env() {
   POSTGRES_USER="${POSTGRES_USER:-proj07_user}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-proj07}"
   POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-  POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-${BLOCK_ROOT}/postgres_data}"
+  if [[ -z "${POSTGRES_DATA_DIR:-}" ]]; then
+    if [[ -e "${BLOCK_ROOT}/postgres-data" ]]; then
+      POSTGRES_DATA_DIR="${BLOCK_ROOT}/postgres-data"
+    elif [[ -e "${BLOCK_ROOT}/postgres_data" ]]; then
+      POSTGRES_DATA_DIR="${BLOCK_ROOT}/postgres_data"
+    else
+      POSTGRES_DATA_DIR="${BLOCK_ROOT}/postgres-data"
+    fi
+  fi
   ADMINER_PORT="${ADMINER_PORT:-5050}"
   RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
   OBJECT_BUCKET="${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}"
@@ -622,7 +630,7 @@ chmod +x "${DATA_DIR}/setup.sh"
 
 banner "Preparing block-storage layout"
 mkdir -p \
-  "${BLOCK_ROOT}/postgres_data" \
+  "${POSTGRES_DATA_DIR}" \
   "${BLOCK_ROOT}/ingest_logs" \
   "${BLOCK_ROOT}/ingest_logs/retraining_dataset_service" \
   "${BLOCK_ROOT}/staging/current_job/raw" \

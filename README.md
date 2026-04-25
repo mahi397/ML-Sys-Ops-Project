@@ -204,6 +204,7 @@ See [`.env.example`](.env.example) for the full list. Key variables:
 |----------|-------------|
 | `FLOATING_IP` | Public IP of the Chameleon node |
 | `POSTGRES_PASSWORD` | Postgres password |
+| `POSTGRES_DATA_DIR` | Existing Postgres block-storage directory, default `/mnt/block/postgres-data` |
 | `MINIO_PASSWORD` | MinIO root password |
 | `AWS_ACCESS_KEY_ID` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
 | `AWS_SECRET_ACCESS_KEY` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |

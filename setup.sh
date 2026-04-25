@@ -20,6 +20,7 @@ ENV_START_SERVING_SERVICES="${START_SERVING_SERVICES-}"
 ENV_START_TRAINING_SERVICES="${START_TRAINING_SERVICES-}"
 ENV_START_MONITORING_SERVICES="${START_MONITORING_SERVICES-}"
 ENV_DEPLOY_JITSI="${DEPLOY_JITSI-}"
+ENV_POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR-}"
 
 REPO_DIR="${REPO_DIR:-${HOME}/ML-Sys-Ops-Project}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
@@ -224,6 +225,18 @@ RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
 [[ -n "${ENV_START_TRAINING_SERVICES}" ]] && START_TRAINING_SERVICES="${ENV_START_TRAINING_SERVICES}"
 [[ -n "${ENV_START_MONITORING_SERVICES}" ]] && START_MONITORING_SERVICES="${ENV_START_MONITORING_SERVICES}"
 [[ -n "${ENV_DEPLOY_JITSI}" ]] && DEPLOY_JITSI="${ENV_DEPLOY_JITSI}"
+[[ -n "${ENV_POSTGRES_DATA_DIR}" ]] && POSTGRES_DATA_DIR="${ENV_POSTGRES_DATA_DIR}"
+
+if [[ -z "${POSTGRES_DATA_DIR:-}" ]]; then
+    if [[ -e "${BLOCK_ROOT}/postgres-data" ]]; then
+        POSTGRES_DATA_DIR="${BLOCK_ROOT}/postgres-data"
+    elif [[ -e "${BLOCK_ROOT}/postgres_data" ]]; then
+        POSTGRES_DATA_DIR="${BLOCK_ROOT}/postgres_data"
+    else
+        POSTGRES_DATA_DIR="${BLOCK_ROOT}/postgres-data"
+    fi
+fi
+export POSTGRES_DATA_DIR
 
 SETUP_MODE="${SETUP_MODE:-full}"
 case "${SETUP_MODE,,}" in
@@ -266,6 +279,7 @@ fi
 
 ok "Setup mode: ${SETUP_MODE}"
 info "Service groups: data=${START_DATA_SERVICES} serving=${START_SERVING_SERVICES} training=${START_TRAINING_SERVICES} monitoring=${START_MONITORING_SERVICES} mlflow=${START_MLFLOW_SERVICES}"
+info "Postgres data dir: ${POSTGRES_DATA_DIR}"
 
 if is_truthy "${START_DATA_SERVICES}" && ! is_truthy "${START_SERVING_SERVICES}"; then
     if [[ "${STAGE1_FORWARD_URL:-http://serving-api:8000/segment}" == *"serving-api"* || "${STAGE2_FORWARD_URL:-http://serving-api:8000/summarize}" == *"serving-api"* ]]; then
@@ -355,7 +369,7 @@ fi
 # ── 4. Block storage layout ───────────────────────────────────────────────────
 echo -e "\n${YELLOW}[4/10] Block storage layout...${NC}"
 sudo mkdir -p \
-    "${BLOCK_ROOT}/postgres_data" \
+    "${POSTGRES_DATA_DIR}" \
     "${BLOCK_ROOT}/minio_data" \
     "${BLOCK_ROOT}/ray-checkpoints" \
     "${BLOCK_ROOT}/jitsi" \
@@ -374,7 +388,7 @@ sudo mkdir -p \
     "${BLOCK_ROOT}/user-behaviour/reconstructed_segments" \
     "${BLOCK_ROOT}/user-behaviour/user_summary_edits"
 sudo chown -R "${USER}:${USER}" "${BLOCK_ROOT}"
-# postgres_data ownership is fixed in step 7 (after stop, before start)
+# Postgres data dir ownership is fixed in step 7 (after stop, before start)
 ok "Block storage ready at ${BLOCK_ROOT}"
 
 # ── 5. Stage training datasets ────────────────────────────────────────────────
@@ -471,7 +485,7 @@ echo -e "\n${YELLOW}[7/10] Postgres + schema migrations...${NC}"
 cd "${REPO_DIR}"
 # Stop postgres first so it isn't running when we fix data dir ownership
 docker compose stop postgres 2>/dev/null || true
-sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
+sudo chown -R 999:999 "${POSTGRES_DATA_DIR}"
 if docker compose up -d --remove-orphans postgres; then
     info "Waiting for postgres SQL service to be ready..."
     if wait_for_postgres_sql "postgres" 90; then
@@ -754,30 +768,51 @@ echo -e "\n${GREEN}════════════════════�
 echo -e "${GREEN}  Setup complete!${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "  Ray Serve API:   http://${IP}:8000/health"
-echo "  Ray Dashboard:   http://${IP}:8265  (serving only — training uses standalone Ray)"
-echo "  MLflow:          http://${IP}:5000"
-echo "  MinIO:           http://${IP}:9001"
-echo "  Grafana:         http://${IP}:3000  (admin / ${GRAFANA_PASSWORD:-admin})"
-echo "  Prometheus:      http://${IP}:9090"
-echo "  AlertManager:    http://${IP}:9093"
+echo "  Setup mode:      ${SETUP_MODE}"
 echo "  Adminer:         http://${IP}:${ADMINER_PORT:-5050}"
 echo "  Ingest endpoint: http://${IP}:${INGEST_PORT:-9099}/ingest/jitsi-transcript"
+if [[ "${DEPLOY_JITSI}" == "true" ]]; then
+    echo "  Jitsi web:       https://${IP}:${HTTPS_PORT:-${JITSI_PORT:-8443}}"
+fi
+if is_truthy "${START_SERVING_SERVICES}"; then
+    echo "  Ray Serve API:   http://${IP}:8000/health"
+    echo "  Ray Dashboard:   http://${IP}:8265  (serving only — training uses standalone Ray)"
+else
+    echo "  Stage 1 forward: ${STAGE1_FORWARD_URL:-http://serving-api:8000/segment}"
+    echo "  Stage 2 forward: ${STAGE2_FORWARD_URL:-http://serving-api:8000/summarize}"
+fi
+if is_truthy "${START_MLFLOW_SERVICES}"; then
+    echo "  MLflow:          http://${IP}:5000"
+    echo "  MinIO:           http://${IP}:9001"
+fi
+if is_truthy "${START_MONITORING_SERVICES}"; then
+    echo "  Grafana:         http://${IP}:3000  (admin / ${GRAFANA_PASSWORD:-admin})"
+    echo "  Prometheus:      http://${IP}:9090"
+    echo "  AlertManager:    http://${IP}:9093"
+fi
 echo ""
-echo "  Registered models:"
-echo "    @production -> Optuna best (test_pk=0.213)"
-echo "    @fallback   -> distilroberta full finetune (test_pk=0.286)"
-echo ""
-echo "  Training datasets in use:"
-echo "    roberta_stage1/${DATASET_VERSION}"
-echo "    roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
-echo ""
-echo "  To trigger a retrain manually:"
-echo "    docker compose exec retrain-watcher python /app/retrain.py"
-echo ""
-echo "  To deploy Jitsi:"
-echo "    Fill in root .env, then: DEPLOY_JITSI=true bash setup.sh"
-echo ""
+if is_truthy "${START_MLFLOW_SERVICES}"; then
+    echo "  Registered models:"
+    echo "    @production -> Optuna best (test_pk=0.213)"
+    echo "    @fallback   -> distilroberta full finetune (test_pk=0.286)"
+    echo ""
+fi
+if is_truthy "${START_DATA_SERVICES}"; then
+    echo "  Training datasets in use:"
+    echo "    roberta_stage1/${DATASET_VERSION}"
+    echo "    roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
+    echo ""
+fi
+if is_truthy "${START_TRAINING_SERVICES}"; then
+    echo "  To trigger a retrain manually:"
+    echo "    docker compose exec retrain-watcher python /app/retrain.py"
+    echo ""
+fi
+if [[ "${DEPLOY_JITSI}" != "true" ]]; then
+    echo "  To deploy Jitsi:"
+    echo "    Fill in root .env, then: DEPLOY_JITSI=true bash setup.sh"
+    echo ""
+fi
 if [[ ${#SETUP_FAILED_STEPS[@]} -gt 0 ]]; then
     echo "  Setup completed with skipped/failed step(s):"
     for failed_step in "${SETUP_FAILED_STEPS[@]}"; do
@@ -785,5 +820,12 @@ if [[ ${#SETUP_FAILED_STEPS[@]} -gt 0 ]]; then
     done
     echo ""
 fi
-echo "  Running services:"
-docker compose ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || docker compose ps
+echo "  Selected services:"
+SUMMARY_SERVICES=(postgres)
+if is_truthy "${START_MLFLOW_SERVICES}"; then
+    SUMMARY_SERVICES+=(minio minio-create-buckets mlflow)
+fi
+if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
+    SUMMARY_SERVICES+=("${SELECTED_SERVICES[@]}")
+fi
+docker compose ps "${SUMMARY_SERVICES[@]}" --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || docker compose ps "${SUMMARY_SERVICES[@]}"
