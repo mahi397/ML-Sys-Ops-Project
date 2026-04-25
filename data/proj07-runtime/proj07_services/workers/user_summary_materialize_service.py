@@ -612,17 +612,32 @@ class UserSummaryMaterializeService:
     ) -> list[dict[str, Any]]:
         after_payload = event_row.get("after_payload") or {}
         segment_ref = after_payload.get("segment") or {}
+        segment_summary_id = event_row.get("segment_summary_id")
+        start_index: int | None = None
+        end_index: int | None = None
         try:
             start_index = int(segment_ref.get("start_utterance_index"))
             end_index = int(segment_ref.get("end_utterance_index"))
         except (TypeError, ValueError):
-            return segments
+            pass
 
         for segment in segments:
-            if (
-                int(segment["start_utterance_index"]) == start_index
+            matches_range = (
+                start_index is not None
+                and end_index is not None
+                and int(segment["start_utterance_index"]) == start_index
                 and int(segment["end_utterance_index"]) == end_index
-            ):
+            )
+            try:
+                matches_segment_id = (
+                    segment_summary_id is not None
+                    and segment.get("segment_summary_id") is not None
+                    and int(segment["segment_summary_id"]) == int(segment_summary_id)
+                )
+            except (TypeError, ValueError):
+                matches_segment_id = False
+
+            if matches_range or matches_segment_id:
                 if field_name == "topic_label":
                     segment["topic_label"] = str(after_payload.get("topic_label") or "").strip()
                 elif field_name == "summary_bullets":

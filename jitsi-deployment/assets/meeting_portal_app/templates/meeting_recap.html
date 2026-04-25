@@ -512,15 +512,15 @@
     firstPart.summary_bullets = [...(segment.summary_bullets || [])];
     firstPart.summary = firstPart.summary_bullets.join('. ');
     firstPart.segment_summary_id = null;
-    firstPart._topicTouched = false;
-    firstPart._summaryTouched = false;
+    firstPart._topicTouched = !!segment._topicTouched;
+    firstPart._summaryTouched = !!segment._summaryTouched;
 
     secondPart.topic_label = segment.topic_label || '';
     secondPart.summary_bullets = [...(segment.summary_bullets || [])];
     secondPart.summary = secondPart.summary_bullets.join('. ');
     secondPart.segment_summary_id = null;
-    secondPart._topicTouched = false;
-    secondPart._summaryTouched = false;
+    secondPart._topicTouched = !!segment._topicTouched;
+    secondPart._summaryTouched = !!segment._summaryTouched;
 
     const nextSegments = [...segments];
     nextSegments.splice(segmentIndex, 1, firstPart, secondPart);
@@ -546,8 +546,8 @@
       topic_label: mergeTopicLabels(current.topic_label, next.topic_label),
       summary_bullets: mergeSummaryBullets(current.summary_bullets, next.summary_bullets),
       segment_summary_id: null,
-      _topicTouched: false,
-      _summaryTouched: false
+      _topicTouched: !!current._topicTouched || !!next._topicTouched,
+      _summaryTouched: !!current._summaryTouched || !!next._summaryTouched
     };
     merged.summary = merged.summary_bullets.join('. ');
 
