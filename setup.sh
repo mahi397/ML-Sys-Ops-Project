@@ -6,17 +6,28 @@
 # Usage:
 #   bash setup.sh              # full setup (skips Jitsi by default)
 #   DEPLOY_JITSI=true bash setup.sh   # also deploys Jitsi stack
+#   SETUP_MODE=data-jitsi DEPLOY_JITSI=true bash setup.sh
+#       # data + Jitsi only; use STAGE1_FORWARD_URL/STAGE2_FORWARD_URL for remote serving
 
 set -euo pipefail
 
 # ── Config ───────────────────────────────────────────────────────────────────
+ENV_SETUP_MODE="${SETUP_MODE-}"
+ENV_DOWNLOAD_ML_MODELS="${DOWNLOAD_ML_MODELS-}"
+ENV_START_MLFLOW_SERVICES="${START_MLFLOW_SERVICES-}"
+ENV_START_DATA_SERVICES="${START_DATA_SERVICES-}"
+ENV_START_SERVING_SERVICES="${START_SERVING_SERVICES-}"
+ENV_START_TRAINING_SERVICES="${START_TRAINING_SERVICES-}"
+ENV_START_MONITORING_SERVICES="${START_MONITORING_SERVICES-}"
+ENV_DEPLOY_JITSI="${DEPLOY_JITSI-}"
+
 REPO_DIR="${REPO_DIR:-${HOME}/ML-Sys-Ops-Project}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
 OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
 FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
-DEPLOY_JITSI="${DEPLOY_JITSI:-true}"
+DEPLOY_JITSI="${DEPLOY_JITSI:-false}"
 SETUP_CONTINUE_ON_ERROR="${SETUP_CONTINUE_ON_ERROR:-true}"
 SETUP_FAILED_STEPS=()
 RCLONE_READY=0
@@ -36,6 +47,13 @@ is_truthy() {
         1|true|yes|on) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+default_var() {
+    local name="$1" value="$2"
+    if [[ -z "${!name+x}" ]]; then
+        printf -v "${name}" '%s' "${value}"
+    fi
 }
 
 record_step_failure() {
@@ -198,6 +216,63 @@ fi
 
 RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
 
+[[ -n "${ENV_SETUP_MODE}" ]] && SETUP_MODE="${ENV_SETUP_MODE}"
+[[ -n "${ENV_DOWNLOAD_ML_MODELS}" ]] && DOWNLOAD_ML_MODELS="${ENV_DOWNLOAD_ML_MODELS}"
+[[ -n "${ENV_START_MLFLOW_SERVICES}" ]] && START_MLFLOW_SERVICES="${ENV_START_MLFLOW_SERVICES}"
+[[ -n "${ENV_START_DATA_SERVICES}" ]] && START_DATA_SERVICES="${ENV_START_DATA_SERVICES}"
+[[ -n "${ENV_START_SERVING_SERVICES}" ]] && START_SERVING_SERVICES="${ENV_START_SERVING_SERVICES}"
+[[ -n "${ENV_START_TRAINING_SERVICES}" ]] && START_TRAINING_SERVICES="${ENV_START_TRAINING_SERVICES}"
+[[ -n "${ENV_START_MONITORING_SERVICES}" ]] && START_MONITORING_SERVICES="${ENV_START_MONITORING_SERVICES}"
+[[ -n "${ENV_DEPLOY_JITSI}" ]] && DEPLOY_JITSI="${ENV_DEPLOY_JITSI}"
+
+SETUP_MODE="${SETUP_MODE:-full}"
+case "${SETUP_MODE,,}" in
+    full)
+        default_var DOWNLOAD_ML_MODELS true
+        default_var START_MLFLOW_SERVICES true
+        default_var START_DATA_SERVICES true
+        default_var START_SERVING_SERVICES true
+        default_var START_TRAINING_SERVICES true
+        default_var START_MONITORING_SERVICES true
+        ;;
+    data-jitsi|data_jitsi|data-only|data_only|jitsi-data|jitsi_data)
+        default_var DOWNLOAD_ML_MODELS false
+        default_var START_MLFLOW_SERVICES false
+        default_var START_DATA_SERVICES true
+        default_var START_SERVING_SERVICES false
+        default_var START_TRAINING_SERVICES false
+        default_var START_MONITORING_SERVICES false
+        ;;
+    *)
+        err "Unsupported SETUP_MODE=${SETUP_MODE}. Use full or data-jitsi."
+        exit 1
+        ;;
+esac
+
+if is_truthy "${START_SERVING_SERVICES}" && ! is_truthy "${START_MLFLOW_SERVICES}"; then
+    info "START_SERVING_SERVICES=true requires MLflow; enabling START_MLFLOW_SERVICES"
+    START_MLFLOW_SERVICES=true
+fi
+
+if is_truthy "${START_TRAINING_SERVICES}" && ! is_truthy "${START_SERVING_SERVICES}"; then
+    info "START_TRAINING_SERVICES=true requires local serving-api; disabling training services"
+    START_TRAINING_SERVICES=false
+fi
+
+if is_truthy "${START_MONITORING_SERVICES}" && ! is_truthy "${START_SERVING_SERVICES}"; then
+    info "START_MONITORING_SERVICES=true requires local serving-api; disabling monitoring services"
+    START_MONITORING_SERVICES=false
+fi
+
+ok "Setup mode: ${SETUP_MODE}"
+info "Service groups: data=${START_DATA_SERVICES} serving=${START_SERVING_SERVICES} training=${START_TRAINING_SERVICES} monitoring=${START_MONITORING_SERVICES} mlflow=${START_MLFLOW_SERVICES}"
+
+if is_truthy "${START_DATA_SERVICES}" && ! is_truthy "${START_SERVING_SERVICES}"; then
+    if [[ "${STAGE1_FORWARD_URL:-http://serving-api:8000/segment}" == *"serving-api"* || "${STAGE2_FORWARD_URL:-http://serving-api:8000/summarize}" == *"serving-api"* ]]; then
+        info "Local serving is disabled. Set STAGE1_FORWARD_URL and STAGE2_FORWARD_URL to the remote serving VM before forwarding meetings."
+    fi
+fi
+
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
 echo -e "\n${YELLOW}[1/10] Docker...${NC}"
 if ! command -v docker &>/dev/null; then
@@ -220,25 +295,29 @@ ok "Docker Compose: $(docker compose version)"
 
 # ── 2. NVIDIA Container Toolkit ───────────────────────────────────────────────
 echo -e "\n${YELLOW}[2/10] NVIDIA Container Toolkit...${NC}"
-if ! command -v nvidia-ctk &>/dev/null && ! dpkg -s nvidia-container-toolkit &>/dev/null; then
-    info "Installing nvidia-container-toolkit..."
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
-        sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq nvidia-container-toolkit
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-    ok "NVIDIA toolkit installed"
-else
-    ok "NVIDIA toolkit already installed"
-fi
+if is_truthy "${START_SERVING_SERVICES}" || is_truthy "${START_TRAINING_SERVICES}"; then
+    if ! command -v nvidia-ctk &>/dev/null && ! dpkg -s nvidia-container-toolkit &>/dev/null; then
+        info "Installing nvidia-container-toolkit..."
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+            sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+            sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+            sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq nvidia-container-toolkit
+        sudo nvidia-ctk runtime configure --runtime=docker
+        sudo systemctl restart docker
+        ok "NVIDIA toolkit installed"
+    else
+        ok "NVIDIA toolkit already installed"
+    fi
 
-docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1 && \
-    ok "GPU accessible in Docker" || \
-    err "WARNING: GPU not accessible in Docker — serving will run CPU-only"
+    docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1 && \
+        ok "GPU accessible in Docker" || \
+        err "WARNING: GPU not accessible in Docker — serving will run CPU-only"
+else
+    info "Skipping NVIDIA toolkit check because local serving/training services are disabled"
+fi
 
 # ── 3. rclone ─────────────────────────────────────────────────────────────────
 echo -e "\n${YELLOW}[3/10] rclone...${NC}"
@@ -333,20 +412,21 @@ fi
 
 # ── 6. Download ML models ─────────────────────────────────────────────────────
 echo -e "\n${YELLOW}[6/10] ML models (RoBERTa + Mistral)...${NC}"
-MODELS_DIR="${REPO_DIR}/serving/models"
-mkdir -p "${MODELS_DIR}"
+if is_truthy "${DOWNLOAD_ML_MODELS}"; then
+    MODELS_DIR="${REPO_DIR}/serving/models"
+    mkdir -p "${MODELS_DIR}"
 
-python3 -m pip --version &>/dev/null || sudo apt-get install -y -qq python3-pip
-_pip() {
-    local sub="$1"; shift
-    python3 -m pip "$sub" "$@" 2>/dev/null || \
-    python3 -m pip "$sub" --break-system-packages "$@"
-}
+    python3 -m pip --version &>/dev/null || sudo apt-get install -y -qq python3-pip
+    _pip() {
+        local sub="$1"; shift
+        python3 -m pip "$sub" "$@" 2>/dev/null || \
+        python3 -m pip "$sub" --break-system-packages "$@"
+    }
 
-if [[ ! -d "${MODELS_DIR}/roberta-seg" || ! -f "${MODELS_DIR}/roberta-seg/config.json" ]]; then
-    info "Downloading RoBERTa base weights (~500MB)..."
-    _pip install --quiet transformers torch
-    python3 -c "
+    if [[ ! -d "${MODELS_DIR}/roberta-seg" || ! -f "${MODELS_DIR}/roberta-seg/config.json" ]]; then
+        info "Downloading RoBERTa base weights (~500MB)..."
+        _pip install --quiet transformers torch
+        python3 -c "
 from transformers import RobertaForSequenceClassification, RobertaTokenizer
 m = RobertaForSequenceClassification.from_pretrained('roberta-base', num_labels=2)
 t = RobertaTokenizer.from_pretrained('roberta-base')
@@ -354,16 +434,16 @@ m.save_pretrained('${MODELS_DIR}/roberta-seg')
 t.save_pretrained('${MODELS_DIR}/roberta-seg')
 print('RoBERTa saved')
 "
-    ok "RoBERTa saved to ${MODELS_DIR}/roberta-seg"
-else
-    ok "RoBERTa already present"
-fi
+        ok "RoBERTa saved to ${MODELS_DIR}/roberta-seg"
+    else
+        ok "RoBERTa already present"
+    fi
 
-GGUF="${MODELS_DIR}/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
-if [[ ! -f "${GGUF}" ]]; then
-    info "Downloading Mistral-7B Q4_K_M (~4.4GB) — this takes a while..."
-    _pip install --quiet huggingface-hub
-    python3 -c "
+    GGUF="${MODELS_DIR}/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+    if [[ ! -f "${GGUF}" ]]; then
+        info "Downloading Mistral-7B Q4_K_M (~4.4GB) — this takes a while..."
+        _pip install --quiet huggingface-hub
+        python3 -c "
 from huggingface_hub import hf_hub_download
 hf_hub_download(
     repo_id='TheBloke/Mistral-7B-Instruct-v0.2-GGUF',
@@ -373,13 +453,17 @@ hf_hub_download(
 )
 print('Mistral downloaded')
 "
-    ok "Mistral saved to ${GGUF}"
-else
-    ok "Mistral already present"
-fi
+        ok "Mistral saved to ${GGUF}"
+    else
+        ok "Mistral already present"
+    fi
 
-echo "Models:"
-ls -lh "${MODELS_DIR}/"
+    echo "Models:"
+    ls -lh "${MODELS_DIR}/"
+else
+    info "Skipping ML model download because DOWNLOAD_ML_MODELS=${DOWNLOAD_ML_MODELS}"
+    info "Use SETUP_MODE=full or DOWNLOAD_ML_MODELS=true on a serving VM."
+fi
 
 # ── 7. Postgres init + schema migrations ──────────────────────────────────────
 echo -e "\n${YELLOW}[7/10] Postgres + schema migrations...${NC}"
@@ -445,26 +529,30 @@ else
 fi
 
 # ── 8. MinIO + MLflow + full stack ────────────────────────────────────────────
-echo -e "\n${YELLOW}[8/10] Starting MinIO, MLflow, and full stack...${NC}"
+echo -e "\n${YELLOW}[8/10] Starting selected Docker services...${NC}"
 
 cd "${REPO_DIR}"
-if docker compose up -d --remove-orphans minio minio-create-buckets mlflow; then
-    info "Waiting for MLflow to be ready..."
-    MLFLOW_READY=0
-    for i in {1..30}; do
-        if curl -sf http://localhost:5000/health >/dev/null 2>&1; then
-            MLFLOW_READY=1
-            ok "MLflow ready"
-            break
+if is_truthy "${START_MLFLOW_SERVICES}"; then
+    if docker compose up -d --remove-orphans minio minio-create-buckets mlflow; then
+        info "Waiting for MLflow to be ready..."
+        MLFLOW_READY=0
+        for i in {1..30}; do
+            if curl -sf http://localhost:5000/health >/dev/null 2>&1; then
+                MLFLOW_READY=1
+                ok "MLflow ready"
+                break
+            fi
+            echo "  Waiting... ($((i*5))s)"
+            sleep 5
+        done
+        if [[ "${MLFLOW_READY}" -ne 1 ]]; then
+            record_step_failure "MLflow readiness" 1
         fi
-        echo "  Waiting... ($((i*5))s)"
-        sleep 5
-    done
-    if [[ "${MLFLOW_READY}" -ne 1 ]]; then
-        record_step_failure "MLflow readiness" 1
+    else
+        record_step_failure "start MinIO/MLflow services" 1
     fi
 else
-    record_step_failure "start MinIO/MLflow services" 1
+    info "Skipping MinIO/MLflow services because START_MLFLOW_SERVICES=${START_MLFLOW_SERVICES}"
 fi
 
 # Seed dataset_versions
@@ -526,12 +614,51 @@ fi
 #     echo "  Copy it there and run manually after stack is up"
 # fi
 
-# Bring up remaining services. The traffic generator remains profile-gated.
-info "Bringing up full stack..."
-if docker compose up -d --remove-orphans; then
-    ok "Full stack started"
+DATA_SERVICES=(
+    adminer
+    jitsi_transcript_receiver
+    db_task_worker
+    stage1_payload_service
+    stage1_forward_service
+    stage2_input_service
+    stage2_forward_service
+    user_summary_materialize_service
+    retraining_dataset_service
+    production_drift_monitor
+)
+SERVING_SERVICES=(serving-api)
+TRAINING_SERVICES=(retrain-watcher online-eval)
+MONITORING_SERVICES=(prometheus grafana alertmanager node-exporter)
+
+SELECTED_SERVICES=()
+if is_truthy "${START_DATA_SERVICES}"; then
+    SELECTED_SERVICES+=("${DATA_SERVICES[@]}")
+fi
+if is_truthy "${START_SERVING_SERVICES}"; then
+    SELECTED_SERVICES+=("${SERVING_SERVICES[@]}")
+fi
+if is_truthy "${START_TRAINING_SERVICES}"; then
+    SELECTED_SERVICES+=("${TRAINING_SERVICES[@]}")
+fi
+if is_truthy "${START_MONITORING_SERVICES}"; then
+    SELECTED_SERVICES+=("${MONITORING_SERVICES[@]}")
+fi
+
+# Bring up selected services. The traffic generator remains profile-gated.
+if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
+    info "Bringing up selected services: ${SELECTED_SERVICES[*]}"
+elif is_truthy "${START_MLFLOW_SERVICES}"; then
+    info "Only MinIO/MLflow services requested; skipping application service startup"
 else
-    record_step_failure "start full docker compose stack" 1
+    info "No application service groups selected"
+fi
+
+if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]] && docker compose up -d --remove-orphans "${SELECTED_SERVICES[@]}"; then
+    ok "Selected services started"
+elif [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
+    record_step_failure "start selected docker compose services" 1
+else
+    ok "Docker service startup step complete"
 fi
 
 # ── 9. Monitoring infra dirs ───────────────────────────────────────────────────
@@ -561,10 +688,8 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     # Helper: set or append KEY=VALUE in file
     _set_kv() {
         local key="$1" value="$2" file="$3"
-        if grep -q "^${key}=" "${file}" 2>/dev/null; then
-            sed -i "s|^${key}=.*|${key}=${value}|" "${file}"
-        else
-            echo "${key}=${value}" >> "${file}"
+        if ! set_env_kv "${key}" "${value}" "${file}"; then
+            record_step_failure "write ${key} to ${file}" 1
         fi
     }
 

@@ -3,7 +3,7 @@
 #
 # Usage:
 #   cp .env.example .env        # fill in secrets + floating IP
-#   docker compose up -d        # brings up runtime services
+#   docker compose up -d        # brings up platform + data/Jitsi workers
 #   docker compose logs -f      # watch logs
 #
 # Services are grouped:
@@ -15,8 +15,11 @@
 #
 # Jitsi stack is a separate compose project: bash jitsi-deployment/install-jitsi-vm.sh
 #
-# Single docker compose up brings up the entire system.
-# Profile:
+# Heavy services are profile-gated so a data/Jitsi VM does not pull CUDA images:
+#   --profile mlflow starts local MinIO + MLflow
+#   --profile serving starts local Ray Serve
+#   --profile training starts retrain/online-eval jobs
+#   --profile monitoring starts Grafana/Prometheus/Alertmanager
 #   --profile emulated-traffic starts the manual traffic generator
 ###############################################################################
 
@@ -75,6 +78,8 @@ services:
       - recap-net
 
   minio:
+    profiles:
+      - mlflow
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
     restart: unless-stopped
@@ -98,6 +103,8 @@ services:
 
   # Add after minio service — bucket creation for both MLflow and Ray
   minio-create-buckets:
+    profiles:
+      - mlflow
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
     container_name: minio-create-buckets
     depends_on:
@@ -122,6 +129,8 @@ services:
       - recap-net
 
   mlflow:
+    profiles:
+      - mlflow
     # Using v3.9.0 to match the lab setup that has historical training runs
     image: ghcr.io/mlflow/mlflow:v3.9.0
     container_name: mlflow
@@ -505,6 +514,8 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   serving-api:
+    profiles:
+      - serving
     build:
       context: ./serving/ray_serve
       dockerfile: Dockerfile.ray
@@ -559,6 +570,8 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   retrain-watcher:
+    profiles:
+      - training
     build: ./train
     container_name: retrain-watcher
     command: retrain_watcher.py
@@ -629,6 +642,8 @@ services:
   # Runs online_eval.py hourly — logs correction rate / FPR / FNR to MLflow.
   # Keeps the online-evaluation experiment current for the demo.
   online-eval:
+    profiles:
+      - training
     build: ./train
     container_name: online-eval
     entrypoint: ["/bin/bash", "-c"]
@@ -659,6 +674,8 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   prometheus:
+    profiles:
+      - monitoring
     image: prom/prometheus:v2.50.1
     container_name: jitsi-prometheus
     restart: unless-stopped
@@ -680,6 +697,8 @@ services:
       - recap-net
 
   grafana:
+    profiles:
+      - monitoring
     image: grafana/grafana:10.3.3
     container_name: jitsi-grafana
     restart: unless-stopped
@@ -700,6 +719,8 @@ services:
       - recap-net
 
   alertmanager:
+    profiles:
+      - monitoring
     image: prom/alertmanager:v0.27.0
     container_name: jitsi-alertmanager
     restart: unless-stopped
@@ -715,6 +736,8 @@ services:
       - recap-net
 
   node-exporter:
+    profiles:
+      - monitoring
     image: prom/node-exporter:v1.7.0
     container_name: jitsi-node-exporter
     restart: unless-stopped

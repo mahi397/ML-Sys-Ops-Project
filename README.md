@@ -143,6 +143,14 @@ cp .env.example .env
 nano .env
 ```
 
+For a VM that only runs data + Jitsi and forwards inference to another serving VM, set:
+
+```bash
+SETUP_MODE=data-jitsi
+STAGE1_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/segment
+STAGE2_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/summarize
+```
+
 ### 2. Bootstrap
 
 ```bash
@@ -150,9 +158,21 @@ chmod +x setup.sh
 bash setup.sh
 # For Jitsi as well:
 DEPLOY_JITSI=true bash setup.sh
+# For data + Jitsi only:
+SETUP_MODE=data-jitsi DEPLOY_JITSI=true bash setup.sh
 ```
 
-`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, RoBERTa + Mistral model downloads, Postgres schema init + migrations, MLflow startup + model registry restore, and root `docker compose up -d` for all default services. The traffic generator is the only manual profile service.
+`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator is the only manual profile service.
+
+Manual compose profiles are available when needed:
+
+```bash
+docker compose --profile mlflow up -d minio minio-create-buckets mlflow
+docker compose --profile mlflow --profile serving up -d serving-api
+docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher online-eval
+docker compose --profile serving --profile monitoring up -d prometheus grafana alertmanager node-exporter
+docker compose --profile emulated-traffic up -d traffic-generator
+```
 
 ### 3. Verify
 
