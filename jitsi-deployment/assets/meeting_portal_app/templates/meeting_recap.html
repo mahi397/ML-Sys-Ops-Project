@@ -661,7 +661,10 @@
 
       draftRecap = null;
       showToast('Edits saved. Waiting for updated summary...');
-      const refreshed = await waitForUserEditedSummary(previousUserEditedId);
+      const refreshed = await waitForUserEditedSummary(
+        previousUserEditedId,
+        !!responsePayload.updated_in_place
+      );
       if (!refreshed) {
         showToast('Edits were saved. The updated user-edited summary will appear after the worker finishes.');
       }
@@ -673,7 +676,7 @@
     }
   }
 
-  async function waitForUserEditedSummary(previousUserEditedId) {
+  async function waitForUserEditedSummary(previousUserEditedId, allowSameId = false) {
     if (pollTimer) {
       clearTimeout(pollTimer);
       pollTimer = null;
@@ -699,7 +702,11 @@
         const nextRecap = payload.recap;
         if (
           nextRecap.summary_type === 'user_edited' &&
-          (previousUserEditedId === null || Number(nextRecap.summary_id) !== Number(previousUserEditedId))
+          (
+            allowSameId ||
+            previousUserEditedId === null ||
+            Number(nextRecap.summary_id) !== Number(previousUserEditedId)
+          )
         ) {
           recapData = nextRecap;
           selectedSource = nextRecap.summary_type;

@@ -530,6 +530,30 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
             )
         )
 
+    text_only_user_summary_update = (
+        source_summary_type == "user_edited"
+        and all(
+            event_type in {"edit_topic_label", "edit_summary_bullets"}
+            for _segment_summary_id, event_type, _before_payload, _after_payload in operation_rows
+        )
+    )
+    if text_only_user_summary_update:
+        updated_count = repository.update_user_summary_text_edits(
+            meeting_id,
+            source_summary_id,
+            operation_rows,
+        )
+        if updated_count <= 0:
+            raise HTTPException(status_code=404, detail="No editable summary segments were updated")
+        return {
+            "edit_session_id": edit_session_id,
+            "source_summary_id": source_summary_id,
+            "source_summary_type": source_summary_type,
+            "operation_count": len(operation_rows),
+            "feedback_event_count": 0,
+            "updated_in_place": True,
+        }
+
     for segment_summary_id, event_type, before_payload, after_payload in operation_rows:
         repository.insert_feedback_event(
             meeting_id=meeting_id,
@@ -551,4 +575,6 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
         "source_summary_id": source_summary_id,
         "source_summary_type": source_summary_type,
         "operation_count": len(operation_rows),
+        "feedback_event_count": len(operation_rows),
+        "updated_in_place": False,
     }

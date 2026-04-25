@@ -601,6 +601,121 @@ def insert_feedback_event(
         conn.commit()
 
 
+def update_user_summary_text_edits(
+    meeting_id: str,
+    summary_id: int,
+    operations: list[tuple[int | None, str, dict[str, Any], dict[str, Any]]],
+) -> int:
+    updated_count = 0
+    with get_conn() as conn, conn.cursor() as cur:
+        for segment_summary_id, event_type, _before_payload, after_payload in operations:
+            if event_type not in {"edit_topic_label", "edit_summary_bullets"}:
+                continue
+
+            set_clauses = ["status = 'complete'", "created_at = NOW()"]
+            params: list[Any] = []
+            if event_type == "edit_topic_label":
+                set_clauses.append("topic_label = %s")
+                params.append(str(after_payload.get("topic_label") or "").strip())
+            elif event_type == "edit_summary_bullets":
+                set_clauses.append("summary_bullets = %s::jsonb")
+                params.append(json.dumps(after_payload.get("summary_bullets") or []))
+
+            if segment_summary_id is not None:
+                cur.execute(
+                    f"""
+                    UPDATE segment_summaries
+                    SET {", ".join(set_clauses)}
+                    WHERE meeting_id = %s
+                      AND summary_id = %s
+                      AND segment_summary_id = %s
+                    """,
+                    (
+                        *params,
+                        meeting_id,
+                        summary_id,
+                        segment_summary_id,
+                    ),
+                )
+                updated_count += cur.rowcount
+                if event_type == "edit_topic_label":
+                    cur.execute(
+                        """
+                        UPDATE topic_segments ts
+                        SET topic_label = %s
+                        FROM segment_summaries ss
+                        WHERE ss.topic_segment_id = ts.topic_segment_id
+                          AND ss.meeting_id = %s
+                          AND ss.summary_id = %s
+                          AND ss.segment_summary_id = %s
+                        """,
+                        (
+                            str(after_payload.get("topic_label") or "").strip(),
+                            meeting_id,
+                            summary_id,
+                            segment_summary_id,
+                        ),
+                    )
+                continue
+
+            segment_ref = after_payload.get("segment") or {}
+            try:
+                start_index = int(segment_ref.get("start_utterance_index"))
+                end_index = int(segment_ref.get("end_utterance_index"))
+            except (TypeError, ValueError):
+                continue
+
+            cur.execute(
+                f"""
+                UPDATE segment_summaries ss
+                SET {", ".join(set_clauses)}
+                FROM topic_segments ts
+                JOIN utterances u_start
+                  ON u_start.utterance_id = ts.start_utterance_id
+                JOIN utterances u_end
+                  ON u_end.utterance_id = ts.end_utterance_id
+                WHERE ss.topic_segment_id = ts.topic_segment_id
+                  AND ss.meeting_id = %s
+                  AND ss.summary_id = %s
+                  AND u_start.utterance_index = %s
+                  AND u_end.utterance_index = %s
+                """,
+                (
+                    *params,
+                    meeting_id,
+                    summary_id,
+                    start_index,
+                    end_index,
+                ),
+            )
+            updated_count += cur.rowcount
+            if event_type == "edit_topic_label":
+                cur.execute(
+                    """
+                    UPDATE topic_segments ts
+                    SET topic_label = %s
+                    FROM segment_summaries ss, utterances u_start, utterances u_end
+                    WHERE ss.topic_segment_id = ts.topic_segment_id
+                      AND u_start.utterance_id = ts.start_utterance_id
+                      AND u_end.utterance_id = ts.end_utterance_id
+                      AND ss.meeting_id = %s
+                      AND ss.summary_id = %s
+                      AND u_start.utterance_index = %s
+                      AND u_end.utterance_index = %s
+                    """,
+                    (
+                        str(after_payload.get("topic_label") or "").strip(),
+                        meeting_id,
+                        summary_id,
+                        start_index,
+                        end_index,
+                    ),
+                )
+
+        conn.commit()
+    return updated_count
+
+
 def enqueue_user_summary_materialize_task(meeting_id: str, *, edit_session_id: str | None = None) -> None:
     artifact_version = env_int("STAGE1_ARTIFACT_VERSION", 1)
     max_attempts = env_int("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS", 8)
