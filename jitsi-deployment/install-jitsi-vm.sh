@@ -828,10 +828,10 @@ run_compose() {
         docker compose "${compose_args[@]}" config >/dev/null
     )
 
-    log "Building and starting the Jitsi stack"
+    log "Building and recreating the Jitsi stack"
     (
         cd "$SOURCE_ROOT"
-        docker compose "${compose_args[@]}" up -d --build --remove-orphans
+        docker compose "${compose_args[@]}" up -d --build --remove-orphans --force-recreate
         docker compose "${compose_args[@]}" ps
     )
 }
