@@ -580,7 +580,7 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
       AWS_ENDPOINT_URL: http://minio:9000
-      RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       MODEL_NAME: jitsi-topic-segmenter
       TOKENIZERS_PARALLELISM: "false"

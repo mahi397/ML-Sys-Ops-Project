@@ -12,11 +12,14 @@ set -euo pipefail
 # ── Config ───────────────────────────────────────────────────────────────────
 REPO_DIR="${REPO_DIR:-${HOME}/ML-Sys-Ops-Project}"
 BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
-RCLONE_REMOTE="${RCLONE_REMOTE:-chi_tacc}"
+RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
 OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
 FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
 DEPLOY_JITSI="${DEPLOY_JITSI:-true}"
+SETUP_CONTINUE_ON_ERROR="${SETUP_CONTINUE_ON_ERROR:-true}"
+SETUP_FAILED_STEPS=()
+RCLONE_READY=0
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -26,6 +29,24 @@ NC='\033[0m'
 ok()   { echo -e "${GREEN}  $*${NC}"; }
 info() { echo -e "${YELLOW}  $*${NC}"; }
 err()  { echo -e "${RED}  $*${NC}"; }
+
+is_truthy() {
+    local value="${1:-}"
+    case "${value,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+record_step_failure() {
+    local label="$1" status="${2:-1}"
+    SETUP_FAILED_STEPS+=("${label} (exit ${status})")
+    err "Step failed but setup will continue: ${label} (exit ${status})"
+    if ! is_truthy "${SETUP_CONTINUE_ON_ERROR}"; then
+        err "Stopping because SETUP_CONTINUE_ON_ERROR=${SETUP_CONTINUE_ON_ERROR}"
+        exit "${status}"
+    fi
+}
 
 env_value_needs_fill() {
     local value="${1:-}"
@@ -135,7 +156,7 @@ else
     exit 1
 fi
 
-RCLONE_REMOTE="${RCLONE_REMOTE:-chi_tacc}"
+RCLONE_REMOTE="${RCLONE_REMOTE:-rclone_s3}"
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
 echo -e "\n${YELLOW}[1/10] Docker...${NC}"
@@ -191,21 +212,26 @@ fi
 
 if [[ ! -f "${HOME}/.config/rclone/rclone.conf" ]]; then
     err "rclone config not found at ~/.config/rclone/rclone.conf"
-    echo "Configure the chi_tacc remote before continuing:"
+    echo "Configure the rclone_s3 remote before continuing:"
     echo "  rclone config"
-    echo "  name: chi_tacc  type: s3  provider: Ceph"
+    echo "  name: rclone_s3  type: s3  provider: Ceph"
     echo "  endpoint: https://chi.tacc.chameleoncloud.org:7480"
     echo "  access_key_id + secret_access_key from CHI@TACC openrc"
-    exit 1
+    record_step_failure "rclone config missing" 1
+else
+    populate_aws_credentials_from_rclone
+    info "Verifying ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ ..."
+    if rclone lsd "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/" >/dev/null 2>&1; then
+        RCLONE_READY=1
+        ok "rclone remote OK"
+    else
+        err "Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — setup will skip object-store staging"
+        info "Available rclone remotes:"
+        rclone listremotes 2>/dev/null || true
+        info "Check RCLONE_REMOTE, OBJSTORE_BUCKET, and ~/.config/rclone/rclone.conf"
+        record_step_failure "rclone object-store access check" 1
+    fi
 fi
-
-info "Verifying ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ ..."
-rclone lsd "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/" >/dev/null 2>&1 || {
-    err "Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — check rclone config"
-    exit 1
-}
-ok "rclone remote OK"
-populate_aws_credentials_from_rclone
 
 # ── 4. Block storage layout ───────────────────────────────────────────────────
 echo -e "\n${YELLOW}[4/10] Block storage layout...${NC}"
@@ -238,24 +264,32 @@ echo -e "\n${YELLOW}[5/10] Staging training data from object storage...${NC}"
 DATASET_LOCAL="${BLOCK_ROOT}/roberta_stage1/${DATASET_VERSION}"
 FEEDBACK_LOCAL="${BLOCK_ROOT}/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
 
-if ls "${DATASET_LOCAL}"/*.jsonl >/dev/null 2>&1; then
-    ok "Training data already staged at ${DATASET_LOCAL}"
+if [[ "${RCLONE_READY}" -ne 1 ]]; then
+    info "Skipping training dataset download because rclone object-store access is unavailable"
 else
-    info "Downloading roberta_stage1/${DATASET_VERSION} ..."
-    rclone copy \
-        "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1/${DATASET_VERSION}/" \
-        "${DATASET_LOCAL}/" --progress
-fi
+    if ls "${DATASET_LOCAL}"/*.jsonl >/dev/null 2>&1; then
+        ok "Training data already staged at ${DATASET_LOCAL}"
+    else
+        info "Downloading roberta_stage1/${DATASET_VERSION} ..."
+        if ! rclone copy \
+            "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1/${DATASET_VERSION}/" \
+            "${DATASET_LOCAL}/" --progress; then
+            record_step_failure "download roberta_stage1/${DATASET_VERSION}" 1
+        fi
+    fi
 
-if ls "${FEEDBACK_LOCAL}"/*.jsonl >/dev/null 2>&1; then
-    ok "Feedback pool already staged at ${FEEDBACK_LOCAL}"
-else
-    info "Downloading roberta_stage1_feedback_pool/${FEEDBACK_VERSION} ..."
-    rclone copy \
-        "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/" \
-        "${FEEDBACK_LOCAL}/" --progress
+    if ls "${FEEDBACK_LOCAL}"/*.jsonl >/dev/null 2>&1; then
+        ok "Feedback pool already staged at ${FEEDBACK_LOCAL}"
+    else
+        info "Downloading roberta_stage1_feedback_pool/${FEEDBACK_VERSION} ..."
+        if ! rclone copy \
+            "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/" \
+            "${FEEDBACK_LOCAL}/" --progress; then
+            record_step_failure "download roberta_stage1_feedback_pool/${FEEDBACK_VERSION}" 1
+        fi
+    fi
+    ok "Training dataset staging checked"
 fi
-ok "Training datasets staged"
 
 # ── 6. Download ML models ─────────────────────────────────────────────────────
 echo -e "\n${YELLOW}[6/10] ML models (RoBERTa + Mistral)...${NC}"
@@ -413,7 +447,7 @@ WHERE NOT EXISTS (
 # " && ok "Model registry restored"
 # else
 #     info "restore_mlflow.py not found at ${HOME}/ — skipping registry restore"
-a#     echo "  Copy it there and run manually after stack is up"
+#     echo "  Copy it there and run manually after stack is up"
 # fi
 
 # Bring up remaining services. The traffic generator remains profile-gated.
@@ -474,7 +508,7 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     _set_kv JITSI_TRANSCRIPT_UPLOAD_TIMEOUT         "${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}"                         "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_HTTPS_ONLY               "${MEETING_PORTAL_HTTPS_ONLY:-true}"                              "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_TOKEN_TTL_SECONDS        "${MEETING_PORTAL_TOKEN_TTL_SECONDS:-3600}"                       "${GLOBAL_ENV}"
-    _set_kv MEETING_PORTAL_RCLONE_REMOTE            "${MEETING_PORTAL_RCLONE_REMOTE:-${RCLONE_REMOTE:-chi_tacc}}"    "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_RCLONE_REMOTE            "${MEETING_PORTAL_RCLONE_REMOTE:-${RCLONE_REMOTE:-rclone_s3}}"   "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_RCLONE_BUCKET            "${MEETING_PORTAL_RCLONE_BUCKET:-${BUCKET:-objstore-proj07}}"    "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS   "${MEETING_PORTAL_RCLONE_TIMEOUT_SECONDS:-10}"                    "${GLOBAL_ENV}"
     _set_kv MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED "${MEETING_PORTAL_STAGE1_RCLONE_FALLBACK_ENABLED:-true}"   "${GLOBAL_ENV}"
@@ -493,13 +527,16 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
 
     ok "Global .env populated for Jitsi"
     info "Running Jitsi installer (downloads upstream images + Vosk model ~1GB)..."
-    sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" --env-file "${GLOBAL_ENV}"
-    ok "Jitsi deployment complete"
-
-    echo ""
-    echo "  Jitsi web:    https://${_IP}:${_HP}"
-    echo "  Generated Jitsi secrets are written back to the root .env when possible:"
-    echo "    grep -E 'JWT_APP_SECRET|MEETING_PORTAL_SESSION_SECRET|JITSI_HOST_EXTERNAL_KEY' ${GLOBAL_ENV}"
+    if sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" --env-file "${GLOBAL_ENV}"; then
+        ok "Jitsi deployment complete"
+        echo ""
+        echo "  Jitsi web:    https://${_IP}:${_HP}"
+        echo "  Generated Jitsi secrets are written back to the root .env when possible:"
+        echo "    grep -E 'JWT_APP_SECRET|MEETING_PORTAL_SESSION_SECRET|JITSI_HOST_EXTERNAL_KEY' ${GLOBAL_ENV}"
+    else
+        status=$?
+        record_step_failure "Jitsi deployment" "${status}"
+    fi
 else
     info "Skipping Jitsi deployment (set DEPLOY_JITSI=true to include)"
     echo "  When ready, root .env must have PUBLIC_URL, MEETING_PORTAL_DATABASE_URL,"
@@ -537,5 +574,12 @@ echo ""
 echo "  To deploy Jitsi:"
 echo "    Fill in root .env, then: DEPLOY_JITSI=true bash setup.sh"
 echo ""
+if [[ ${#SETUP_FAILED_STEPS[@]} -gt 0 ]]; then
+    echo "  Setup completed with skipped/failed step(s):"
+    for failed_step in "${SETUP_FAILED_STEPS[@]}"; do
+        echo "    - ${failed_step}"
+    done
+    echo ""
+fi
 echo "  Running services:"
 docker compose ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || docker compose ps

@@ -130,7 +130,7 @@ ML-Sys-Ops-Project/
 ### Prerequisites
 
 - Chameleon Cloud GPU node with a floating IP and attached block volume at `/mnt/block`
-- `~/.config/rclone/rclone.conf` with a `chi_tacc` remote (CHI@TACC S3)
+- `~/.config/rclone/rclone.conf` with an `rclone_s3` remote (CHI@TACC S3)
 - AWS credentials for chi.tacc object storage (for MLflow artifacts)
 
 ### 1. Clone and configure
