@@ -67,6 +67,10 @@ record_step_failure() {
     fi
 }
 
+compose_up_fresh() {
+    docker compose up -d --build --force-recreate --remove-orphans "$@"
+}
+
 env_value_needs_fill() {
     local value="${1:-}"
     case "${value}" in
@@ -490,7 +494,7 @@ cd "${REPO_DIR}"
 # Stop postgres first so it isn't running when we fix data dir ownership
 docker compose stop postgres 2>/dev/null || true
 sudo chown -R 999:999 "${POSTGRES_DATA_DIR}"
-if docker compose up -d --remove-orphans postgres; then
+if compose_up_fresh postgres; then
     info "Waiting for postgres SQL service to be ready..."
     if wait_for_postgres_sql "postgres" 90; then
         ok "Postgres SQL ready"
@@ -551,7 +555,7 @@ echo -e "\n${YELLOW}[8/10] Starting selected Docker services...${NC}"
 
 cd "${REPO_DIR}"
 if is_truthy "${START_MLFLOW_SERVICES}"; then
-    if docker compose up -d --remove-orphans minio minio-create-buckets mlflow; then
+    if compose_up_fresh minio minio-create-buckets mlflow; then
         info "Waiting for MLflow to be ready..."
         MLFLOW_READY=0
         for i in {1..30}; do
@@ -664,14 +668,14 @@ fi
 
 # Bring up selected services. The traffic generator remains profile-gated.
 if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
-    info "Bringing up selected services: ${SELECTED_SERVICES[*]}"
+    info "Bringing up selected services with a fresh rebuild/recreate: ${SELECTED_SERVICES[*]}"
 elif is_truthy "${START_MLFLOW_SERVICES}"; then
     info "Only MinIO/MLflow services requested; skipping application service startup"
 else
     info "No application service groups selected"
 fi
 
-if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]] && docker compose up -d --remove-orphans "${SELECTED_SERVICES[@]}"; then
+if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]] && compose_up_fresh "${SELECTED_SERVICES[@]}"; then
     ok "Selected services started"
 elif [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
     record_step_failure "start selected docker compose services" 1
