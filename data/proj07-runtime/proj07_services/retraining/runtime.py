@@ -41,8 +41,8 @@ STRUCTURAL_FEEDBACK_EVENT_TYPES = (
 )
 VERSION_DIR_RE = re.compile(r"^v(\d+)$")
 MEETING_ID_RE = re.compile(r"^jitsi_(?P<ts>\d{8}T\d{6}Z)_[0-9a-f]{8}$")
-EMULATED_HOST_EMAIL_LIKE_PATTERN = "%.mock@example.com"
-EMULATED_SOURCE_NAME_LIKE_PATTERN = "synthetic-%"
+EMULATED_HOST_EMAIL_SUFFIX = ".mock@example.com"
+EMULATED_SOURCE_NAME_PREFIX = "synthetic-"
 
 
 @dataclass(frozen=True)
@@ -133,11 +133,20 @@ def quality_report_allows_publish(report: dict[str, Any], *, reference_version: 
     )
 
 
+def is_usable_reference_profile(profile: dict[str, Any] | None) -> bool:
+    if not profile:
+        return False
+    return bool(profile.get("features"))
+
+
 def production_jitsi_meeting_filter_sql(meeting_alias: str = "m") -> str:
     alias = meeting_alias.strip() or "m"
     return f"""
         {alias}.source_type = 'jitsi'
-        AND NOT LOWER(COALESCE({alias}.source_name, '')) LIKE '{EMULATED_SOURCE_NAME_LIKE_PATTERN}'
+        AND LEFT(
+            LOWER(COALESCE({alias}.source_name, '')),
+            LENGTH('{EMULATED_SOURCE_NAME_PREFIX}')
+        ) != '{EMULATED_SOURCE_NAME_PREFIX}'
         AND NOT EXISTS (
             SELECT 1
             FROM meeting_participants host_mp
@@ -145,7 +154,10 @@ def production_jitsi_meeting_filter_sql(meeting_alias: str = "m") -> str:
               ON host_user.user_id = host_mp.user_id
             WHERE host_mp.meeting_id = {alias}.meeting_id
               AND host_mp.role = 'host'
-              AND LOWER(COALESCE(host_user.email, '')) LIKE '{EMULATED_HOST_EMAIL_LIKE_PATTERN}'
+              AND RIGHT(
+                  LOWER(COALESCE(host_user.email, '')),
+                  LENGTH('{EMULATED_HOST_EMAIL_SUFFIX}')
+              ) = '{EMULATED_HOST_EMAIL_SUFFIX}'
         )
     """
 
@@ -153,7 +165,7 @@ def production_jitsi_meeting_filter_sql(meeting_alias: str = "m") -> str:
 def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
     profile_path = version_root / "profile.json"
     profile = load_reference_profile(profile_path)
-    if profile is not None:
+    if is_usable_reference_profile(profile):
         return profile
 
     split_paths = (
@@ -185,7 +197,7 @@ def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
 def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
     for version in reversed(existing_versions(root)):
         profile = load_or_build_dataset_profile(root / f"v{version}")
-        if profile is not None:
+        if is_usable_reference_profile(profile):
             return version, profile
     return None, None
 
