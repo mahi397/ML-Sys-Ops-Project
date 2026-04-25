@@ -143,6 +143,46 @@ populate_aws_credentials_from_rclone() {
     fi
 }
 
+postgres_psql() {
+    local database="$1"
+    shift
+    docker compose exec -T postgres psql -U "${POSTGRES_USER:-proj07_user}" -d "${database}" "$@"
+}
+
+postgres_query_scalar() {
+    local database="$1" query="$2"
+    postgres_psql "${database}" -qAt -c "${query}" | tr -d '[:space:]'
+}
+
+postgres_entrypoint_finished() {
+    docker compose exec -T postgres sh -c '[ "$(cat /proc/1/comm 2>/dev/null)" = "postgres" ]' >/dev/null 2>&1
+}
+
+wait_for_postgres_sql() {
+    local database="${1:-postgres}" max_attempts="${2:-90}" attempt=1
+
+    until postgres_entrypoint_finished && postgres_psql "${database}" -qAt -c "SELECT 1" >/dev/null 2>&1; do
+        if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+            return 1
+        fi
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+}
+
+apply_sql_file_with_retry() {
+    local sql_file="$1" database="${2:-${POSTGRES_DB:-proj07_sql_db}}" max_attempts="${3:-30}" attempt=1
+
+    until postgres_psql "${database}" -v ON_ERROR_STOP=1 -f - < "${sql_file}"; do
+        if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+            return 1
+        fi
+        info "  retrying $(basename "${sql_file}") after Postgres finishes startup..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+}
+
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  NeuralOps Full System — Setup Script${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
@@ -348,55 +388,87 @@ cd "${REPO_DIR}"
 # Stop postgres first so it isn't running when we fix data dir ownership
 docker compose stop postgres 2>/dev/null || true
 sudo chown -R 999:999 "${BLOCK_ROOT}/postgres_data"
-docker compose up -d --remove-orphans postgres
-info "Waiting for postgres to be healthy..."
-until docker compose exec postgres pg_isready -U "${POSTGRES_USER:-proj07_user}" -d "${POSTGRES_DB:-proj07_sql_db}" >/dev/null 2>&1; do
-    sleep 2
-done
-ok "Postgres healthy"
+if docker compose up -d --remove-orphans postgres; then
+    info "Waiting for postgres SQL service to be ready..."
+    if wait_for_postgres_sql "postgres" 90; then
+        ok "Postgres SQL ready"
+    else
+        record_step_failure "postgres SQL readiness" 1
+    fi
 
-# Create mlflowdb
-docker compose exec postgres psql -U "${POSTGRES_USER:-proj07_user}" -d postgres \
-    -c "CREATE DATABASE mlflowdb;" 2>/dev/null && \
-    ok "mlflowdb created" || ok "mlflowdb already exists"
+    if wait_for_postgres_sql "${POSTGRES_DB:-proj07_sql_db}" 90; then
+        if [[ "$(postgres_query_scalar "postgres" "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'mlflowdb');" 2>/dev/null)" == "t" ]]; then
+            ok "mlflowdb already exists"
+        elif postgres_psql "postgres" -c "CREATE DATABASE mlflowdb;"; then
+            ok "mlflowdb created"
+        else
+            record_step_failure "create mlflowdb" 1
+        fi
 
-# Run schema migrations in order
-INIT_SQL_DIR="${REPO_DIR}/data/proj07-db/init_sql"
-if [[ -d "${INIT_SQL_DIR}" ]]; then
-    info "Running schema migrations..."
-    for f in $(ls "${INIT_SQL_DIR}"/*.sql | sort); do
-        info "  $(basename "$f")..."
-        docker compose exec -T postgres psql -U "${POSTGRES_USER:-proj07_user}" \
-            -d "${POSTGRES_DB:-proj07_sql_db}" < "$f"
-    done
-    TABLE_COUNT=$(docker compose exec postgres psql -U "${POSTGRES_USER:-proj07_user}" \
-        -d "${POSTGRES_DB:-proj07_sql_db}" \
-        -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" \
-        | tr -d ' \n')
-    ok "Schema initialized: ${TABLE_COUNT} tables"
+        # Run schema migrations in order. 001 is bootstrap-only and is also
+        # mounted into docker-entrypoint-initdb.d for fresh Postgres volumes.
+        INIT_SQL_DIR="${REPO_DIR}/data/proj07-db/init_sql"
+        if [[ -d "${INIT_SQL_DIR}" ]]; then
+            mapfile -t SQL_FILES < <(find "${INIT_SQL_DIR}" -maxdepth 1 -name '*.sql' | sort)
+            if [[ "${#SQL_FILES[@]}" -eq 0 ]]; then
+                info "No SQL migrations found in ${INIT_SQL_DIR}"
+            else
+                BASE_SCHEMA_EXISTS="$(postgres_query_scalar "${POSTGRES_DB:-proj07_sql_db}" "SELECT to_regclass('public.meetings') IS NOT NULL;" 2>/dev/null || echo "f")"
+                info "Running schema migrations..."
+                for f in "${SQL_FILES[@]}"; do
+                    if [[ "${BASE_SCHEMA_EXISTS}" == "t" && "$(basename "$f")" == "001_init_postgres_schema.sql" ]]; then
+                        info "  $(basename "$f") already applied by Postgres bootstrap; skipping"
+                        continue
+                    fi
+
+                    info "  $(basename "$f")..."
+                    if ! apply_sql_file_with_retry "$f" "${POSTGRES_DB:-proj07_sql_db}" 30; then
+                        record_step_failure "apply SQL migration $(basename "$f")" 1
+                    fi
+                done
+            fi
+
+            if TABLE_COUNT=$(postgres_query_scalar "${POSTGRES_DB:-proj07_sql_db}" "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null); then
+                ok "Schema initialized: ${TABLE_COUNT} tables"
+            else
+                record_step_failure "schema table count check" 1
+            fi
+        else
+            err "SQL init dir not found: ${INIT_SQL_DIR}"
+            record_step_failure "SQL init dir missing" 1
+        fi
+    else
+        record_step_failure "application database readiness" 1
+    fi
 else
-    err "SQL init dir not found: ${INIT_SQL_DIR}"
+    record_step_failure "start postgres container" 1
 fi
 
 # ── 8. MinIO + MLflow + full stack ────────────────────────────────────────────
 echo -e "\n${YELLOW}[8/10] Starting MinIO, MLflow, and full stack...${NC}"
 
 cd "${REPO_DIR}"
-docker compose up -d --remove-orphans minio minio-create-buckets mlflow
-
-info "Waiting for MLflow to be ready..."
-for i in {1..30}; do
-    if curl -sf http://localhost:5000/health >/dev/null 2>&1; then
-        ok "MLflow ready"
-        break
+if docker compose up -d --remove-orphans minio minio-create-buckets mlflow; then
+    info "Waiting for MLflow to be ready..."
+    MLFLOW_READY=0
+    for i in {1..30}; do
+        if curl -sf http://localhost:5000/health >/dev/null 2>&1; then
+            MLFLOW_READY=1
+            ok "MLflow ready"
+            break
+        fi
+        echo "  Waiting... ($((i*5))s)"
+        sleep 5
+    done
+    if [[ "${MLFLOW_READY}" -ne 1 ]]; then
+        record_step_failure "MLflow readiness" 1
     fi
-    echo "  Waiting... ($((i*5))s)"
-    sleep 5
-done
+else
+    record_step_failure "start MinIO/MLflow services" 1
+fi
 
 # Seed dataset_versions
-docker compose exec postgres psql -U "${POSTGRES_USER:-proj07_user}" \
-    -d "${POSTGRES_DB:-proj07_sql_db}" -c "
+if postgres_psql "${POSTGRES_DB:-proj07_sql_db}" -c "
 INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
 SELECT 'roberta_stage1', 'stage1', 'ami',
        'datasets/roberta_stage1/${DATASET_VERSION}/'
@@ -409,7 +481,11 @@ SELECT 'roberta_stage1_feedback_pool', 'stage1', 'production_feedback',
 WHERE NOT EXISTS (
     SELECT 1 FROM dataset_versions WHERE dataset_name = 'roberta_stage1_feedback_pool'
 );
-" && ok "dataset_versions seeded"
+"; then
+    ok "dataset_versions seeded"
+else
+    record_step_failure "seed dataset_versions" 1
+fi
 
 # Restore MLflow model registry
 # MLFLOW_CONTAINER=$(docker ps --format '{{.Names}}' | grep mlflow | grep -v minio | head -1)
@@ -452,8 +528,11 @@ WHERE NOT EXISTS (
 
 # Bring up remaining services. The traffic generator remains profile-gated.
 info "Bringing up full stack..."
-docker compose up -d --remove-orphans
-ok "Full stack started"
+if docker compose up -d --remove-orphans; then
+    ok "Full stack started"
+else
+    record_step_failure "start full docker compose stack" 1
+fi
 
 # ── 9. Monitoring infra dirs ───────────────────────────────────────────────────
 echo -e "\n${YELLOW}[9/10] Verifying monitoring config files...${NC}"

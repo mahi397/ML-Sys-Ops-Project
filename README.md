@@ -131,7 +131,7 @@ ML-Sys-Ops-Project/
 
 - Chameleon Cloud GPU node with a floating IP and attached block volume at `/mnt/block`
 - `~/.config/rclone/rclone.conf` with an `rclone_s3` remote (CHI@TACC S3)
-- AWS credentials for chi.tacc object storage (for MLflow artifacts)
+- `setup.sh` reads object-storage credentials from that rclone remote and fills the MLflow/boto3 env vars when they are blank.
 
 ### 1. Clone and configure
 
@@ -139,8 +139,7 @@ ML-Sys-Ops-Project/
 git clone https://github.com/mahi397/ML-Sys-Ops-Project.git
 cd ML-Sys-Ops-Project
 cp .env.example .env
-# Edit .env: set FLOATING_IP, POSTGRES_PASSWORD, MINIO_PASSWORD,
-#            AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BUCKET_NAME
+# Edit .env: set FLOATING_IP, POSTGRES_PASSWORD, MINIO_PASSWORD, BUCKET_NAME
 nano .env
 ```
 
@@ -186,8 +185,8 @@ See [`.env.example`](.env.example) for the full list. Key variables:
 | `FLOATING_IP` | Public IP of the Chameleon node |
 | `POSTGRES_PASSWORD` | Postgres password |
 | `MINIO_PASSWORD` | MinIO root password |
-| `AWS_ACCESS_KEY_ID` | CHI@TACC S3 key (MLflow artifacts) |
-| `AWS_SECRET_ACCESS_KEY` | CHI@TACC S3 secret |
+| `AWS_ACCESS_KEY_ID` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
+| `AWS_SECRET_ACCESS_KEY` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
 | `BUCKET_NAME` | MLflow artifact bucket (default: `proj07-mlflow-artifacts`) |
 | `RETRAIN_THRESHOLD` | Feedback events to trigger retraining (default: `5` for demo) |
 | `GRAFANA_PASSWORD` |admin  |
