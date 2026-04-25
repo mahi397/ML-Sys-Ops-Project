@@ -30,6 +30,7 @@ The root compose starts these data services by default:
 ```bash
 docker compose --profile emulated-traffic up -d traffic-generator
 docker compose logs -f traffic-generator
+docker compose --profile emulated-traffic stop traffic-generator
 ```
 
 The archived `initial_implementation/` tree is independent reference material. The active runtime and setup flow do not depend on it.
@@ -55,6 +56,13 @@ Force one retraining dataset cycle:
 ```bash
 docker compose exec retraining_dataset_service \
   python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+Dry-run the retraining dataset worker without writing artifacts:
+
+```bash
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --dry-run
 ```
 
 Force one production drift check:

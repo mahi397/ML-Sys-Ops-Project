@@ -229,6 +229,53 @@ typically edit are:
 
 ## Manual Operations
 
+### Root Compose Services
+
+Run these from the repository root:
+
+| Service | Manual run | Logs | Stop |
+|---------|------------|------|------|
+| `postgres` | `docker compose up -d postgres` | `docker compose logs -f --since 15m postgres` | `docker compose stop postgres` |
+| `adminer` | `docker compose up -d adminer` | `docker compose logs -f --since 15m adminer` | `docker compose stop adminer` |
+| `jitsi_transcript_receiver` | `docker compose up -d jitsi_transcript_receiver` | `docker compose logs -f --since 15m jitsi_transcript_receiver` | `docker compose stop jitsi_transcript_receiver` |
+| `db_task_worker` | `docker compose up -d db_task_worker` | `docker compose logs -f --since 15m db_task_worker` | `docker compose stop db_task_worker` |
+| `stage1_payload_service` | `docker compose up -d stage1_payload_service` | `docker compose logs -f --since 15m stage1_payload_service` | `docker compose stop stage1_payload_service` |
+| `stage1_forward_service` | `docker compose up -d stage1_forward_service` | `docker compose logs -f --since 15m stage1_forward_service` | `docker compose stop stage1_forward_service` |
+| `stage2_input_service` | `docker compose up -d stage2_input_service` | `docker compose logs -f --since 15m stage2_input_service` | `docker compose stop stage2_input_service` |
+| `stage2_forward_service` | `docker compose up -d stage2_forward_service` | `docker compose logs -f --since 15m stage2_forward_service` | `docker compose stop stage2_forward_service` |
+| `user_summary_materialize_service` | `docker compose up -d user_summary_materialize_service` | `docker compose logs -f --since 15m user_summary_materialize_service` | `docker compose stop user_summary_materialize_service` |
+| `retraining_dataset_service` | `docker compose up -d retraining_dataset_service` | `docker compose logs -f --since 15m retraining_dataset_service` | `docker compose stop retraining_dataset_service` |
+| `production_drift_monitor` | `docker compose up -d production_drift_monitor` | `docker compose logs -f --since 15m production_drift_monitor` | `docker compose stop production_drift_monitor` |
+| `minio` | `docker compose --profile mlflow up -d minio` | `docker compose --profile mlflow logs -f --since 15m minio` | `docker compose --profile mlflow stop minio` |
+| `minio-create-buckets` | `docker compose --profile mlflow up minio-create-buckets` | `docker compose --profile mlflow logs --since 15m minio-create-buckets` | `docker compose --profile mlflow stop minio-create-buckets` |
+| `mlflow` | `docker compose --profile mlflow up -d mlflow` | `docker compose --profile mlflow logs -f --since 15m mlflow` | `docker compose --profile mlflow stop mlflow` |
+| `serving-api` | `docker compose --profile mlflow --profile serving up -d serving-api` | `docker compose --profile mlflow --profile serving logs -f --since 15m serving-api` | `docker compose --profile mlflow --profile serving stop serving-api` |
+| `retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training logs -f --since 15m retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training stop retrain-watcher` |
+| `online-eval` | `docker compose --profile mlflow --profile training up -d online-eval` | `docker compose --profile mlflow --profile training logs -f --since 15m online-eval` | `docker compose --profile mlflow --profile training stop online-eval` |
+| `traffic-generator` | `docker compose --profile emulated-traffic up -d traffic-generator` | `docker compose --profile emulated-traffic logs -f --since 15m traffic-generator` | `docker compose --profile emulated-traffic stop traffic-generator` |
+| `prometheus` | `docker compose --profile serving --profile monitoring up -d prometheus` | `docker compose --profile serving --profile monitoring logs -f --since 15m prometheus` | `docker compose --profile serving --profile monitoring stop prometheus` |
+| `grafana` | `docker compose --profile serving --profile monitoring up -d grafana` | `docker compose --profile serving --profile monitoring logs -f --since 15m grafana` | `docker compose --profile serving --profile monitoring stop grafana` |
+| `alertmanager` | `docker compose --profile monitoring up -d alertmanager` | `docker compose --profile monitoring logs -f --since 15m alertmanager` | `docker compose --profile monitoring stop alertmanager` |
+| `node-exporter` | `docker compose --profile monitoring up -d node-exporter` | `docker compose --profile monitoring logs -f --since 15m node-exporter` | `docker compose --profile monitoring stop node-exporter` |
+
+### Jitsi Compose Services
+
+After Jitsi is installed, run these from `/mnt/block/jitsi/jitsi-docker-jitsi-meet`:
+
+| Service | Manual run | Logs | Stop |
+|---------|------------|------|------|
+| `web` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d web` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m web` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop web` |
+| `prosody` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d prosody` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m prosody` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop prosody` |
+| `jicofo` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d jicofo` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m jicofo` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop jicofo` |
+| `jvb` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d jvb` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m jvb` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop jvb` |
+| `jigasi` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d jigasi` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m jigasi` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop jigasi` |
+| `transcriber` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d transcriber` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m transcriber` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop transcriber` |
+| `meeting-portal-app` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d meeting-portal-app` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m meeting-portal-app` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop meeting-portal-app` |
+| `transcript-uploader` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d transcript-uploader` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m transcript-uploader` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop transcript-uploader` |
+| `vosk` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d vosk` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m vosk` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop vosk` |
+
+The same Jitsi commands are also documented in [jitsi-deployment/README.md](jitsi-deployment/README.md).
+
 ### Trigger a retrain manually
 
 ```bash
@@ -240,6 +287,29 @@ docker compose exec retrain-watcher python /app/retrain.py
 ```bash
 docker compose exec retraining_dataset_service \
   python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+### Manual worker runs with CLI args
+
+Check retraining thresholds and candidate meetings without building artifacts:
+
+```bash
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --dry-run
+```
+
+Force a one-shot retraining dataset cycle even if thresholds are not met:
+
+```bash
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+Run a single production drift monitoring cycle on demand:
+
+```bash
+docker compose exec production_drift_monitor \
+  python -m proj07_services.workers.production_drift_monitor --once
 ```
 
 ### Promote a candidate model to production

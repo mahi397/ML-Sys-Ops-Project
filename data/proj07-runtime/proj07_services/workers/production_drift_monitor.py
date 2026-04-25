@@ -22,7 +22,10 @@ from proj07_services.quality.drift_control import (
     compare_feature_columns_to_reference,
     extract_live_feature_columns,
 )
-from proj07_services.retraining.runtime import latest_reference_profile
+from proj07_services.retraining.runtime import (
+    latest_reference_profile,
+    production_jitsi_meeting_filter_sql,
+)
 
 
 APP_NAME = "production_drift_monitor"
@@ -117,10 +120,10 @@ def validate_config(config: ProductionDriftMonitorConfig) -> None:
 def fetch_recent_valid_meeting_ids(conn, *, since: datetime) -> list[str]:
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT meeting_id
-            FROM meetings
-            WHERE source_type = 'jitsi'
+            FROM meetings m
+            WHERE {production_jitsi_meeting_filter_sql("m")}
               AND is_valid = TRUE
               AND ended_at >= %s
             ORDER BY ended_at DESC
