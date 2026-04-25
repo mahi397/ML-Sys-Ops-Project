@@ -714,6 +714,7 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     _IP="${FLOATING_IP:-$(hostname -I | awk '{print $1}')}"
     _HP="${HTTPS_PORT:-${JITSI_PORT:-8443}}"
     _RP="${INGEST_PORT:-9099}"
+    _JITSI_HOST_ACCESS="${JITSI_HOST_ACCESS_HOST:-host.docker.internal}"
 
     # Populate the single global env file used by both root compose and Jitsi.
     _set_kv PUBLIC_URL                              "https://${_IP}:${_HP}"                                          "${GLOBAL_ENV}"
@@ -722,8 +723,9 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     _set_kv HTTP_PORT                               "${HTTP_PORT:-8088}"                                              "${GLOBAL_ENV}"
     _set_kv ENABLE_HTTP_REDIRECT                    "${ENABLE_HTTP_REDIRECT:-1}"                                      "${GLOBAL_ENV}"
     _set_kv JVB_ADVERTISE_IPS                       "${_IP}"                                                          "${GLOBAL_ENV}"
-    _set_kv MEETING_PORTAL_DATABASE_URL             "${MEETING_PORTAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_IP}:5432/${POSTGRES_DB:-proj07_sql_db}}" "${GLOBAL_ENV}"
-    _set_kv JITSI_TRANSCRIPT_INGEST_URL             "http://${_IP}:${_RP}/ingest/jitsi-transcript"                   "${GLOBAL_ENV}"
+    _set_kv JITSI_HOST_ACCESS_HOST                  "${_JITSI_HOST_ACCESS}"                                           "${GLOBAL_ENV}"
+    _set_kv MEETING_PORTAL_DATABASE_URL             "${MEETING_PORTAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@${_JITSI_HOST_ACCESS}:5432/${POSTGRES_DB:-proj07_sql_db}}" "${GLOBAL_ENV}"
+    _set_kv JITSI_TRANSCRIPT_INGEST_URL             "${JITSI_TRANSCRIPT_INGEST_URL:-http://${_JITSI_HOST_ACCESS}:${_RP}/ingest/jitsi-transcript}" "${GLOBAL_ENV}"
     _set_kv INGEST_TOKEN                            "${INGEST_TOKEN}"                                                 "${GLOBAL_ENV}"
     _set_kv JITSI_TRANSCRIPT_POLL_SECONDS           "${JITSI_TRANSCRIPT_POLL_SECONDS:-5}"                             "${GLOBAL_ENV}"
     _set_kv JITSI_TRANSCRIPT_SETTLE_SECONDS         "${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}"                           "${GLOBAL_ENV}"

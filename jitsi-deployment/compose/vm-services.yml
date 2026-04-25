@@ -68,6 +68,8 @@ services:
       JITSI_TRANSCRIPT_SETTLE_SECONDS: ${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}
       JITSI_TRANSCRIPT_UPLOAD_TIMEOUT: ${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}
       TZ: ${TZ}
+    extra_hosts:
+      - host.docker.internal:host-gateway
     networks:
       meet.jitsi:
 

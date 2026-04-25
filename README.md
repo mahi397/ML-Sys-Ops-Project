@@ -155,7 +155,10 @@ STAGE2_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/summarize
 
 You do not need to hand-build `DATABASE_URL`, `MEETING_PORTAL_DATABASE_URL`, or
 `JITSI_TRANSCRIPT_INGEST_URL` in the root `.env`. The setup/installer scripts
-derive those from `FLOATING_IP`, `POSTGRES_*`, and `INGEST_PORT`.
+derive those from `POSTGRES_*`, `INGEST_PORT`, and the Jitsi host-access target.
+For same-host Jitsi + data deployments, that target defaults to
+`host.docker.internal`. For split deployments, override
+`JITSI_TRANSCRIPT_INGEST_URL` and `MEETING_PORTAL_DATABASE_URL`.
 
 ### 2. Bootstrap
 

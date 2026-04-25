@@ -696,7 +696,7 @@ set_inferred_network_values() {
 
 set_project_env_defaults() {
     local public_url public_host postgres_user postgres_password postgres_db ingest_port
-    local rclone_remote object_bucket
+    local rclone_remote object_bucket host_access_host
 
     set_project_default TZ UTC
     set_project_default HTTPS_PORT 8443
@@ -752,14 +752,20 @@ set_project_env_defaults() {
     postgres_db="${postgres_db:-proj07_sql_db}"
     ingest_port="$(get_env_source_value INGEST_PORT)"
     ingest_port="${ingest_port:-9099}"
+    host_access_host="$(get_env_source_value JITSI_HOST_ACCESS_HOST)"
+    host_access_host="${host_access_host:-host.docker.internal}"
     rclone_remote="$(get_env_source_value RCLONE_REMOTE)"
     rclone_remote="${rclone_remote:-rclone_s3}"
     object_bucket="$(default_object_bucket)"
 
+    set_project_default JITSI_HOST_ACCESS_HOST "$host_access_host"
     set_project_default MEETING_PORTAL_RCLONE_REMOTE "$rclone_remote"
     set_project_default MEETING_PORTAL_RCLONE_BUCKET "$object_bucket"
 
-    if [ -n "$public_host" ] && [ -n "$postgres_password" ]; then
+    if [ -n "$host_access_host" ] && [ -n "$postgres_password" ]; then
+        set_project_default MEETING_PORTAL_DATABASE_URL "postgresql://${postgres_user}:${postgres_password}@${host_access_host}:5432/${postgres_db}"
+        set_project_default JITSI_TRANSCRIPT_INGEST_URL "http://${host_access_host}:${ingest_port}/ingest/jitsi-transcript"
+    elif [ -n "$public_host" ] && [ -n "$postgres_password" ]; then
         set_project_default MEETING_PORTAL_DATABASE_URL "postgresql://${postgres_user}:${postgres_password}@${public_host}:5432/${postgres_db}"
         set_project_default JITSI_TRANSCRIPT_INGEST_URL "http://${public_host}:${ingest_port}/ingest/jitsi-transcript"
     fi
