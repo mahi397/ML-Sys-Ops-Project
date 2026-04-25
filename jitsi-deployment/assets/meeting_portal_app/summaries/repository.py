@@ -10,14 +10,28 @@ from core.config import build_rclone_object_uri, get_rclone_timeout_seconds, sta
 from core.db import get_conn
 
 
+def participant_view_condition(alias: str = "mp") -> str:
+    return ""
+
+
+def participant_edit_expression(alias: str = "mp") -> str:
+    return "TRUE"
+
+
+def participant_edit_group_by(alias: str = "mp") -> str:
+    return ""
+
+
 def user_can_edit_summary(user_id: str, meeting_id: str) -> bool:
+    view_condition = participant_view_condition("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT can_edit_summary
-            FROM meeting_participants
+            f"""
+            SELECT TRUE AS can_edit_summary
+            FROM meeting_participants mp
             WHERE user_id = %s
               AND meeting_id = %s
+              {view_condition}
             LIMIT 1
             """,
             (user_id, meeting_id),
@@ -27,9 +41,10 @@ def user_can_edit_summary(user_id: str, meeting_id: str) -> bool:
 
 
 def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
+    view_condition = participant_view_condition("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH latest_summaries AS (
                 SELECT DISTINCT ON (s.meeting_id)
                     s.meeting_id,
@@ -78,7 +93,7 @@ def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
             LEFT JOIN meetings m
                 ON m.meeting_id = mp.meeting_id
             WHERE mp.user_id = %s
-              AND mp.can_view_summary
+              {view_condition}
               AND rollup.segment_count > 0
             ORDER BY COALESCE(m.started_at, m.ended_at, mp.joined_at, latest.created_at) DESC, mp.meeting_id
             """,
@@ -88,9 +103,12 @@ def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
 
 
 def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[str, Any]]:
+    view_condition = participant_view_condition("mp")
+    can_edit_expr = participant_edit_expression("mp")
+    can_edit_group_by = participant_edit_group_by("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH summary_rollups AS (
                 SELECT
                     s.summary_id,
@@ -146,7 +164,7 @@ def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[
                 mp.meeting_id,
                 COALESCE(m.source_name, mp.meeting_id) AS meeting_title,
                 mp.role,
-                mp.can_edit_summary AS can_edit_summary,
+                {can_edit_expr} AS can_edit_summary,
                 latest.summary_id,
                 latest.summary_type,
                 latest.summary_version,
@@ -169,12 +187,11 @@ def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[
                 ON all_mp.meeting_id = mp.meeting_id
             WHERE mp.user_id = %s
               AND mp.meeting_id = %s
-              AND mp.can_view_summary
+              {view_condition}
             GROUP BY
                 mp.meeting_id,
                 m.source_name,
-                mp.role,
-                mp.can_view_summary,
+                mp.role{can_edit_group_by},
                 latest.summary_id,
                 latest.summary_type,
                 latest.summary_version,
@@ -512,14 +529,15 @@ def fetch_summary_variant_for_user_by_id(
 
 
 def user_can_access_recap(user_id: str, meeting_id: str) -> bool:
+    view_condition = participant_view_condition("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT 1
             FROM meeting_participants mp
             WHERE mp.user_id = %s
               AND mp.meeting_id = %s
-              AND mp.can_view_summary
+              {view_condition}
               AND EXISTS (
                   SELECT 1
                   FROM summaries s
