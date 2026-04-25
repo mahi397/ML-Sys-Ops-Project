@@ -629,6 +629,7 @@
       meeting_id: draftRecap.meeting_id,
       source_summary_id: draftRecap.summary_id,
       source_summary_type: draftRecap.summary_type,
+      final_segments: currentSegments.map((segment) => buildSegmentSnapshot(segment)),
       edits
     };
   }

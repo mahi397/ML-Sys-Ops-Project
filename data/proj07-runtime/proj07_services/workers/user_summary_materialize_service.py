@@ -648,6 +648,68 @@ class UserSummaryMaterializeService:
                 break
         return segments
 
+    def extract_final_segment_snapshot(self, event_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for event_row in reversed(event_rows):
+            after_payload = event_row.get("after_payload") or {}
+            final_segments = after_payload.get("final_segments")
+            if isinstance(final_segments, list) and final_segments:
+                return [row for row in final_segments if isinstance(row, dict)]
+        return []
+
+    def apply_final_segment_snapshot(
+        self,
+        segments: list[dict[str, Any]],
+        snapshot_rows: list[dict[str, Any]],
+        utterance_lookup: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not snapshot_rows:
+            return segments
+
+        existing_by_range = {
+            (
+                int(segment["start_utterance_index"]),
+                int(segment["end_utterance_index"]),
+            ): segment
+            for segment in segments
+        }
+        final_segments: list[dict[str, Any]] = []
+        for display_index, snapshot in enumerate(snapshot_rows, start=1):
+            try:
+                start_index = int(snapshot.get("start_utterance_index"))
+                end_index = int(snapshot.get("end_utterance_index"))
+                start_row = utterance_lookup[start_index]
+                end_row = utterance_lookup[end_index]
+            except (KeyError, TypeError, ValueError):
+                return segments
+
+            if end_index < start_index:
+                return segments
+
+            existing = existing_by_range.get((start_index, end_index), {})
+            final_segments.append(
+                {
+                    **existing,
+                    "segment_index": display_index,
+                    "start_utterance_index": start_index,
+                    "end_utterance_index": end_index,
+                    "t_start": float(start_row["start_time_sec"]),
+                    "t_end": float(end_row["end_time_sec"]),
+                    "topic_label": str(
+                        snapshot.get("topic_label")
+                        or existing.get("topic_label")
+                        or ""
+                    ).strip(),
+                    "summary_bullets": normalize_summary_bullets(
+                        snapshot.get("summary_bullets")
+                        if "summary_bullets" in snapshot
+                        else existing.get("summary_bullets")
+                    ),
+                    "status": str(snapshot.get("status") or existing.get("status") or "complete"),
+                }
+            )
+
+        return normalize_segments(final_segments, utterance_lookup)
+
     def materialize_user_summary(
         self,
         conn,
@@ -721,6 +783,12 @@ class UserSummaryMaterializeService:
                     event_row,
                     field_name="summary_bullets",
                 )
+
+        working_segments = self.apply_final_segment_snapshot(
+            working_segments,
+            self.extract_final_segment_snapshot(event_rows),
+            utterance_lookup,
+        )
 
         final_segments: list[dict[str, Any]] = []
         for segment in normalize_segments(working_segments, utterance_lookup):

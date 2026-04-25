@@ -415,6 +415,31 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
     if not source_variant or str(source_variant.get("summary_type")) != source_summary_type:
         raise HTTPException(status_code=404, detail="Source summary not found")
 
+    final_segments: list[dict[str, Any]] = []
+    raw_final_segments = payload.get("final_segments")
+    if isinstance(raw_final_segments, list):
+        for raw_segment in raw_final_segments:
+            if not isinstance(raw_segment, dict):
+                continue
+            start_utt = raw_segment.get("start_utt", raw_segment.get("start_utterance_index"))
+            end_utt = raw_segment.get("end_utt", raw_segment.get("end_utterance_index"))
+            try:
+                start_utt_int = int(start_utt)
+                end_utt_int = int(end_utt)
+            except (TypeError, ValueError):
+                continue
+
+            final_segments.append(
+                {
+                    "segment_summary_id": raw_segment.get("segment_summary_id"),
+                    "segment_index": raw_segment.get("segment_index"),
+                    "start_utterance_index": start_utt_int,
+                    "end_utterance_index": end_utt_int,
+                    "topic_label": str(raw_segment.get("topic_label") or "").strip(),
+                    "summary_bullets": normalize_summary_bullets(raw_segment.get("summary_bullets")),
+                }
+            )
+
     edit_session_id = str(payload.get("edit_session_id") or "").strip() or secrets.token_hex(12)
     operation_rows: list[tuple[int | None, str, dict[str, Any], dict[str, Any]]] = []
 
@@ -529,6 +554,9 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
                 after_payload,
             )
         )
+
+    if final_segments:
+        operation_rows[-1][3]["final_segments"] = final_segments
 
     text_only_user_summary_update = (
         source_summary_type == "user_edited"
