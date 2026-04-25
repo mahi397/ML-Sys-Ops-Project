@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -784,9 +785,10 @@ class UserSummaryMaterializeService:
                     field_name="summary_bullets",
                 )
 
+        final_snapshot_rows = self.extract_final_segment_snapshot(event_rows)
         working_segments = self.apply_final_segment_snapshot(
             working_segments,
-            self.extract_final_segment_snapshot(event_rows),
+            final_snapshot_rows,
             utterance_lookup,
         )
 
@@ -800,7 +802,28 @@ class UserSummaryMaterializeService:
             }
             final_segments.append(complete_segment)
 
-        next_version = self.fetch_next_user_summary_version(conn, meeting_id)
+        next_version = 1
+        segment_log = [
+            {
+                "segment_index": int(segment["segment_index"]),
+                "start_utterance_index": int(segment["start_utterance_index"]),
+                "end_utterance_index": int(segment["end_utterance_index"]),
+                "topic_label": segment["topic_label"],
+                "summary_bullets": segment["summary_bullets"],
+            }
+            for segment in final_segments
+        ]
+        self.logger.info(
+            "Prepared user-edited summary content | meeting_id=%s | edit_session_id=%s | version=%s | source_summary_id=%s | source_summary_type=%s | final_snapshot_count=%s | segments=%s",
+            meeting_id,
+            edit_session_id,
+            next_version,
+            base_summary_id,
+            base_summary_type,
+            len(final_snapshot_rows),
+            json.dumps(segment_log, sort_keys=True),
+        )
+
         summary_output_path = user_summary_output_path(self.config.output_root, meeting_id, next_version)
         summary_object_key = f"{self.config.object_prefix.strip('/')}/{meeting_id}/v{next_version}/summary.json"
 
@@ -931,10 +954,10 @@ class UserSummaryMaterializeService:
                 """
                 UPDATE feedback_events
                 SET after_payload = after_payload || jsonb_build_object(
-                    'materialized_summary_id', %s,
-                    'materialized_user_summary_version', %s,
-                    'materialized_at', %s,
-                    'materialized_edit_session_id', %s
+                    'materialized_summary_id', %s::bigint,
+                    'materialized_user_summary_version', %s::integer,
+                    'materialized_at', %s::text,
+                    'materialized_edit_session_id', %s::text
                 )
                 WHERE meeting_id = %s
                   AND event_type = ANY(%s)
@@ -952,6 +975,15 @@ class UserSummaryMaterializeService:
                 ),
             )
         conn.commit()
+        self.logger.info(
+            "Committed user-edited summary to DB | meeting_id=%s | edit_session_id=%s | summary_id=%s | version=%s | segment_count=%s | marked_feedback_through=%s",
+            meeting_id,
+            edit_session_id,
+            summary_id,
+            next_version,
+            len(final_segments),
+            latest_feedback_event_id,
+        )
 
 
 def validate_config(config: UserSummaryMaterializeConfig) -> None:
