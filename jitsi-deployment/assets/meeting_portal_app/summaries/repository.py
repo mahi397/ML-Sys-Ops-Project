@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +21,16 @@ def participant_edit_expression(alias: str = "mp") -> str:
 
 def participant_edit_group_by(alias: str = "mp") -> str:
     return ""
+
+
+def env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
 
 
 def user_can_edit_summary(user_id: str, meeting_id: str) -> bool:
@@ -585,6 +596,79 @@ def insert_feedback_event(
                 json.dumps(before_payload),
                 json.dumps(after_payload),
                 user_id,
+            ),
+        )
+        conn.commit()
+
+
+def enqueue_user_summary_materialize_task(meeting_id: str, *, edit_session_id: str | None = None) -> None:
+    artifact_version = env_int("STAGE1_ARTIFACT_VERSION", 1)
+    max_attempts = env_int("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS", 8)
+    payload_json = {
+        "task_name": "user_summary_materialize",
+        "meeting_id": meeting_id,
+        "artifact_version": artifact_version,
+        "phase": "user_summary_pending",
+    }
+    if edit_session_id:
+        payload_json["edit_session_id"] = edit_session_id
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO workflow_tasks (
+                task_type,
+                meeting_id,
+                artifact_version,
+                status,
+                payload_json,
+                max_attempts,
+                next_attempt_at
+            )
+            VALUES (
+                'user_summary_materialize',
+                %s,
+                %s,
+                'pending',
+                %s::jsonb,
+                %s,
+                NOW()
+            )
+            ON CONFLICT (task_type, meeting_id, artifact_version)
+            DO UPDATE
+            SET payload_json = EXCLUDED.payload_json,
+                max_attempts = EXCLUDED.max_attempts,
+                status = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.status
+                    ELSE 'pending'
+                END,
+                next_attempt_at = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.next_attempt_at
+                    ELSE NOW()
+                END,
+                locked_by = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.locked_by
+                    ELSE NULL
+                END,
+                locked_at = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.locked_at
+                    ELSE NULL
+                END,
+                heartbeat_at = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.heartbeat_at
+                    ELSE NULL
+                END,
+                last_error = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.last_error
+                    ELSE NULL
+                END,
+                updated_at = NOW()
+            """,
+            (
+                meeting_id,
+                artifact_version,
+                json.dumps(payload_json),
+                max_attempts,
             ),
         )
         conn.commit()

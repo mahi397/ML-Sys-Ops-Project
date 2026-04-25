@@ -238,7 +238,21 @@ class UserSummaryMaterializeService:
                 )
                 return True
 
-            latest_session = self.fetch_latest_pending_edit_session(conn, lease.meeting_id)
+            requested_edit_session_id = ""
+            if isinstance(lease.payload_json, dict):
+                requested_edit_session_id = str(
+                    lease.payload_json.get("edit_session_id") or ""
+                ).strip()
+
+            latest_session = (
+                self.fetch_pending_edit_session_by_id(
+                    conn,
+                    lease.meeting_id,
+                    requested_edit_session_id,
+                )
+                if requested_edit_session_id
+                else self.fetch_latest_pending_edit_session(conn, lease.meeting_id)
+            )
             if latest_session is None:
                 self.logger.info(
                     "No pending user-summary edit session found; marking task succeeded | meeting_id=%s",
@@ -326,27 +340,60 @@ class UserSummaryMaterializeService:
             row = cur.fetchone()
         return None if row is None else row["created_at"]
 
-    def fetch_latest_pending_edit_session(self, conn, meeting_id: str) -> dict[str, Any] | None:
-        latest_user_summary_at = self.fetch_latest_user_summary_created_at(conn, meeting_id)
+    def fetch_pending_edit_session_by_id(
+        self,
+        conn,
+        meeting_id: str,
+        edit_session_id: str,
+    ) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT
                     after_payload ->> 'edit_session_id' AS edit_session_id,
-                    MAX(feedback_event_id) AS latest_feedback_event_id
+                    MAX(feedback_event_id) AS latest_feedback_event_id,
+                    BOOL_OR(after_payload ? 'materialized_summary_id') AS is_materialized
                 FROM feedback_events
                 WHERE meeting_id = %s
                   AND event_type = ANY(%s)
-                  AND after_payload ? 'edit_session_id'
-                  AND created_at > COALESCE(%s::timestamptz, '-infinity'::timestamptz)
+                  AND after_payload ->> 'edit_session_id' = %s
                 GROUP BY after_payload ->> 'edit_session_id'
+                HAVING NOT BOOL_OR(after_payload ? 'materialized_summary_id')
+                """,
+                (
+                    meeting_id,
+                    list(MATERIALIZABLE_EVENT_TYPES),
+                    edit_session_id,
+                ),
+            )
+            return cur.fetchone()
+
+    def fetch_latest_pending_edit_session(self, conn, meeting_id: str) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH edit_sessions AS (
+                    SELECT
+                        after_payload ->> 'edit_session_id' AS edit_session_id,
+                        MAX(feedback_event_id) AS latest_feedback_event_id,
+                        BOOL_OR(after_payload ? 'materialized_summary_id') AS is_materialized
+                    FROM feedback_events
+                    WHERE meeting_id = %s
+                      AND event_type = ANY(%s)
+                      AND after_payload ? 'edit_session_id'
+                    GROUP BY after_payload ->> 'edit_session_id'
+                )
+                SELECT
+                    edit_sessions.edit_session_id,
+                    edit_sessions.latest_feedback_event_id
+                FROM edit_sessions
+                WHERE NOT edit_sessions.is_materialized
                 ORDER BY latest_feedback_event_id DESC
                 LIMIT 1
                 """,
                 (
                     meeting_id,
                     list(MATERIALIZABLE_EVENT_TYPES),
-                    latest_user_summary_at,
                 ),
             )
             return cur.fetchone()
@@ -597,6 +644,8 @@ class UserSummaryMaterializeService:
         if not event_rows:
             return
 
+        latest_feedback_event_id = max(int(row["feedback_event_id"]) for row in event_rows)
+
         first_after_payload = event_rows[0].get("after_payload") or {}
         base_summary_type = str(first_after_payload.get("base_summary_type") or "").strip()
         try:
@@ -790,10 +839,35 @@ class UserSummaryMaterializeService:
                         segment["status"],
                         "user_editor",
                         f"session:{edit_session_id[:8]}",
-                        base_summary_type,
+                        edit_session_id,
                         created_at,
                     ),
                 )
+
+            cur.execute(
+                """
+                UPDATE feedback_events
+                SET after_payload = after_payload || jsonb_build_object(
+                    'materialized_summary_id', %s,
+                    'materialized_user_summary_version', %s,
+                    'materialized_at', %s,
+                    'materialized_edit_session_id', %s
+                )
+                WHERE meeting_id = %s
+                  AND event_type = ANY(%s)
+                  AND after_payload ? 'edit_session_id'
+                  AND feedback_event_id <= %s
+                """,
+                (
+                    summary_id,
+                    next_version,
+                    created_at.isoformat(),
+                    edit_session_id,
+                    meeting_id,
+                    list(MATERIALIZABLE_EVENT_TYPES),
+                    latest_feedback_event_id,
+                ),
+            )
         conn.commit()
 
 

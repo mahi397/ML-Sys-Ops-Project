@@ -586,18 +586,12 @@ class UserSummaryDispatchTask:
 
     def fetch_candidate_meeting_ids(self, conn, *, full_scan: bool) -> list[str]:
         sql = """
-            WITH latest_user_summary AS (
+            WITH edit_sessions AS (
                 SELECT
                     meeting_id,
-                    MAX(created_at) AS latest_user_summary_created_at
-                FROM summaries
-                WHERE summary_type = 'user_edited'
-                GROUP BY meeting_id
-            ),
-            latest_edit_feedback AS (
-                SELECT
-                    meeting_id,
-                    MAX(created_at) AS latest_feedback_created_at
+                    after_payload ->> 'edit_session_id' AS edit_session_id,
+                    MAX(feedback_event_id) AS latest_feedback_event_id,
+                    BOOL_OR(after_payload ? 'materialized_summary_id') AS is_materialized
                 FROM feedback_events
                 WHERE event_type IN (
                     'merge_segments',
@@ -606,20 +600,16 @@ class UserSummaryDispatchTask:
                     'edit_summary_bullets'
                 )
                   AND after_payload ? 'edit_session_id'
-                GROUP BY meeting_id
+                GROUP BY meeting_id, after_payload ->> 'edit_session_id'
             )
-            SELECT feedback.meeting_id
-            FROM latest_edit_feedback feedback
+            SELECT edit_sessions.meeting_id
+            FROM edit_sessions
             JOIN meetings m
-              ON m.meeting_id = feedback.meeting_id
-            LEFT JOIN latest_user_summary user_summary
-              ON user_summary.meeting_id = feedback.meeting_id
+              ON m.meeting_id = edit_sessions.meeting_id
             WHERE m.source_type = 'jitsi'
-              AND (
-                    user_summary.latest_user_summary_created_at IS NULL
-                    OR feedback.latest_feedback_created_at > user_summary.latest_user_summary_created_at
-               )
-            ORDER BY feedback.latest_feedback_created_at DESC, feedback.meeting_id DESC
+              AND NOT edit_sessions.is_materialized
+            GROUP BY edit_sessions.meeting_id
+            ORDER BY MAX(edit_sessions.latest_feedback_event_id) DESC, edit_sessions.meeting_id DESC
         """
         params: list[object] = []
         if full_scan and self.config.full_scan_limit > 0:

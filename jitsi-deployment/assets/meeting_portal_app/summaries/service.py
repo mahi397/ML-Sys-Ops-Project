@@ -541,6 +541,11 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
             user_id=user_id,
         )
 
+    repository.enqueue_user_summary_materialize_task(
+        meeting_id,
+        edit_session_id=edit_session_id,
+    )
+
     return {
         "edit_session_id": edit_session_id,
         "source_summary_id": source_summary_id,
