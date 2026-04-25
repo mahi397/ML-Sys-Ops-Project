@@ -27,6 +27,101 @@ ok()   { echo -e "${GREEN}  $*${NC}"; }
 info() { echo -e "${YELLOW}  $*${NC}"; }
 err()  { echo -e "${RED}  $*${NC}"; }
 
+env_value_needs_fill() {
+    local value="${1:-}"
+    case "${value}" in
+        ""|replace_with_*|"<"*">")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+set_env_kv() {
+    local key="$1" value="$2" file="$3" tmp
+    tmp="$(mktemp)"
+    awk -v key="$key" -v value="$value" '
+        BEGIN { done = 0 }
+        $0 ~ ("^[[:space:]]*#?[[:space:]]*" key "=") {
+            if (!done) {
+                print key "=" value
+                done = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!done) {
+                print key "=" value
+            }
+        }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+}
+
+read_rclone_config_value() {
+    local remote="$1" key="$2" config_file="$3"
+    awk -v section="[$remote]" -v key="$key" '
+        $0 == section {
+            in_section = 1
+            next
+        }
+        /^\[/ {
+            if (in_section) {
+                exit
+            }
+            next
+        }
+        in_section && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+            value = $0
+            sub(/^[^=]*=/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            print value
+            exit
+        }
+    ' "$config_file"
+}
+
+populate_aws_credentials_from_rclone() {
+    local config_file="${RCLONE_CONFIG:-${HOME}/.config/rclone/rclone.conf}"
+    local access_key secret_key endpoint
+    local wrote_any=0
+
+    if [[ ! -f "${config_file}" ]]; then
+        return 0
+    fi
+
+    access_key="$(read_rclone_config_value "${RCLONE_REMOTE}" "access_key_id" "${config_file}")"
+    secret_key="$(read_rclone_config_value "${RCLONE_REMOTE}" "secret_access_key" "${config_file}")"
+    endpoint="$(read_rclone_config_value "${RCLONE_REMOTE}" "endpoint" "${config_file}")"
+
+    if env_value_needs_fill "${AWS_ACCESS_KEY_ID:-}" && [[ -n "${access_key}" ]]; then
+        export AWS_ACCESS_KEY_ID="${access_key}"
+        set_env_kv "AWS_ACCESS_KEY_ID" "${access_key}" "${REPO_DIR}/.env"
+        wrote_any=1
+    fi
+
+    if env_value_needs_fill "${AWS_SECRET_ACCESS_KEY:-}" && [[ -n "${secret_key}" ]]; then
+        export AWS_SECRET_ACCESS_KEY="${secret_key}"
+        set_env_kv "AWS_SECRET_ACCESS_KEY" "${secret_key}" "${REPO_DIR}/.env"
+        wrote_any=1
+    fi
+
+    if env_value_needs_fill "${MLFLOW_S3_ENDPOINT_URL:-}" && [[ -n "${endpoint}" ]]; then
+        export MLFLOW_S3_ENDPOINT_URL="${endpoint}"
+        set_env_kv "MLFLOW_S3_ENDPOINT_URL" "${endpoint}" "${REPO_DIR}/.env"
+        wrote_any=1
+    fi
+
+    if [[ "${wrote_any}" -eq 1 ]]; then
+        ok "Filled MLflow/S3 SDK credentials from ${RCLONE_REMOTE} in rclone.conf"
+    elif env_value_needs_fill "${AWS_ACCESS_KEY_ID:-}" || env_value_needs_fill "${AWS_SECRET_ACCESS_KEY:-}"; then
+        info "AWS SDK credentials were not found in rclone remote ${RCLONE_REMOTE}; MLflow may need AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in root .env"
+    fi
+}
+
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  NeuralOps Full System — Setup Script${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
@@ -110,6 +205,7 @@ rclone lsd "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/" >/dev/null 2>&1 || {
     exit 1
 }
 ok "rclone remote OK"
+populate_aws_credentials_from_rclone
 
 # ── 4. Block storage layout ───────────────────────────────────────────────────
 echo -e "\n${YELLOW}[4/10] Block storage layout...${NC}"
