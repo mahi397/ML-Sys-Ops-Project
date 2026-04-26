@@ -422,11 +422,15 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
         JITSI_COMPOSE_DIR="${BLOCK_ROOT}/jitsi/jitsi-docker-jitsi-meet"
         if [[ -f "${JITSI_COMPOSE_DIR}/docker-compose.yml" ]]; then
             info "Force-recreating Jitsi containers..."
-            docker compose -f "${JITSI_COMPOSE_DIR}/docker-compose.yml" \
-                -p jitsi-vm up -d --force-recreate
+            (cd "${JITSI_COMPOSE_DIR}" && docker compose \
+                -f docker-compose.yml \
+                -f jigasi.yml \
+                -f transcriber.yml \
+                -f jitsi-deployment/compose/vm-services.yml \
+                -p jitsi-vm up -d --force-recreate)
             ok "Jitsi containers force-recreated"
         else
-            info "Jitsi compose file not found at ${JITSI_COMPOSE_DIR} — skipping force-recreate"
+            info "Jitsi compose dir not found at ${JITSI_COMPOSE_DIR} — skipping force-recreate"
         fi
     fi
 
