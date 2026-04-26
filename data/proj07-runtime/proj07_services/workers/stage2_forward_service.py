@@ -463,6 +463,10 @@ class ForwardServiceConfig:
     model_version: str = os.getenv("STAGE2_MODEL_VERSION", "").strip()
     prompt_version: str = os.getenv("STAGE2_PROMPT_VERSION", "").strip()
     upload_artifacts: bool = env_flag("STAGE2_FORWARD_UPLOAD_ARTIFACTS", True)
+    retraining_validity_window_size: int = env_int(
+        "RETRAINING_DATASET_WINDOW_SIZE",
+        env_int("STAGE1_WINDOW_SIZE", 7),
+    )
     heartbeat_interval_seconds: float = env_float(
         "WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS",
         15.0,
@@ -482,6 +486,19 @@ class Stage2ForwardService:
     config: ForwardServiceConfig
     logger: object
     worker_id: str = field(default_factory=lambda: make_worker_id(APP_NAME))
+
+    def count_model_utterances(self, stage2_inputs: list[dict[str, Any]]) -> int:
+        total = 0
+        for segment in stage2_inputs:
+            total_utterances = segment.get("total_utterances")
+            if isinstance(total_utterances, int):
+                total += total_utterances
+                continue
+
+            utterances = segment.get("utterances")
+            if isinstance(utterances, list):
+                total += len(utterances)
+        return total
 
     def run_once(self) -> bool:
         conn = get_conn()
@@ -1026,6 +1043,28 @@ class Stage2ForwardService:
                 model_version=self.config.model_version,
                 prompt_version=self.config.prompt_version,
             )
+
+        model_utterance_count = self.count_model_utterances(stage2_inputs)
+        computed_is_valid = bool(recap_payload) and (
+            model_utterance_count >= self.config.retraining_validity_window_size
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meetings
+                SET is_valid = %s
+                WHERE meeting_id = %s
+                """,
+                (computed_is_valid, meeting_id),
+            )
+        if not computed_is_valid:
+            self.logger.info(
+                "Marked meeting invalid after Stage 2 materialization | meeting_id=%s model_utterances=%s threshold=%s summary_created=%s",
+                meeting_id,
+                model_utterance_count,
+                self.config.retraining_validity_window_size,
+                bool(recap_payload),
+            )
         conn.commit()
 
 
@@ -1048,6 +1087,8 @@ def validate_config(config: ForwardServiceConfig) -> None:
         raise ValueError(
             "WORKFLOW_TASK_BACKOFF_MAX_SECONDS must be >= WORKFLOW_TASK_BACKOFF_BASE_SECONDS"
         )
+    if config.retraining_validity_window_size <= 0:
+        raise ValueError("RETRAINING_DATASET_WINDOW_SIZE must be > 0")
 
 
 def main() -> None:
@@ -1064,13 +1105,14 @@ def main() -> None:
 
     logger.info("Starting %s", APP_NAME)
     logger.info(
-        "Stage 2 forward config | poll_interval=%ss request_root=%s response_root=%s url=%s format=%s upload=%s worker_id=%s",
+        "Stage 2 forward config | poll_interval=%ss request_root=%s response_root=%s url=%s format=%s upload=%s validity_window=%s worker_id=%s",
         config.poll_interval_seconds,
         config.request_root.resolve(),
         config.response_root.resolve(),
         config.endpoint_url,
         config.payload_format,
         config.upload_artifacts,
+        config.retraining_validity_window_size,
         service.worker_id,
     )
 
