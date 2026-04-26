@@ -229,8 +229,8 @@
           "legendFormat": "Summarize"
         },
         {
-          "expr": "rate(jitsi_requests_total{endpoint='recap', status='success'}[1m])",
-          "legendFormat": "Recap"
+          "expr": "rate(jitsi_requests_total{endpoint='summarize', status='success'}[1m]) * 60",
+          "legendFormat": "Summaries / min"
         }
       ],
       "fieldConfig": {
@@ -316,51 +316,51 @@
     },
 
     {
-      "title": "── Recap Pipeline ──",
+      "title": "── Pipeline Output ──",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
       "collapsed": false
     },
     {
-      "title": "Recap Duration (seconds)",
+      "title": "Boundaries Detected / Hour",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(jitsi_recap_duration_seconds_bucket[5m]))",
-          "legendFormat": "p50"
-        },
-        {
-          "expr": "histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[5m]))",
-          "legendFormat": "p95"
+          "expr": "increase(jitsi_segments_detected_total[1h])",
+          "legendFormat": "Boundaries / hr"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "custom": { "drawStyle": "bars", "fillOpacity": 40 },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "red", "value": 300 }
+              { "color": "orange", "value": 50 }
             ]
           }
         }
       }
     },
     {
-      "title": "Segments per Meeting",
+      "title": "Summaries Generated / Min",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "rate(jitsi_recap_segments_per_meeting_sum[5m]) / rate(jitsi_recap_segments_per_meeting_count[5m])",
-          "legendFormat": "Avg Segments"
+          "expr": "rate(jitsi_requests_total{endpoint='summarize', status='success'}[1m]) * 60",
+          "legendFormat": "Summaries / min"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 20 }
+        }
+      }
     },
 
     {
@@ -448,7 +448,7 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum(increase(jitsi_feedback_corrections_total[1h])) / (sum(increase(jitsi_recap_segments_per_meeting_count[1h])) > 0) * 100",
+          "expr": "sum(increase(jitsi_feedback_corrections_total[1h])) / (increase(jitsi_segments_detected_total[1h]) > 0) * 100",
           "legendFormat": "Correction %"
         }
       ],

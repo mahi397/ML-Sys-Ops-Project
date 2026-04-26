@@ -19,14 +19,14 @@ groups:
         annotations:
           summary: "Summarization p95 > 30s"
 
-      - alert: RecapLatencyHigh
-        expr: histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[10m])) > 300.0
+      - alert: SummarizationCritical
+        expr: histogram_quantile(0.95, rate(jitsi_request_latency_seconds_bucket{endpoint="summarize"}[10m])) > 60.0
         for: 2m
         labels:
           severity: critical
           action: rollback
         annotations:
-          summary: "Full recap p95 > 5min SLA"
+          summary: "Summarization p95 > 60s — severe degradation, trigger rollback"
 
   - name: error_rate
     rules:

@@ -331,6 +331,49 @@ MLFLOW_MODEL_NAME     = "jitsi-topic-segmenter"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
+def _download_model_via_proxy(tracking_uri: str, source_uri: str, dst_path: str) -> str:
+    """
+    Download MLflow model artifacts through the --serve-artifacts HTTP proxy.
+    Avoids requiring direct S3 credentials in the serving container.
+    """
+    import shutil
+    import requests as _req
+
+    proxy = f"{tracking_uri}/api/2.0/mlflow-artifacts/artifacts"
+
+    def _list(uri, path=""):
+        params = {"artifact_uri": uri}
+        if path:
+            params["path"] = path
+        r = _req.get(proxy, params=params, timeout=30)
+        r.raise_for_status()
+        return r.json().get("files", [])
+
+    def _fetch(uri, path, local_file):
+        os.makedirs(os.path.dirname(local_file), exist_ok=True)
+        params = {"artifact_uri": uri, "path": path}
+        with _req.get(proxy, params=params, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            with open(local_file, "wb") as f:
+                for chunk in r.iter_content(65536):
+                    f.write(chunk)
+
+    def _recurse(uri, rel_path, local_base):
+        for entry in _list(uri, rel_path):
+            ep = entry["path"]
+            local = os.path.join(local_base, ep)
+            if entry.get("is_dir"):
+                _recurse(uri, ep, local_base)
+            else:
+                _fetch(uri, ep, local)
+
+    if os.path.exists(dst_path):
+        shutil.rmtree(dst_path)
+    os.makedirs(dst_path)
+    _recurse(source_uri, "", dst_path)
+    return dst_path
+
+
 
 def _normalize_utterance(u: dict) -> dict:
     """Normalize null/None values frompipeline"""
@@ -567,9 +610,13 @@ class SegmenterDeployment:
                 # Instantiate client once here so it's available in the fallback block
                 _client = mlflow.tracking.MlflowClient()
                 mlflow_uri = f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
-                self.model = mlflow.pytorch.load_model(mlflow_uri)
-                self.model_version = f"mlflow@{MODEL_ALIAS}"
                 _alias_mv = _client.get_model_version_by_alias(MLFLOW_MODEL_NAME, MODEL_ALIAS)
+                _local = _download_model_via_proxy(
+                    MLFLOW_TRACKING_URI, _alias_mv.source,
+                    f"/tmp/mlflow_segmenter_{MODEL_ALIAS}"
+                )
+                self.model = mlflow.pytorch.load_model(_local)
+                self.model_version = f"mlflow@{MODEL_ALIAS}"
                 self.current_mlflow_version = str(_alias_mv.version)
                 # ★ READ best_threshold FROM MODEL VERSION TAGS ★
                 tags = _alias_mv.tags or {}
@@ -578,23 +625,25 @@ class SegmenterDeployment:
                     print(f"[segmenter] Using best_threshold={self.threshold} from MLflow v{_alias_mv.version}")
                 else:
                     print(f"[segmenter] No best_threshold tag on v{_alias_mv.version}, using default {self.threshold}")
-                print(f"[segmenter] Loaded model from MLflow: {mlflow_uri}")
+                print(f"[segmenter] Loaded model from MLflow proxy: {mlflow_uri}")
             except Exception as e:
                 print(f"[segmenter] MLflow @{MODEL_ALIAS} failed ({e}), trying @fallback")
                 try:
                     import mlflow.pytorch
                     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
                     _client = mlflow.tracking.MlflowClient()
-                    fallback_uri = f"models:/{MLFLOW_MODEL_NAME}@fallback"
-                    self.model = mlflow.pytorch.load_model(fallback_uri)
-                    self.model_version = "mlflow@fallback"
-                    # Also read threshold from fallback version
                     _fb_mv = _client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "fallback")
+                    _local_fb = _download_model_via_proxy(
+                        MLFLOW_TRACKING_URI, _fb_mv.source,
+                        "/tmp/mlflow_segmenter_fallback"
+                    )
+                    self.model = mlflow.pytorch.load_model(_local_fb)
+                    self.model_version = "mlflow@fallback"
                     fb_tags = _fb_mv.tags or {}
                     if "best_threshold" in fb_tags:
                         self.threshold = float(fb_tags["best_threshold"])
                         print(f"[segmenter] Using fallback best_threshold={self.threshold}")
-                    print(f"[segmenter] Loaded fallback model from MLflow")
+                    print(f"[segmenter] Loaded fallback model from MLflow proxy")
                 except Exception as e2:
                     print(f"[segmenter] MLflow fallback also failed ({e2}), using local path")
         # 2. Fall back to local fine-tuned weights
@@ -643,9 +692,11 @@ class SegmenterDeployment:
 
                 print(f"[segmenter] New model version detected: {new_version}, reloading...")
                 try:
-                    new_model = mlflow.pytorch.load_model(
-                        f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
+                    _local_new = _download_model_via_proxy(
+                        MLFLOW_TRACKING_URI, alias_mv.source,
+                        f"/tmp/mlflow_segmenter_{MODEL_ALIAS}_v{new_version}"
                     )
+                    new_model = mlflow.pytorch.load_model(_local_new)
                     new_model.to(self.device)
                     new_model.eval()
 
