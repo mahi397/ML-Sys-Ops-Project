@@ -52,9 +52,10 @@ def authenticate_user(login_name: str, password: str) -> dict[str, Any] | None:
     return user
 
 
-def generate_internal_user_id(display_name: str) -> str:
-    normalized_display_name = normalize_user_id(display_name)
-    stem = normalized_display_name[:40].strip("_") or "user"
+def generate_internal_user_id(email: str) -> str:
+    normalized_email = email.strip().lower()
+    email_stem_source = normalized_email.replace("@", "_").replace(".", "_")
+    stem = normalize_user_id(email_stem_source)[:40].strip("_") or "user"
     return f"user_{stem}_{secrets.token_hex(4)}"
 
 
@@ -74,7 +75,7 @@ def register_user(
         return None, "Use a display name, valid email, and a password with at least 8 characters."
 
     for _ in range(5):
-        generated_user_id = generate_internal_user_id(normalized_display_name)
+        generated_user_id = generate_internal_user_id(normalized_email)
         created, error = repository.create_user(
             user_id=generated_user_id,
             display_name=normalized_display_name,
