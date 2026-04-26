@@ -173,31 +173,48 @@ def stage_data_from_objstore(objstore_path: str, local_dir: str, cfg: Dict = Non
     if os.path.exists(local_dir) and any(f.endswith(".jsonl") for f in os.listdir(local_dir)):
         log.info(f"Data already staged at {local_dir}, skipping download")
         return True
-    rclone_remote = (cfg or {}).get("rclone_remote") or os.environ.get("RCLONE_REMOTE", "chi_tacc")
     bucket = os.environ.get("OBJSTORE_BUCKET", (cfg or {}).get("objstore_bucket", "objstore-proj07"))
-    remote = f"{rclone_remote}:{bucket}/{objstore_path}"
     os.makedirs(local_dir, exist_ok=True)
-    log.info(f"Staging data: {remote} → {local_dir}")
-    try:
-        result = subprocess.run(
-            ["rclone", "copy", remote, local_dir, "--progress"],
-            capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode != 0:
-            log.error(f"rclone failed (exit {result.returncode}): {result.stderr[:1000]}")
-            return False
-        staged = [f for f in os.listdir(local_dir) if f.endswith(".jsonl")]
-        if not staged:
-            log.error(f"rclone exited 0 but no .jsonl files in {local_dir} — "
-                      f"check remote path: {remote}\nstdout: {result.stdout[:500]}\nstderr: {result.stderr[:500]}")
-            return False
-        log.info(f"Staged {len(staged)} .jsonl files to {local_dir}")
-        return True
-    except FileNotFoundError:
-        log.error("rclone not found in PATH — install rclone in the container")
+    log.info(f"Staging data: s3://{bucket}/{objstore_path} → {local_dir}")
+
+    # Use boto3 with chi.tacc credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+    # AWS_S3_ENDPOINT_URL). rclone.conf may point to chi.uc which holds different data.
+    endpoint_url = os.environ.get("AWS_S3_ENDPOINT_URL", "")
+    if not endpoint_url:
+        log.error("AWS_S3_ENDPOINT_URL not set — cannot stage training data")
         return False
-    except subprocess.TimeoutExpired:
-        log.error("rclone timed out after 600s")
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+            config=BotoConfig(signature_version="s3v4"),
+        )
+        prefix = objstore_path.rstrip("/") + "/"
+        paginator = s3.get_paginator("list_objects_v2")
+        downloaded = 0
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                filename = os.path.basename(key)
+                if not filename:
+                    continue
+                dest = os.path.join(local_dir, filename)
+                log.info(f"  {key} ({obj['Size'] // 1024 // 1024} MB) → {dest}")
+                s3.download_file(bucket, key, dest)
+                downloaded += 1
+        jsonl_count = len([f for f in os.listdir(local_dir) if f.endswith(".jsonl")])
+        if jsonl_count == 0:
+            log.error(f"Downloaded {downloaded} files but no .jsonl found in {local_dir} "
+                      f"— check bucket path: s3://{bucket}/{objstore_path}")
+            return False
+        log.info(f"Staged {jsonl_count} .jsonl files ({downloaded} total) to {local_dir}")
+        return True
+    except Exception as e:
+        log.error(f"Staging failed: {e}")
         return False
 
 
