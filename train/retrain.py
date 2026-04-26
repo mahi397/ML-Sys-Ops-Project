@@ -97,7 +97,7 @@ DEFAULT_RETRAIN_CONFIG = {
     "freeze_backbone": False,
     "lr": 2.29e-5,
     "batch_size": 32,
-    "epochs": 2,    # for demo purposes — in prod, set to 8 for better convergence
+    "epochs": 8,    # for demo purposes — in prod, set to 8 for better convergence
     "warmup_ratio": 0.105,
     "weight_decay": 0.072,
     "max_seq_len": 128,
@@ -120,7 +120,7 @@ DEFAULT_RETRAIN_CONFIG = {
     # epochs=2 (demo) yields val_wd≈0.55, so gate raised to 0.65.
     "gate_min_f1": 0.20,
     "gate_max_pk": 0.25,
-    "gate_max_windowdiff": 0.65, # was 0.40
+    "gate_max_windowdiff": 0.40, # was 0.40
     # Slice fairness gate — no single slice may exceed this Pk
     # Set higher than aggregate gate to allow for small-slice noise
     "slice_gate_max_pk": 0.40,
@@ -1128,6 +1128,10 @@ def evaluate_and_register(config: Dict, result, ckpt_data: dict | None = None) -
                 try:
                     client.set_registered_model_alias(
                         config["model_registry_name"], "candidate", version)
+                    # Promote directly to production — serving hot-reload picks it
+                    # up within MODEL_RELOAD_INTERVAL_SECONDS (default 300s).
+                    client.set_registered_model_alias(
+                        config["model_registry_name"], "production", version)
                     # Tag threshold so serving reads it directly from registry
                     client.set_model_version_tag(
                         config["model_registry_name"], version,
@@ -1138,7 +1142,8 @@ def evaluate_and_register(config: Dict, result, ckpt_data: dict | None = None) -
                     client.set_model_version_tag(
                         config["model_registry_name"], version,
                         "gates_passed", "true")
-                    log.info(f"v{version} aliased 'candidate', tagged best_threshold={best_threshold}")
+                    log.info(f"v{version} promoted to 'production' (was 'candidate'), "
+                             f"threshold={best_threshold}")
                 except Exception as e:
                     log.warning(f"Could not set alias/tags: {e}")
         else:
