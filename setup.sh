@@ -86,6 +86,9 @@ docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi >/dev/
     err "WARNING: GPU not accessible in Docker — serving will run CPU-only"
 
 # ── 3. rclone ─────────────────────────────────────────────────────────────────
+# GPU node is on CHI@UC; object storage lives on CHI@TACC (different endpoint +
+# different credentials). We always write the chi_tacc remote from .env so that
+# manually-created configs pointing to chi.uc can't slip through.
 echo -e "\n${YELLOW}[3/10] rclone...${NC}"
 if ! command -v rclone &>/dev/null; then
     info "rclone not found — installing..."
@@ -95,19 +98,28 @@ else
     ok "rclone already installed: $(rclone --version | head -1)"
 fi
 
-if [[ ! -f "${HOME}/.config/rclone/rclone.conf" ]]; then
-    err "rclone config not found at ~/.config/rclone/rclone.conf"
-    echo "Configure the chi_tacc remote before continuing:"
-    echo "  rclone config"
-    echo "  name: chi_tacc  type: s3  provider: Ceph"
-    echo "  endpoint: https://chi.tacc.chameleoncloud.org:7480"
-    echo "  access_key_id + secret_access_key from CHI@TACC openrc"
+# Validate required credentials for CHI@TACC object store
+if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    err "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set in .env — needed for CHI@TACC object store"
     exit 1
 fi
 
+# Write (or overwrite) the chi_tacc remote so it always points to CHI@TACC.
+# This prevents stale configs from a chi.uc session breaking data staging.
+RCLONE_CONF_DIR="${HOME}/.config/rclone"
+mkdir -p "${RCLONE_CONF_DIR}"
+info "Writing rclone remote '${RCLONE_REMOTE}' → chi.tacc.chameleoncloud.org:7480 ..."
+rclone config create "${RCLONE_REMOTE}" s3 \
+    provider=Ceph \
+    endpoint=https://chi.tacc.chameleoncloud.org:7480 \
+    access_key_id="${AWS_ACCESS_KEY_ID}" \
+    secret_access_key="${AWS_SECRET_ACCESS_KEY}" \
+    >/dev/null
+ok "rclone remote '${RCLONE_REMOTE}' written (chi.tacc endpoint)"
+
 info "Verifying ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ ..."
 rclone lsd "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/" >/dev/null 2>&1 || {
-    err "Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — check rclone config"
+    err "Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — check AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in .env"
     exit 1
 }
 ok "rclone remote OK"

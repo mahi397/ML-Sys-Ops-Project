@@ -41,7 +41,9 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 echo -e "${GREEN}Docker Compose OK: $(docker compose version)${NC}"
 
-# ── 2. Install rclone if not present ────────────────────────────
+# ── 2. rclone ────────────────────────────────────────────────────
+# GPU node is on CHI@UC; object storage lives on CHI@TACC (different endpoint).
+# Always write the chi_tacc remote from env credentials to prevent stale configs.
 echo -e "\n${YELLOW}[2/8] rclone...${NC}"
 if ! command -v rclone &>/dev/null; then
     echo "rclone not found — installing..."
@@ -51,24 +53,24 @@ else
     echo "rclone already installed: $(rclone --version | head -1)"
 fi
 
-# Check rclone config exists
-if [ ! -f "${HOME}/.config/rclone/rclone.conf" ]; then
-    echo -e "${RED}rclone config not found at ~/.config/rclone/rclone.conf${NC}"
-    echo -e "${YELLOW}Configure the chi_tacc remote before continuing:${NC}"
-    echo "  rclone config"
-    echo "  name:     chi_tacc"
-    echo "  type:     s3"
-    echo "  provider: Ceph"
-    echo "  endpoint: https://chi.tacc.chameleoncloud.org:7480"
-    echo "  access_key_id + secret_access_key from CHI@TACC openrc"
+if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    echo -e "${RED}AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set — needed for CHI@TACC${NC}"
     exit 1
 fi
 
-# Verify remote access
+mkdir -p "${HOME}/.config/rclone"
+echo "Writing rclone remote '${RCLONE_REMOTE}' → chi.tacc.chameleoncloud.org:7480 ..."
+rclone config create "${RCLONE_REMOTE}" s3 \
+    provider=Ceph \
+    endpoint=https://chi.tacc.chameleoncloud.org:7480 \
+    access_key_id="${AWS_ACCESS_KEY_ID}" \
+    secret_access_key="${AWS_SECRET_ACCESS_KEY}" \
+    >/dev/null
+echo -e "${GREEN}rclone remote '${RCLONE_REMOTE}' written (chi.tacc endpoint)${NC}"
+
 echo "Verifying ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ access..."
 rclone lsd ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ >/dev/null 2>&1 || {
-    echo -e "${RED}Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/${NC}"
-    echo "Check rclone config and credentials"
+    echo -e "${RED}Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — check AWS credentials in .env${NC}"
     exit 1
 }
 echo -e "${GREEN}rclone remote OK${NC}"
