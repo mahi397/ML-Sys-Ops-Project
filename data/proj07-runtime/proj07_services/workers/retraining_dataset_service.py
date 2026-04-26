@@ -183,8 +183,7 @@ class RetrainingDatasetService:
             )
             if feedback_pool is None:
                 self.logger.info(
-                    "Retraining dataset build skipped because no eligible feedback-pool rows were produced | candidate_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
-                    len(candidate_meeting_ids),
+                    "Retraining dataset build skipped because no eligible feedback-pool rows were produced | eligible_meetings=0 structural_feedback_events=%s structural_feedback_meetings=%s",
                     metrics.structural_feedback_event_count,
                     metrics.structural_feedback_meeting_count,
                 )

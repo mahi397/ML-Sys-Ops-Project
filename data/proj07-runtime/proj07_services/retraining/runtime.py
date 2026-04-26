@@ -507,8 +507,7 @@ def build_stage1_feedback_pool(
     )
     if not dataset_rows or not eligible_meetings:
         logger.info(
-            "No retraining rows were produced from the eligible meetings; skipping feedback-pool build | candidate_meetings=%s eligible_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
-            len(candidate_meetings),
+            "No retraining rows were produced for this retraining scan; skipping feedback-pool build | eligible_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
             len(eligible_meetings),
             structural_feedback_event_count,
             structural_feedback_meeting_count,
