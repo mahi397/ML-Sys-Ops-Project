@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import shutil
 from collections import defaultdict
@@ -252,15 +251,6 @@ def meeting_sort_key(meeting_id: str) -> tuple[int, str]:
 def rows_for_meetings(rows: list[dict], meeting_ids: list[str]) -> list[dict]:
     allowed = set(meeting_ids)
     return [row for row in rows if row["input"]["meeting_id"] in allowed]
-
-
-def split_new_meetings(meeting_ids: list[str]) -> tuple[list[str], list[str]]:
-    if not meeting_ids:
-        return [], []
-    midpoint = max(1, math.ceil(len(meeting_ids) / 2))
-    val_meeting_ids = meeting_ids[:midpoint]
-    test_meeting_ids = meeting_ids[midpoint:]
-    return val_meeting_ids, test_meeting_ids
 
 
 def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
@@ -556,30 +546,35 @@ def build_retraining_snapshot(
         }
     else:
         base_dir = config.dataset_root / f"v{base_version}"
-        train_rows = _read_jsonl(base_dir / "train.jsonl")
+        train_rows_base = _read_jsonl(base_dir / "train.jsonl")
         val_rows_base = _read_jsonl(base_dir / "val.jsonl")
         test_rows_base = _read_jsonl(base_dir / "test.jsonl")
-        train_rows = train_rows + val_rows_base + test_rows_base
-        val_meeting_ids, test_meeting_ids = split_new_meetings(new_meeting_ids)
-        val_rows = rows_for_meetings(feedback_rows, val_meeting_ids)
-        test_rows = rows_for_meetings(feedback_rows, test_meeting_ids)
+        new_split_assignments = stable_split_70_15_15(new_meeting_ids)
+        new_train_meeting_ids = new_split_assignments["train"]
+        new_val_meeting_ids = new_split_assignments["val"]
+        new_test_meeting_ids = new_split_assignments["test"]
+        train_rows = train_rows_base + rows_for_meetings(feedback_rows, new_train_meeting_ids)
+        val_rows = val_rows_base + rows_for_meetings(feedback_rows, new_val_meeting_ids)
+        test_rows = test_rows_base + rows_for_meetings(feedback_rows, new_test_meeting_ids)
         split_assignments = {
-            "val": val_meeting_ids,
-            "test": test_meeting_ids,
+            "train": new_train_meeting_ids,
+            "val": new_val_meeting_ids,
+            "test": new_test_meeting_ids,
         }
         split_info = {
             "base_version": base_version,
             "feedback_pool_version": feedback_pool.version,
             "snapshot_version": snapshot_version,
-            "base_roll_forward_policy": "The previous dataset version train/val/test are merged into the new train split before new production meetings are assigned.",
+            "base_roll_forward_policy": "The previous dataset version keeps its train/val/test split assignments, and only newly eligible production meetings are appended to the corresponding split.",
             "new_meeting_selection_policy": "Only meetings whose dataset_version was NULL at retraining discovery time are eligible for assignment.",
             "new_meeting_ids": new_meeting_ids,
-            "val_meeting_ids": val_meeting_ids,
-            "test_meeting_ids": test_meeting_ids,
+            "new_train_meeting_ids": new_train_meeting_ids,
+            "new_val_meeting_ids": new_val_meeting_ids,
+            "new_test_meeting_ids": new_test_meeting_ids,
         }
         packaging = {
             "type": "rolling_temporal_snapshot",
-            "reason": "Each new retraining run rolls the previous dataset version forward into train and reserves only newly-ingested production meetings for validation and test.",
+            "reason": "Each new retraining run preserves the prior split boundaries and appends a fresh meeting-level 70/15/15 split of newly eligible production feedback meetings to train, validation, and test respectively.",
         }
         composition = {
             "base_source": f"{config.dataset_name}/v{base_version}",

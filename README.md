@@ -338,7 +338,7 @@ curl -X POST http://<FLOATING_IP>:9090/-/reload
 - **Ray Serve** for serving: fractional GPU sharing (RoBERTa 0.3 + Mistral 0.7), dynamic batching, deployment handles for pipeline chaining, MLflow hot-reload — all in one container. See [serving/ray_serve/RAY_SERVE_JUSTIFICATION.md](serving/ray_serve/RAY_SERVE_JUSTIFICATION.md).
 - **Ray Train** for retraining: `FailureConfig(max_failures=2)` makes unattended overnight retraining fault-tolerant. Checkpoints go to MinIO so a VM restart mid-epoch resumes from the last saved state.
 - **MLflow `--serve-artifacts`**: The MLflow server proxies all artifact uploads/downloads. Training containers authenticate to chi.tacc S3 through the proxy — no S3 credentials needed in client code.
-- **Strict meeting-ID splits**: Train/val/test splits are fixed by `meeting_id` and never reassigned. New production feedback meetings only enter val/test; the previous dataset version rolls forward into train.
+- **Strict meeting-ID splits**: Train/val/test splits are fixed by `meeting_id` and never reassigned. Each retraining cycle preserves prior split boundaries and appends a fresh meeting-level `70/15/15` split of newly eligible production feedback meetings to train/val/test.
 - **Watermark-based retraining**: The watcher tracks the highest consumed `feedback_event_id`. Corrections are never double-counted across runs even if the watcher restarts.
 
 ---
