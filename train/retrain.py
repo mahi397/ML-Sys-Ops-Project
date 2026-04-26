@@ -266,7 +266,7 @@ def resolve_feedback_path(cfg: Dict) -> Optional[str]:
         cur = conn.cursor()
         cur.execute("""
             SELECT object_key FROM dataset_versions
-            WHERE dataset_name = 'roberta_stage1'
+            WHERE dataset_name = 'roberta_stage1_feedback'
             ORDER BY dataset_version_id DESC LIMIT 1
         """)
         row = cur.fetchone()
@@ -276,8 +276,10 @@ def resolve_feedback_path(cfg: Dict) -> Optional[str]:
             version = obj_key.rstrip("/").split("/")[-1]
             local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback", version)
             if stage_data_from_objstore(obj_key, local_dir, cfg):
-                log.info(f"Resolved feedback from roberta_stage1 latest ({version}): {local_dir}")
+                log.info(f"Resolved feedback from roberta_stage1_feedback ({version}): {local_dir}")
                 return local_dir
+        else:
+            log.info("No roberta_stage1_feedback entry in dataset_versions — skipping feedback augmentation")
     except Exception as e:
         log.warning(f"Could not resolve feedback from DB: {e}")
     return None
