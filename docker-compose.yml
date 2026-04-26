@@ -527,7 +527,7 @@ services:
       MODEL_RELOAD_INTERVAL_SECONDS: "300"
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}  #http://minio:9000        #https://chi.tacc.chameleoncloud.org:7480
     ports:
       - "8000:8000"    # API: /health /segment /summarize /recap /ui /metrics
       - "8265:8265"    # Ray Dashboard
