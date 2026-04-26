@@ -129,7 +129,7 @@ DEFAULT_RETRAIN_CONFIG = {
     # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
-    "ray_storage_path": os.environ.get("RAY_STORAGE", "s3://proj07-mlflow-artifacts/ray-checkpoints"),
+    "ray_storage_path": os.environ.get("RAY_STORAGE", "s3://ray-checkpoints"),
     "ray_max_failures": 2,
 }
 
@@ -1231,30 +1231,19 @@ def _log_to_audit_db(event_type: str, details: dict):
 def _resolve_storage(storage_path: str):
     """Return (path, filesystem) for Ray RunConfig.
 
-    If RAY_STORAGE is s3:// and CHI_TACC_ENDPOINT_URL is set, builds a pyarrow
-    S3FileSystem pointed at chi.tacc using CHI_TACC_ACCESS_KEY / CHI_TACC_SECRET_KEY.
-    Ray checkpoints land in a separate bucket (objstore-proj07-ray) from MLflow artifacts.
+    Checkpoints go to MinIO (local Docker service at http://minio:9000).
+    Plain HTTP, no region detection, reliable within the Docker network.
+    MLflow model artifacts use chi.tacc S3 separately — no overlap.
     """
-    endpoint_url = (
-        os.environ.get("CHI_TACC_ENDPOINT_URL")
-        or os.environ.get("AWS_S3_ENDPOINT_URL", "")
-    )
-    if not (storage_path.startswith("s3://") and endpoint_url):
+    if not storage_path.startswith("s3://"):
         return storage_path, None
-    scheme = "https" if endpoint_url.startswith("https") else "http"
-    endpoint = endpoint_url.replace("https://", "").replace("http://", "")
+    endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
     fs = pafs.S3FileSystem(
-        access_key=(
-            os.environ.get("CHI_TACC_ACCESS_KEY")
-            or os.environ.get("AWS_ACCESS_KEY_ID", "")
-        ),
-        secret_key=(
-            os.environ.get("CHI_TACC_SECRET_KEY")
-            or os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-        ),
+        access_key=os.environ.get("MINIO_USER", "minioadmin"),
+        secret_key=os.environ.get("MINIO_PASSWORD", "changeme_minio"),
         endpoint_override=endpoint,
-        scheme=scheme,
-        region="us-east-1",  # suppress auto-detection against AWS — region is ignored by Ceph
+        scheme="http",
+        region="us-east-1",
     )
     return storage_path[len("s3://"):], fs
 

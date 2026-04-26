@@ -100,6 +100,45 @@ services:
     networks:
       - recap-net
 
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    container_name: minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-changeme_minio}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - /mnt/block/minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - recap-net
+
+  minio-create-buckets:
+    image: minio/mc:RELEASE.2024-01-16T16-07-38Z
+    container_name: minio-create-buckets
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 $${MINIO_USER:-minioadmin} $${MINIO_PASSWORD:-changeme_minio};
+      /usr/bin/mc mb myminio/ray-checkpoints --ignore-existing;
+      exit 0;
+      "
+    environment:
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme_minio}
+    networks:
+      - recap-net
+
   # ═══════════════════════════════════════════════════════════════════════════
   # 3. DATA PIPELINE — ingest, workflow workers, retraining, drift monitor
   # ═══════════════════════════════════════════════════════════════════════════
@@ -520,9 +559,14 @@ services:
         condition: service_healthy
       serving-api:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
-      RAY_STORAGE: s3://proj07-mlflow-artifacts/ray-checkpoints
+      RAY_STORAGE: s3://ray-checkpoints
+      MINIO_ENDPOINT: minio:9000
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme_minio}
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
@@ -555,13 +599,18 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
+      minio:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       MLFLOW_TRACKING_URI: http://mlflow:5000
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
-      RAY_STORAGE: s3://proj07-mlflow-artifacts/ray-checkpoints
+      RAY_STORAGE: s3://ray-checkpoints
+      MINIO_ENDPOINT: minio:9000
+      MINIO_USER: ${MINIO_USER:-minioadmin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme_minio}
       MODEL_NAME: jitsi-topic-segmenter
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       TOKENIZERS_PARALLELISM: "false"

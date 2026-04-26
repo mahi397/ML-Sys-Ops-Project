@@ -73,12 +73,8 @@ rclone lsd ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ >/dev/null 2>&1 || {
 }
 echo -e "${GREEN}rclone remote OK${NC}"
 
-# Ensure Ray checkpoint bucket exists (Ceph returns ACCESS_DENIED on HeadBucket if missing)
-RAY_BUCKET="${RAY_BUCKET:-objstore-proj07}"
-echo "Ensuring Ray checkpoint bucket ${RCLONE_REMOTE}:${RAY_BUCKET} exists..."
-rclone mkdir "${RCLONE_REMOTE}:${RAY_BUCKET}" && \
-    echo -e "${GREEN}Ray checkpoint bucket ready: ${RAY_BUCKET}${NC}" || \
-    echo -e "${RED}WARNING: Could not create ${RAY_BUCKET} — retrain storage will fail${NC}"
+# Ray checkpoint bucket (ray-checkpoints) is created by minio-create-buckets
+# container at compose-up time — no rclone step needed here.
 
 # ── 3. NVIDIA Container Toolkit ──────────────────────────────────
 echo -e "\n${YELLOW}[3/8] NVIDIA Container Toolkit...${NC}"
