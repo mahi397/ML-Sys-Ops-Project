@@ -246,24 +246,10 @@ def trigger_retrain(correction_count, watermark):
         except subprocess.TimeoutExpired:
             log.error(f"  {script_name} timed out after 600s")
 
-    # ── Resolve training data paths ──
+    # ── Resolve training data path ──
+    # retrain.py's resolve_feedback_path() picks up feedback from roberta_stage1
+    # latest version via DB — no need to pass FEEDBACK_DATA_DIR here.
     dataset_obj_key, dataset_version_id = get_latest_dataset_version()
-    feedback_pool_dir = None
-    try:
-        conn = _get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT object_key FROM dataset_versions
-            WHERE dataset_name = 'roberta_stage1_feedback_pool'
-            ORDER BY dataset_version_id DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row:
-            feedback_pool_dir = row[0]
-    except Exception:
-        pass
 
     # ── Step 2: Retrain with Ray Train ──
     log.info("Step 2: Launching retrain with Ray Train...")
@@ -271,9 +257,6 @@ def trigger_retrain(correction_count, watermark):
     if dataset_obj_key:
         retrain_env["DATASET_VERSION"] = str(dataset_version_id)
         log.info(f"  Using dataset: {dataset_obj_key} (version {dataset_version_id})")
-    if feedback_pool_dir:
-        retrain_env["FEEDBACK_DATA_DIR"] = feedback_pool_dir
-        log.info(f"  Using feedback pool: {feedback_pool_dir}")
     # Pass new_watermark so retrain.py can record it in audit_log
     retrain_env["MAX_FEEDBACK_EVENT_ID"] = str(new_watermark)
 

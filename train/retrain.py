@@ -1254,6 +1254,7 @@ def _resolve_storage(storage_path: str):
         ),
         endpoint_override=endpoint,
         scheme=scheme,
+        region="us-east-1",  # suppress auto-detection against AWS — region is ignored by Ceph
     )
     return storage_path[len("s3://"):], fs
 
