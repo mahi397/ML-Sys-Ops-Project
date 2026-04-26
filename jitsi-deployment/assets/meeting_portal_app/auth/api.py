@@ -56,14 +56,12 @@ def api_login(
 @router.post(APP_PREFIX + "/api/signup", response_model=None)
 def api_signup(
     request: Request,
-    user_id: str = Form(...),
     display_name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
     room: str | None = Form(default=None),
 ) -> JSONResponse:
     user, error = register_user(
-        user_id=user_id,
         display_name=display_name,
         email=email,
         password=password,

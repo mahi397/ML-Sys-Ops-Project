@@ -203,22 +203,31 @@ def slugify(value: str) -> str:
     return slug or "mock-user"
 
 
-def make_mock_user(display_name: str) -> dict[str, str]:
+def make_mock_user(display_name: str, meeting_id: str) -> dict[str, str]:
     slug = slugify(display_name)
+    meeting_slug = slugify(meeting_id)
+    meeting_user_suffix = meeting_slug.replace("-", "_")
     return {
-        "user_id": f"speaker_{slug}",
+        "user_id": f"speaker_{slug}__{meeting_user_suffix}",
         "display_name": display_name,
-        "email": f"{slug}.mock@example.com",
+        "email": f"{slug}.{meeting_slug}.mock@example.com",
         "identity_source": IDENTITY_SOURCE,
     }
 
 
-def select_mock_user(speaker_names: list[str], rng: random.Random) -> dict[str, str]:
-    return make_mock_user(rng.choice(speaker_names))
+def select_mock_user(
+    speaker_names: list[str],
+    rng: random.Random,
+    meeting_id: str,
+) -> dict[str, str]:
+    return make_mock_user(rng.choice(speaker_names), meeting_id)
 
 
-def build_room_participants(speaker_names: list[str]) -> list[dict[str, str]]:
-    return [make_mock_user(speaker_name) for speaker_name in speaker_names]
+def build_room_participants(
+    speaker_names: list[str],
+    meeting_id: str,
+) -> list[dict[str, str]]:
+    return [make_mock_user(speaker_name, meeting_id) for speaker_name in speaker_names]
 
 
 def meeting_log_fields(payload: dict[str, Any]) -> dict[str, Any]:
@@ -414,8 +423,8 @@ def build_synthetic_meeting_payload(rng: random.Random) -> dict[str, Any]:
     meeting_room = meeting_name
     utterances = build_utterances(rng)
     speaker_names = list(dict.fromkeys(utterance["speaker"] for utterance in utterances))
-    mock_user = select_mock_user(speaker_names, rng)
-    room_participants = build_room_participants(speaker_names)
+    mock_user = select_mock_user(speaker_names, rng, meeting_id)
+    room_participants = build_room_participants(speaker_names, meeting_id)
     transcript_text = render_transcript(meeting_start, meeting_room, utterances)
     return {
         "meeting_id": meeting_id,
@@ -440,8 +449,8 @@ def build_archived_meeting_payload(path: Path, rng: random.Random) -> dict[str, 
     meeting_room = metadata["meeting_room"] or make_meeting_name(meeting_id)
     speaker_names = metadata["speaker_names"] or ["Archived Speaker"]
     participant_names = metadata["participants"] or speaker_names
-    mock_user = select_mock_user(speaker_names, rng)
-    room_participants = build_room_participants(participant_names)
+    mock_user = select_mock_user(speaker_names, rng, meeting_id)
+    room_participants = build_room_participants(participant_names, meeting_id)
     return {
         "meeting_id": meeting_id,
         "meeting_name": meeting_room,
