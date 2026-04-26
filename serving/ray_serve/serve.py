@@ -333,44 +333,19 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 def _download_model_via_proxy(tracking_uri: str, source_uri: str, dst_path: str) -> str:
     """
-    Download MLflow model artifacts through the --serve-artifacts HTTP proxy.
-    Avoids requiring direct S3 credentials in the serving container.
+    Download MLflow model artifacts via the MLflow SDK (handles auth automatically).
+    Uses mlflow.artifacts.download_artifacts which routes through --serve-artifacts proxy.
     """
     import shutil
-    import requests as _req
-
-    proxy = f"{tracking_uri}/api/2.0/mlflow-artifacts/artifacts"
-
-    def _list(uri, path=""):
-        params = {"artifact_uri": uri}
-        if path:
-            params["path"] = path
-        r = _req.get(proxy, params=params, timeout=30)
-        r.raise_for_status()
-        return r.json().get("files", [])
-
-    def _fetch(uri, path, local_file):
-        os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        params = {"artifact_uri": uri, "path": path}
-        with _req.get(proxy, params=params, stream=True, timeout=300) as r:
-            r.raise_for_status()
-            with open(local_file, "wb") as f:
-                for chunk in r.iter_content(65536):
-                    f.write(chunk)
-
-    def _recurse(uri, rel_path, local_base):
-        for entry in _list(uri, rel_path):
-            ep = entry["path"]
-            local = os.path.join(local_base, ep)
-            if entry.get("is_dir"):
-                _recurse(uri, ep, local_base)
-            else:
-                _fetch(uri, ep, local)
+    import mlflow.artifacts
 
     if os.path.exists(dst_path):
         shutil.rmtree(dst_path)
-    os.makedirs(dst_path)
-    _recurse(source_uri, "", dst_path)
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.artifacts.download_artifacts(
+        artifact_uri=source_uri,
+        dst_path=dst_path,
+    )
     return dst_path
 
 
