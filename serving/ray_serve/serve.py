@@ -336,6 +336,7 @@ def _download_model_via_proxy(tracking_uri: str, source_uri: str, dst_path: str)
     Download MLflow model artifacts via the MLflow SDK (handles auth automatically).
     Uses mlflow.artifacts.download_artifacts which routes through --serve-artifacts proxy.
     """
+    import glob
     import shutil
     import mlflow.artifacts
 
@@ -346,6 +347,11 @@ def _download_model_via_proxy(tracking_uri: str, source_uri: str, dst_path: str)
         artifact_uri=source_uri,
         dst_path=dst_path,
     )
+    # download_artifacts mirrors the S3 path structure under dst_path, so MLmodel
+    # may be nested in subdirectories rather than at the root.
+    hits = glob.glob(os.path.join(dst_path, "**/MLmodel"), recursive=True)
+    if hits:
+        return os.path.dirname(hits[0])
     return dst_path
 
 
