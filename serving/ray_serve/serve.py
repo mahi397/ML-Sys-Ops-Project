@@ -438,79 +438,38 @@ class MetricsDeployment:
             'jitsi_feedback_corrections_total', 'User boundary corrections',
             ['action'], registry=self.registry
         )
-        self.feedback_edits = Counter(
-            'jitsi_feedback_edits_total', 'User summary edit events',
-            ['edit_type'], registry=self.registry
-        )
+        # Pre-initialize all known action labels so they appear in Prometheus from startup
+        for _action in ("remove_boundary", "add_boundary", "overall", "overall_positive",
+                        "overall_negative", "edit_topic_label", "edit_summary_bullets"):
+            self.feedback_corrections.labels(action=_action)
+
         self.feedback_total_gauge = Gauge(
-            'jitsi_feedback_events_total', 'Total feedback events in DB',
+            'jitsi_feedback_events_total', 'Total feedback events in Postgres DB',
             registry=self.registry
         )
-        # Initialize label sets so Prometheus exposes them from startup (not just after first event)
-        for _action in ("remove_boundary", "add_boundary", "overall_positive", "overall_negative"):
-            self.feedback_corrections.labels(action=_action)
-        for _edit in ("edit_topic_label", "edit_summary_bullets"):
-            self.feedback_edits.labels(edit_type=_edit)
 
-        # DB polling state — tracks the last feedback_event_id we already counted
-        self._last_feedback_id = 0
-        if DATABASE_URL:
-            threading.Thread(target=self._poll_feedback_db, daemon=True).start()
+        # Poll Postgres feedback_events table every 60s and update gauge
+        self._db_poll_thread = threading.Thread(
+            target=self._poll_feedback_db, daemon=True
+        )
+        self._db_poll_thread.start()
 
     def _poll_feedback_db(self):
-        """Poll Postgres feedback_events table and drive Prometheus feedback metrics.
-
-        Feedback goes: Jitsi UI → meeting-portal-app → Postgres (bypasses serve.py).
-        This thread bridges that gap so Grafana panels show real data.
-        event_type → action/edit_type mapping mirrors summaries/service.py logic.
-        """
-        # event_type values written by meeting-portal-app (summaries/service.py)
-        boundary_map = {
-            "merge_segments": "remove_boundary",
-            "split_segment":  "add_boundary",
-            "accept_summary":        "overall_positive",
-            "boundary_correction":   "overall_negative",
-        }
-        edit_types = {"edit_topic_label", "edit_summary_bullets"}
+        import psycopg2
+        db_url = os.getenv("DATABASE_URL", "")
+        if not db_url:
+            return
         poll_interval = 60
-
         while True:
-            time.sleep(poll_interval)
             try:
-                import psycopg2
-                import psycopg2.extras
-                with psycopg2.connect(DATABASE_URL) as conn:
-                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                        cur.execute(
-                            """
-                            SELECT event_type, COUNT(*) AS cnt,
-                                   MAX(feedback_event_id) AS max_id
-                            FROM feedback_events
-                            WHERE feedback_event_id > %s
-                            GROUP BY event_type
-                            """,
-                            (self._last_feedback_id,),
-                        )
-                        rows = cur.fetchall()
-
-                        cur.execute("SELECT COUNT(*) AS total FROM feedback_events")
-                        total = cur.fetchone()["total"]
-
-                max_seen = self._last_feedback_id
-                for row in rows:
-                    etype = row["event_type"]
-                    cnt   = int(row["cnt"])
-                    if row["max_id"] and row["max_id"] > max_seen:
-                        max_seen = row["max_id"]
-                    if etype in boundary_map:
-                        self.feedback_corrections.labels(action=boundary_map[etype]).inc(cnt)
-                    elif etype in edit_types:
-                        self.feedback_edits.labels(edit_type=etype).inc(cnt)
-
-                self._last_feedback_id = max_seen
-                self.feedback_total_gauge.set(total)
+                with psycopg2.connect(db_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM feedback_events")
+                        total = cur.fetchone()[0]
+                        self.feedback_total_gauge.set(total)
             except Exception as e:
-                print(f"[metrics] feedback DB poll failed: {e}")
+                print(f"[metrics] DB poll error: {e}")
+            time.sleep(poll_interval)
 
     def _update_system(self):
         try:
@@ -597,7 +556,7 @@ class SegmenterDeployment:
                 # ── Load model: MLflow registry → local path → base weights ──
         self.model = None
         self.model_version = "base"
-        self.current_mlflow_version = "unknown"
+        self.current_mlflow_version =  None # not yet loaded from MLflow
         self.threshold = BOUNDARY_THRESHOLD  # default fallback 
 
         # 1. Try MLflow registry
@@ -668,16 +627,22 @@ class SegmenterDeployment:
     def _reload_loop(self):
         import mlflow.pytorch
         check_interval = int(os.getenv("MODEL_RELOAD_INTERVAL_SECONDS", "300"))
+        _last_failed_version = None  # avoid retrying a version whose download already failed
         while True:
             time.sleep(check_interval)
             try:
                 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
                 client = mlflow.tracking.MlflowClient()
                 alias_mv = client.get_model_version_by_alias(MLFLOW_MODEL_NAME, MODEL_ALIAS)
-                new_version = alias_mv.version
+                new_version = str(alias_mv.version)
 
-                if str(new_version) != str(self.current_mlflow_version):
-                    print(f"[segmenter] New model version detected: {new_version}, reloading...")
+                if new_version == str(self.current_mlflow_version):
+                    continue  # already on this version
+                if new_version == str(_last_failed_version):
+                    continue  # download failed last time, wait for a new version
+
+                print(f"[segmenter] New model version detected: {new_version}, reloading...")
+                try:
                     new_model = mlflow.pytorch.load_model(
                         f"models:/{MLFLOW_MODEL_NAME}@{MODEL_ALIAS}"
                     )
@@ -687,17 +652,28 @@ class SegmenterDeployment:
                      #  READ NEW THRESHOLD 
                     tags = alias_mv.tags or {}
                     new_threshold = float(tags.get("best_threshold", self.threshold))
+                    old_version = self.model_version
                     with self._model_lock:
                         self.model = new_model
-                        self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"  # ← consistent format
+                        self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"
                         self.current_mlflow_version = new_version
-                        self.threshold = new_threshold 
-                    print(f"[segmenter] Model reloaded: {new_version}")
+                        self.threshold = new_threshold
+                    _last_failed_version = None
+                    # Clear old version from Grafana before reporting new one
+                    self.metrics.record.remote({
+                        "endpoint": "segment", "model_loaded": False,
+                        "model_name": "roberta_segmenter",
+                        "model_version": old_version
+                    })
                     self.metrics.record.remote({
                         "endpoint": "segment", "model_loaded": True,
                         "model_name": "roberta_segmenter",
-                        "model_version": new_version
+                        "model_version": self.model_version
                     })
+                    print(f"[segmenter] Model reloaded: v{new_version}, threshold={new_threshold}")
+                except Exception as download_err:
+                    print(f"[segmenter] Download failed for v{new_version}: {download_err}")
+                    _last_failed_version = new_version  # skip this version next poll
             except Exception as e:
                 print(f"[segmenter] Reload check failed: {e}")
 

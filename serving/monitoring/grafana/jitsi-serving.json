@@ -15,7 +15,7 @@
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "datasource": "Prometheus",
       "targets": [
-        { "expr": "sum(jitsi_requests_total)", "legendFormat": "Total" }
+        {  "expr": "sum(jitsi_requests_total{endpoint=~\"segment|summarize\"})", "legendFormat": "Total" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -448,7 +448,7 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "rate(jitsi_feedback_corrections_total[10m]) / rate(jitsi_requests_total{endpoint=\"segment\", status=\"success\"}[10m]) * 100",
+          "expr": "sum(increase(jitsi_feedback_corrections_total[1h])) / (sum(increase(jitsi_recap_segments_per_meeting_count[1h])) > 0) * 100",
           "legendFormat": "Correction %"
         }
       ],
@@ -468,14 +468,14 @@
       }
     },
     {
-      "title": "Pending Corrections (retraining trigger)",
+      "title": "Feedback Events (total in DB)",
       "type": "stat",
       "gridPos": { "h": 7, "w": 6, "x": 18, "y": 47 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "jitsi_feedback_corrections_total - (jitsi_feedback_corrections_total offset 24h) or vector(0)",
-          "legendFormat": "Pending (24h)"
+          "expr": "jitsi_feedback_events_total",
+          "legendFormat": "Total Events"
         }
       ],
       "fieldConfig": {
@@ -483,8 +483,8 @@
           "thresholds": {
             "steps": [
               { "color": "green", "value": null },
-              { "color": "orange", "value": 3 },
-              { "color": "red", "value": 5 }
+              { "color": "orange", "value": 50 },
+              { "color": "red", "value": 200 }
             ]
           }
         }
