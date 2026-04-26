@@ -22,8 +22,7 @@ Runs as a long-lived container. Periodically checks:
   2. How long since the last retrain
 
 If either threshold is met, triggers:
-  Aneesh's retraining_dataset_runtime (build_feedback_pool.py + build_retraining_snapshot.py)
-  → Mahima's retrain.py (Ray Train fault-tolerant training)
+  retrain.py (Ray Train fault-tolerant training on latest roberta_stage1/vN)
 """
 
 import json
@@ -215,44 +214,9 @@ def trigger_retrain(correction_count, watermark):
         "trigger_time": datetime.now(timezone.utc).isoformat(),
     })
 
-    # ── Step 1: Build retraining dataset ──
-    # Aneesh's retraining_dataset_runtime produces:
-    #   - datasets/roberta_stage1_feedback_pool/vN/ (feedback examples)
-    #   - datasets/roberta_stage1/vN/ (merged AMI + feedback snapshot)
-    #   - Registers new version in dataset_versions table
-    log.info("Step 1: Running retraining dataset build...")
-    batch_scripts = [
-        ("build_feedback_pool.py", "Build feedback pool from corrected meetings"),
-        ("build_retraining_snapshot.py", "Build merged training snapshot"),
-    ]
-    for script_name, description in batch_scripts:
-        try:
-            log.info(f"  Running {description} ({script_name})...")
-            result = subprocess.run(
-                [sys.executable, script_name],
-                capture_output=True, text=True, timeout=600,
-                cwd="/app",
-            )
-            if result.returncode != 0:
-                log.error(f"  {script_name} failed: {result.stderr[:500]}")
-                _log_audit("retrain_batch_failed", {
-                    "script": script_name, "stderr": result.stderr[:500]
-                })
-                # Don't abort — the retrain can still run on existing dataset
-            else:
-                log.info(f"  {script_name} completed successfully")
-        except FileNotFoundError:
-            log.warning(f"  {script_name} not found — skipping (will use existing dataset)")
-        except subprocess.TimeoutExpired:
-            log.error(f"  {script_name} timed out after 600s")
-
-    # ── Resolve training data path ──
-    # retrain.py's resolve_feedback_path() picks up feedback from roberta_stage1
-    # latest version via DB — no need to pass FEEDBACK_DATA_DIR here.
     dataset_obj_key, dataset_version_id = get_latest_dataset_version()
 
-    # ── Step 2: Retrain with Ray Train ──
-    log.info("Step 2: Launching retrain with Ray Train...")
+    log.info("Launching retrain with Ray Train...")
     retrain_env = os.environ.copy()
     if dataset_obj_key:
         retrain_env["DATASET_VERSION"] = str(dataset_version_id)

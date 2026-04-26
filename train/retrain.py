@@ -109,8 +109,6 @@ DEFAULT_RETRAIN_CONFIG = {
     "warm_start_model_alias": "production",
     # Data paths
     "data_dir": "/mnt/block/roberta_stage1/v2",
-    "feedback_data_dir": None,
-    "feedback_weight": 2.0,
     # Object storage
     "objstore_bucket": "objstore-proj07",
     "staging_base": "/mnt/block",
@@ -141,7 +139,6 @@ def load_retrain_config(config_path: Optional[str] = None) -> Dict:
             cfg.update(yaml.safe_load(f))
     env_overrides = {
         "DATA_DIR": "data_dir",
-        "FEEDBACK_DATA_DIR": "feedback_data_dir",
         "MODEL_NAME": "model_registry_name",
         "RETRAIN_LR": "lr",
         "RETRAIN_EPOCHS": "epochs",
@@ -153,7 +150,7 @@ def load_retrain_config(config_path: Optional[str] = None) -> Dict:
         val = os.environ.get(env_key)
         if val:
             cfg[cfg_key] = val
-    for k in ("lr", "weight_decay", "warmup_ratio", "dropout", "feedback_weight",
+    for k in ("lr", "weight_decay", "warmup_ratio", "dropout",
               "max_oversample", "gate_min_f1", "gate_max_pk", "gate_max_windowdiff",
               "slice_gate_max_pk"):
         if k in cfg and cfg[k] is not None:
@@ -251,38 +248,6 @@ def resolve_dataset_path(cfg: Dict) -> str:
     return cfg["data_dir"]
 
 
-def resolve_feedback_path(cfg: Dict) -> Optional[str]:
-    if cfg.get("feedback_data_dir"):
-        if os.path.exists(cfg["feedback_data_dir"]):
-            return cfg["feedback_data_dir"]
-        version = cfg["feedback_data_dir"].rstrip("/").split("/")[-1]
-        local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback", version)
-        if stage_data_from_objstore(cfg["feedback_data_dir"], local_dir, cfg):
-            return local_dir
-    db_url = os.environ.get("DATABASE_URL", "postgresql://recap:changeme@postgres:5432/proj07_sql_db")
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT object_key FROM dataset_versions
-            WHERE dataset_name = 'roberta_stage1_feedback'
-            ORDER BY dataset_version_id DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        cur.close(); conn.close()
-        if row:
-            obj_key = row[0]
-            version = obj_key.rstrip("/").split("/")[-1]
-            local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback", version)
-            if stage_data_from_objstore(obj_key, local_dir, cfg):
-                log.info(f"Resolved feedback from roberta_stage1_feedback ({version}): {local_dir}")
-                return local_dir
-        else:
-            log.info("No roberta_stage1_feedback entry in dataset_versions — skipping feedback augmentation")
-    except Exception as e:
-        log.warning(f"Could not resolve feedback from DB: {e}")
-    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -333,33 +298,6 @@ def load_split_with_metadata(data_dir: str, split: str) -> Tuple[List, List, Lis
     meeting_ids = [e["input"]["meeting_id"] for e in examples]
     n_speakers = [len(set(u["speaker"] for u in e["input"]["window"] if u["speaker"] is not None)) for e in examples]
     return texts, labels, meeting_ids, n_speakers
-
-
-def load_feedback_data(feedback_dir: str) -> Tuple[List, List, List]:
-    for filename in ("feedback_examples.jsonl", "feedback_train.jsonl", "train.jsonl"):
-        path = os.path.join(feedback_dir, filename)
-        if os.path.exists(path):
-            examples = load_jsonl(path)
-            if os.environ.get("RETRAIN_DEBUG_SUBSAMPLE"):
-                examples = examples[:500]
-            texts = [format_window(e["input"]["window"]) for e in examples]
-            labels = [e["output"]["label"] for e in examples]
-            meeting_ids = [e["input"]["meeting_id"] for e in examples]
-            log.info(f"Loaded {len(texts)} feedback examples from {path}")
-            return texts, labels, meeting_ids
-    log.info(f"No feedback data found in {feedback_dir} — AMI only")
-    return [], [], []
-
-
-def merge_datasets(ami_texts, ami_labels, ami_mids, fb_texts, fb_labels, fb_mids,
-                   feedback_weight: float = 2.0):
-    n_repeats = max(1, int(feedback_weight))
-    log.info(f"Merged: {len(ami_texts)} AMI + {len(fb_texts)}x{n_repeats} feedback"
-             f" = {len(ami_texts) + len(fb_texts) * n_repeats} total")
-    # log.info(f"Merged: AMI + feedback (weight={feedback_weight})")
-    return (ami_texts + fb_texts * n_repeats,
-            ami_labels + fb_labels * n_repeats,
-            ami_mids + fb_mids * n_repeats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -704,10 +642,8 @@ def build_model_card(
 
         # Transparency: training data provenance
         "training_data": {
-            "source": "AMI Meeting Corpus (Univ. of Edinburgh) + user feedback corrections",
+            "source": "AMI Meeting Corpus (Univ. of Edinburgh)",
             "dataset_version": dataset_version,
-            "feedback_included": config.get("feedback_data_dir") is not None,
-            "feedback_weight": config.get("feedback_weight", 0),
             "split_strategy": "strict split by meeting_id — no meeting spans train/val/test",
             "leakage_controls": (
                 "Meeting IDs frozen at roberta_stage1/v1 creation; Jitsi meetings "
@@ -877,14 +813,6 @@ def train_func(config: Dict):
     if config.get("debug_subsample"):
         train_texts, train_labels = train_texts[:500], train_labels[:500]
     val_texts, val_labels, val_meeting_ids = load_split(config["data_dir"], "val")
-
-    if config.get("feedback_data_dir"):
-        fb_texts, fb_labels, fb_mids = load_feedback_data(config["feedback_data_dir"])
-        if fb_texts:
-            train_texts, train_labels, _ = merge_datasets(
-                train_texts, train_labels, ["ami"] * len(train_texts),
-                fb_texts, fb_labels, fb_mids, config.get("feedback_weight", 2.0),
-            )
 
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
     # Include relabeled speaker tokens for template perturbation tests
@@ -1137,7 +1065,6 @@ def evaluate_and_register(config: Dict, result, ckpt_data: dict | None = None) -
             "epochs": config["epochs"], "max_oversample": config["max_oversample"],
             "dropout": config["dropout"], "warmup_ratio": config["warmup_ratio"],
             "weight_decay": config["weight_decay"],
-            "feedback_weight": config.get("feedback_weight", 0),
             "dataset_version": dataset_version,
             "warm_start": config.get("warm_start_model_alias", "none"),
             "ray_num_workers": config["ray_num_workers"],
@@ -1285,7 +1212,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--data_dir", default=None)
-    parser.add_argument("--feedback_data_dir", default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--no_gpu", action="store_true",
@@ -1293,20 +1219,15 @@ def main():
     args = parser.parse_args()
 
     cfg = load_retrain_config(args.config)
-    if args.data_dir:       cfg["data_dir"] = args.data_dir
-    if args.feedback_data_dir: cfg["feedback_data_dir"] = args.feedback_data_dir
-    if args.epochs:         cfg["epochs"] = args.epochs
-    if args.lr:             cfg["lr"] = args.lr
-    if args.no_gpu:         cfg["ray_use_gpu"] = False
+    if args.data_dir:  cfg["data_dir"] = args.data_dir
+    if args.epochs:    cfg["epochs"] = args.epochs
+    if args.lr:        cfg["lr"] = args.lr
+    if args.no_gpu:    cfg["ray_use_gpu"] = False
 
     cfg["data_dir"] = resolve_dataset_path(cfg)
-    fb_dir = resolve_feedback_path(cfg)
-    if fb_dir:
-        cfg["feedback_data_dir"] = fb_dir
 
     log.info("Starting retrain pipeline")
     log.info(f"  data_dir:     {cfg['data_dir']}")
-    log.info(f"  feedback_dir: {cfg.get('feedback_data_dir', 'none')}")
     log.info(f"  objstore:     {cfg['rclone_remote']}:{cfg['objstore_bucket']}")
     log.info(f"  gates:        F1>={cfg['gate_min_f1']}, Pk<={cfg['gate_max_pk']}, "
              f"WD<={cfg['gate_max_windowdiff']}, SlicePk<={cfg['slice_gate_max_pk']}")
