@@ -463,9 +463,13 @@ class ForwardServiceConfig:
     model_version: str = os.getenv("STAGE2_MODEL_VERSION", "").strip()
     prompt_version: str = os.getenv("STAGE2_PROMPT_VERSION", "").strip()
     upload_artifacts: bool = env_flag("STAGE2_FORWARD_UPLOAD_ARTIFACTS", True)
-    retraining_validity_window_size: int = env_int(
+    retraining_validity_min_utterances: int = env_int(
         "RETRAINING_DATASET_WINDOW_SIZE",
         env_int("STAGE1_WINDOW_SIZE", 7),
+    )
+    retraining_validity_min_utterance_chars: int = env_int(
+        "RETRAINING_DATASET_MIN_UTTERANCE_CHARS",
+        env_int("STAGE1_MIN_UTTERANCE_CHARS", 20),
     )
     heartbeat_interval_seconds: float = env_float(
         "WORKFLOW_TASK_HEARTBEAT_INTERVAL_SECONDS",
@@ -486,6 +490,24 @@ class Stage2ForwardService:
     config: ForwardServiceConfig
     logger: object
     worker_id: str = field(default_factory=lambda: make_worker_id(APP_NAME))
+
+    def count_eligible_source_utterances(self, conn, meeting_id: str) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS eligible_source_utterance_count
+                FROM utterances
+                WHERE meeting_id = %s
+                  AND BTRIM(COALESCE(clean_text, '')) <> ''
+                  AND CHAR_LENGTH(BTRIM(COALESCE(clean_text, ''))) >= %s
+                """,
+                (
+                    meeting_id,
+                    self.config.retraining_validity_min_utterance_chars,
+                ),
+            )
+            row = cur.fetchone()
+        return int(row["eligible_source_utterance_count"] or 0)
 
     def count_model_utterances(self, stage2_inputs: list[dict[str, Any]]) -> int:
         total = 0
@@ -1045,8 +1067,12 @@ class Stage2ForwardService:
             )
 
         model_utterance_count = self.count_model_utterances(stage2_inputs)
+        eligible_source_utterance_count = self.count_eligible_source_utterances(
+            conn,
+            meeting_id,
+        )
         computed_is_valid = bool(recap_payload) and (
-            model_utterance_count >= self.config.retraining_validity_window_size
+            eligible_source_utterance_count >= self.config.retraining_validity_min_utterances
         )
         with conn.cursor() as cur:
             cur.execute(
@@ -1059,10 +1085,12 @@ class Stage2ForwardService:
             )
         if not computed_is_valid:
             self.logger.info(
-                "Marked meeting invalid after Stage 2 materialization | meeting_id=%s model_utterances=%s threshold=%s summary_created=%s",
+                "Marked meeting invalid after Stage 2 materialization | meeting_id=%s eligible_source_utterances=%s threshold=%s min_chars=%s model_utterances=%s summary_created=%s",
                 meeting_id,
+                eligible_source_utterance_count,
+                self.config.retraining_validity_min_utterances,
+                self.config.retraining_validity_min_utterance_chars,
                 model_utterance_count,
-                self.config.retraining_validity_window_size,
                 bool(recap_payload),
             )
         conn.commit()
@@ -1087,8 +1115,10 @@ def validate_config(config: ForwardServiceConfig) -> None:
         raise ValueError(
             "WORKFLOW_TASK_BACKOFF_MAX_SECONDS must be >= WORKFLOW_TASK_BACKOFF_BASE_SECONDS"
         )
-    if config.retraining_validity_window_size <= 0:
+    if config.retraining_validity_min_utterances <= 0:
         raise ValueError("RETRAINING_DATASET_WINDOW_SIZE must be > 0")
+    if config.retraining_validity_min_utterance_chars <= 0:
+        raise ValueError("RETRAINING_DATASET_MIN_UTTERANCE_CHARS must be > 0")
 
 
 def main() -> None:
@@ -1105,14 +1135,15 @@ def main() -> None:
 
     logger.info("Starting %s", APP_NAME)
     logger.info(
-        "Stage 2 forward config | poll_interval=%ss request_root=%s response_root=%s url=%s format=%s upload=%s validity_window=%s worker_id=%s",
+        "Stage 2 forward config | poll_interval=%ss request_root=%s response_root=%s url=%s format=%s upload=%s validity_min_utterances=%s validity_min_chars=%s worker_id=%s",
         config.poll_interval_seconds,
         config.request_root.resolve(),
         config.response_root.resolve(),
         config.endpoint_url,
         config.payload_format,
         config.upload_artifacts,
-        config.retraining_validity_window_size,
+        config.retraining_validity_min_utterances,
+        config.retraining_validity_min_utterance_chars,
         service.worker_id,
     )
 
