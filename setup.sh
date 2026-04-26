@@ -112,6 +112,13 @@ rclone lsd "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/" >/dev/null 2>&1 || {
 }
 ok "rclone remote OK"
 
+# Ensure Ray checkpoint bucket exists (Ceph returns ACCESS_DENIED on HeadBucket if missing)
+RAY_BUCKET="${RAY_BUCKET:-objstore-proj07}"
+info "Ensuring Ray checkpoint bucket ${RCLONE_REMOTE}:${RAY_BUCKET} exists..."
+rclone mkdir "${RCLONE_REMOTE}:${RAY_BUCKET}" && \
+    ok "Ray checkpoint bucket ready: ${RAY_BUCKET}" || \
+    err "WARNING: Could not create ${RAY_BUCKET} — retrain storage will fail"
+
 # ── 4. Block storage layout ───────────────────────────────────────────────────
 echo -e "\n${YELLOW}[4/10] Block storage layout...${NC}"
 sudo mkdir -p \
