@@ -179,6 +179,11 @@ def production_jitsi_meeting_filter_sql(meeting_alias: str = "m") -> str:
     """
 
 
+def retraining_jitsi_meeting_filter_sql(meeting_alias: str = "m") -> str:
+    alias = meeting_alias.strip() or "m"
+    return f"{alias}.source_type = 'jitsi'"
+
+
 def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
     profile_path = version_root / "profile.json"
     profile = load_reference_profile(profile_path)
@@ -344,7 +349,7 @@ def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
             WITH eligible_meetings AS (
                 SELECT meeting_id
                 FROM meetings m
-                WHERE {production_jitsi_meeting_filter_sql("m")}
+                WHERE {retraining_jitsi_meeting_filter_sql("m")}
                   AND is_valid = TRUE
                   AND dataset_version IS NULL
             ),
@@ -386,7 +391,7 @@ def fetch_candidate_meeting_ids(conn) -> list[str]:
             f"""
             SELECT DISTINCT m.meeting_id
             FROM meetings m
-            WHERE {production_jitsi_meeting_filter_sql("m")}
+            WHERE {retraining_jitsi_meeting_filter_sql("m")}
               AND m.is_valid = TRUE
               AND m.dataset_version IS NULL
               AND EXISTS (
@@ -523,7 +528,7 @@ def build_stage1_feedback_pool(
         },
         "packaging": {
             "type": "retraining_pool",
-            "reason": "Runtime service compiled the next Stage 1 retraining pool from valid, unconsumed Jitsi meetings, preferring user-corrected segments when available and otherwise falling back to predicted segments.",
+            "reason": "Runtime service compiled the next Stage 1 retraining pool from all valid, unconsumed Jitsi meetings, including emulated meetings when they pass validity checks, preferring user-corrected segments when available and otherwise falling back to predicted segments.",
         },
         "params": {
             "window_size": config.window_size,
@@ -703,7 +708,7 @@ def build_retraining_snapshot(
             "base_version": None,
             "feedback_pool_version": feedback_pool.version,
             "snapshot_version": snapshot_version,
-            "base_roll_forward_policy": "No historical base dataset was available, so the snapshot was bootstrapped directly from production feedback meetings.",
+            "base_roll_forward_policy": "No historical base dataset was available, so the snapshot was bootstrapped directly from all newly eligible valid Jitsi meetings.",
             "new_meeting_selection_policy": "Only meetings whose dataset_version was NULL at retraining discovery time are eligible for assignment.",
             "new_meeting_ids": new_meeting_ids,
             "train_meeting_ids": split_assignments["train"],
@@ -711,8 +716,8 @@ def build_retraining_snapshot(
             "test_meeting_ids": split_assignments["test"],
         }
         packaging = {
-            "type": "bootstrap_from_production_feedback",
-            "reason": "No historical base dataset was found under the configured dataset root, so the runtime bootstrapped the first snapshot from current production feedback.",
+            "type": "bootstrap_from_runtime_feedback",
+            "reason": "No historical base dataset was found under the configured dataset root, so the runtime bootstrapped the first snapshot from all newly eligible valid Jitsi meetings.",
         }
         composition = {
             "base_source": None,
@@ -747,7 +752,7 @@ def build_retraining_snapshot(
             "base_version": base_version,
             "feedback_pool_version": feedback_pool.version,
             "snapshot_version": snapshot_version,
-            "base_roll_forward_policy": "The previous dataset version keeps its train/val/test split assignments, and only newly eligible production meetings are appended to the corresponding split.",
+            "base_roll_forward_policy": "The previous dataset version keeps its train/val/test split assignments, and only newly eligible valid Jitsi meetings are appended to the corresponding split.",
             "new_meeting_selection_policy": "Only meetings whose dataset_version was NULL at retraining discovery time are eligible for assignment.",
             "new_meeting_ids": new_meeting_ids,
             "new_train_meeting_ids": new_train_meeting_ids,
@@ -756,7 +761,7 @@ def build_retraining_snapshot(
         }
         packaging = {
             "type": "rolling_temporal_snapshot",
-            "reason": "Each new retraining run preserves the prior split boundaries and appends a fresh meeting-level 70/15/15 split of newly eligible production feedback meetings to train, validation, and test respectively.",
+            "reason": "Each new retraining run preserves the prior split boundaries and appends a fresh meeting-level 70/15/15 split of newly eligible valid Jitsi meetings to train, validation, and test respectively.",
         }
         composition = {
             "base_source": f"{config.dataset_name}/v{base_version}",
