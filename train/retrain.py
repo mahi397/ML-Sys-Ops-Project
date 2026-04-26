@@ -845,6 +845,11 @@ def train_func(config: Dict):
     np.random.seed(config.get("seed", 42))
 
     train_texts, train_labels, _ = load_split(config["data_dir"], "train")
+    if not train_texts:
+        raise RuntimeError(
+            f"No training examples found in {config['data_dir']} — "
+            "data was not staged correctly (check rclone and dataset_versions)"
+        )
     if config.get("debug_subsample"):
         train_texts, train_labels = train_texts[:500], train_labels[:500]
     val_texts, val_labels, val_meeting_ids = load_split(config["data_dir"], "val")
