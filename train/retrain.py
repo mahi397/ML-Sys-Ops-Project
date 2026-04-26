@@ -181,18 +181,23 @@ def stage_data_from_objstore(objstore_path: str, local_dir: str, cfg: Dict = Non
     try:
         result = subprocess.run(
             ["rclone", "copy", remote, local_dir, "--progress"],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
-            log.error(f"rclone failed: {result.stderr[:500]}")
+            log.error(f"rclone failed (exit {result.returncode}): {result.stderr[:1000]}")
             return False
-        log.info(f"Staged {len(os.listdir(local_dir))} files to {local_dir}")
+        staged = [f for f in os.listdir(local_dir) if f.endswith(".jsonl")]
+        if not staged:
+            log.error(f"rclone exited 0 but no .jsonl files in {local_dir} — "
+                      f"check remote path: {remote}\nstdout: {result.stdout[:500]}\nstderr: {result.stderr[:500]}")
+            return False
+        log.info(f"Staged {len(staged)} .jsonl files to {local_dir}")
         return True
     except FileNotFoundError:
-        log.warning("rclone not found — assuming data is already staged locally")
-        return os.path.exists(local_dir)
+        log.error("rclone not found in PATH — install rclone in the container")
+        return False
     except subprocess.TimeoutExpired:
-        log.error("rclone timed out after 300s")
+        log.error("rclone timed out after 600s")
         return False
 
 
