@@ -500,11 +500,16 @@ services:
       PRODUCTION_DRIFT_MONITOR_MAX_DRIFT_SHARE: ${PRODUCTION_DRIFT_MONITOR_MAX_DRIFT_SHARE:-0.35}
       PRODUCTION_DRIFT_MONITOR_MIN_FEATURE_SAMPLES: ${PRODUCTION_DRIFT_MONITOR_MIN_FEATURE_SAMPLES:-25}
       PRODUCTION_DRIFT_MONITOR_NUMERIC_BIN_COUNT: ${PRODUCTION_DRIFT_MONITOR_NUMERIC_BIN_COUNT:-10}
+      PRODUCTION_DRIFT_MONITOR_REPORT_OBJECT_PREFIX: ${PRODUCTION_DRIFT_MONITOR_REPORT_OBJECT_PREFIX:-quality_reports/production_live/roberta_stage1}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.production_drift_monitor"]
     volumes:
       - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
       - /mnt/block/roberta_stage1:/mnt/block/roberta_stage1
       - /mnt/block/ingest_logs/production_drift_monitor:/mnt/block/ingest_logs/production_drift_monitor
+      - ${HOME}/.config/rclone:/config/rclone:ro
     networks:
       - recap-net
 

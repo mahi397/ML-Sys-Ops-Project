@@ -24,6 +24,7 @@ from proj07_services.common.feedback_common import (
     next_dataset_version_number,
     pick_stage1_examples,
     stable_split_70_15_15,
+    upload_file,
     upload_dir,
     write_json,
     write_jsonl,
@@ -264,6 +265,19 @@ def move_tree(source: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.move(str(source), str(destination))
+
+
+def dataset_quality_report_object_key(
+    *,
+    object_prefix: str,
+    version: int,
+    out_root: Path,
+    publish_allowed: bool,
+) -> str:
+    normalized_prefix = object_prefix.strip("/")
+    if publish_allowed:
+        return f"{normalized_prefix}/v{version}/quality_report.json"
+    return f"{normalized_prefix}/_quarantine/{out_root.name}/quality_report.json"
 
 
 def evaluate_stage1_quality_gate(
@@ -510,6 +524,14 @@ def build_stage1_feedback_pool(
         out_root = quarantine_root(config.feedback_pool_root, version)
         move_tree(staging_root, out_root)
 
+    quality_report_object_key = dataset_quality_report_object_key(
+        object_prefix=config.feedback_pool_object_prefix,
+        version=version,
+        out_root=out_root,
+        publish_allowed=publish_allowed,
+    )
+    upload_file(out_root / "quality_report.json", quality_report_object_key, logger)
+
     insert_dataset_quality_report(
         conn,
         dataset_name="roberta_stage1_feedback_pool",
@@ -518,7 +540,7 @@ def build_stage1_feedback_pool(
         dataset_version=str(version) if publish_allowed else None,
         reference_dataset_name="roberta_stage1_feedback_pool",
         reference_dataset_version=None if reference_version is None else str(reference_version),
-        report_path=str((out_root / "quality_report.json").resolve()),
+        report_path=quality_report_object_key,
         share_drifted_features=quality_report["share_drifted_features"],
         drifted_feature_count=quality_report["drifted_feature_count"],
         total_feature_count=quality_report["total_feature_count"],
@@ -744,6 +766,14 @@ def build_retraining_snapshot(
         out_root = quarantine_root(config.dataset_root, snapshot_version)
         move_tree(staging_root, out_root)
 
+    quality_report_object_key = dataset_quality_report_object_key(
+        object_prefix=config.dataset_object_prefix,
+        version=snapshot_version,
+        out_root=out_root,
+        publish_allowed=publish_allowed,
+    )
+    upload_file(out_root / "quality_report.json", quality_report_object_key, logger)
+
     insert_dataset_quality_report(
         conn,
         dataset_name=config.dataset_name,
@@ -752,7 +782,7 @@ def build_retraining_snapshot(
         dataset_version=str(snapshot_version) if publish_allowed else None,
         reference_dataset_name=config.dataset_name,
         reference_dataset_version=None if reference_version is None else str(reference_version),
-        report_path=str((out_root / "quality_report.json").resolve()),
+        report_path=quality_report_object_key,
         share_drifted_features=quality_report["share_drifted_features"],
         drifted_feature_count=quality_report["drifted_feature_count"],
         total_feature_count=quality_report["total_feature_count"],
