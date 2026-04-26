@@ -32,7 +32,6 @@ BOOTSTRAP_SYNTHETIC_STAGE1_VERSION="${BOOTSTRAP_SYNTHETIC_STAGE1_VERSION:-1}"
 BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT="${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT:-3}"
 BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
 BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
-BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
 BOOTSTRAP_STAGE1_BASELINE_ENABLED="${BOOTSTRAP_STAGE1_BASELINE_ENABLED:-true}"
 SETUP_CONTINUE_ON_ERROR="${SETUP_CONTINUE_ON_ERROR:-true}"
 SETUP_FAILED_STEPS=()
@@ -288,7 +287,6 @@ function load_runtime_env() {
   BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT="${BOOTSTRAP_SYNTHETIC_STAGE1_MEETING_COUNT:-3}"
   BOOTSTRAP_SYNTHETIC_STAGE1_SEED="${BOOTSTRAP_SYNTHETIC_STAGE1_SEED:-42}"
   BOOTSTRAP_AMI_DB_ENABLED="${BOOTSTRAP_AMI_DB_ENABLED:-true}"
-  BOOTSTRAP_DATASET_LINEAGE_ENABLED="${BOOTSTRAP_DATASET_LINEAGE_ENABLED:-true}"
   BOOTSTRAP_STAGE1_BASELINE_ENABLED="${BOOTSTRAP_STAGE1_BASELINE_ENABLED:-true}"
 }
 
@@ -543,22 +541,6 @@ function bootstrap_ami_corpus_into_db() {
   )
 }
 
-function restore_dataset_lineage() {
-  if ! is_truthy "${BOOTSTRAP_DATASET_LINEAGE_ENABLED}"; then
-    banner "Skipping dataset lineage restore because BOOTSTRAP_DATASET_LINEAGE_ENABLED=${BOOTSTRAP_DATASET_LINEAGE_ENABLED}"
-    return
-  fi
-
-  banner "Restoring retraining dataset lineage from block storage and object storage when available"
-  (
-    cd "${PROJ07_RUNTIME_DIR}"
-    python -m proj07_services.retraining.restore_dataset_lineage \
-      --rclone-remote "${RCLONE_REMOTE}" \
-      --bucket "${OBJECT_BUCKET}" \
-      --log-file "${BLOCK_ROOT}/ingest_logs/retraining_dataset_lineage_restore.log"
-  )
-}
-
 function bootstrap_stage1_baseline_dataset() {
   local dataset_root="${DATASET_ROOT:-${BLOCK_ROOT}/roberta_stage1}"
   local version_dirs=("${dataset_root}"/v*)
@@ -654,7 +636,6 @@ run_resumable_step "stage AMI corpus to object storage" stage_ami_corpus_to_obje
 run_resumable_step "bootstrap synthetic Stage 1 inputs" bootstrap_synthetic_stage1_inputs
 run_resumable_step "start runtime stack and apply schema updates" start_runtime_stack
 run_resumable_step "bootstrap AMI corpus into Postgres" bootstrap_ami_corpus_into_db
-run_resumable_step "restore dataset lineage" restore_dataset_lineage
 run_resumable_step "bootstrap Stage 1 baseline dataset" bootstrap_stage1_baseline_dataset
 
 if [[ ${#SETUP_FAILED_STEPS[@]} -gt 0 ]]; then

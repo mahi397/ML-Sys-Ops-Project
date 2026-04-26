@@ -92,12 +92,4 @@ docker compose exec production_drift_monitor \
 docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
-Restore stored dataset lineage:
-
-```bash
-cd data/proj07-runtime
-python -m proj07_services.retraining.restore_dataset_lineage \
-  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
-  --bucket "${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}" \
-  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/retraining_dataset_lineage_restore.log"
-```
+`bash setup.sh` no longer runs retraining dataset lineage restore. Any future lineage/restore workflow should be run manually instead.
