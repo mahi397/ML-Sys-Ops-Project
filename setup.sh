@@ -17,6 +17,7 @@ OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
 FEEDBACK_DATASET_VERSION="${FEEDBACK_DATASET_VERSION:-v3}"
 DEPLOY_JITSI="${DEPLOY_JITSI:-true}"
+FORCE_RECREATE="${FORCE_RECREATE:-true}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -115,7 +116,6 @@ ok "rclone remote OK"
 echo -e "\n${YELLOW}[4/10] Block storage layout...${NC}"
 sudo mkdir -p \
     "${BLOCK_ROOT}/postgres_data" \
-    "${BLOCK_ROOT}/minio_data" \
     "${BLOCK_ROOT}/jitsi" \
     "${BLOCK_ROOT}/roberta_stage1/${DATASET_VERSION}" \
     "${BLOCK_ROOT}/roberta_stage1_feedback/${FEEDBACK_DATASET_VERSION}" \
@@ -251,7 +251,7 @@ fi
 echo -e "\n${YELLOW}[8/10] Starting MinIO, MLflow, and full stack...${NC}"
 
 cd "${REPO_DIR}"
-docker compose up -d --remove-orphans minio minio-create-buckets mlflow
+docker compose up -d --remove-orphans mlflow
 
 info "Waiting for MLflow to be ready..."
 for i in {1..30}; do
@@ -336,7 +336,9 @@ fi
 
 # Bring up remaining services (including monitoring profile for online-eval)
 info "Bringing up full stack..."
-docker compose --profile monitoring up -d --remove-orphans
+COMPOSE_UP_FLAGS="--remove-orphans"
+[[ "${FORCE_RECREATE}" == "true" ]] && COMPOSE_UP_FLAGS="${COMPOSE_UP_FLAGS} --force-recreate"
+docker compose --profile monitoring up -d ${COMPOSE_UP_FLAGS}
 ok "Full stack started"
 
 # ── 9. Monitoring infra dirs ───────────────────────────────────────────────────
@@ -415,6 +417,18 @@ if [[ "${DEPLOY_JITSI}" == "true" ]]; then
     info "Running Jitsi installer (downloads upstream images + Vosk model ~1GB)..."
     sudo bash "${JITSI_DIR}/install-jitsi-vm.sh" --env-file "${STACK_ENV}"
     ok "Jitsi deployment complete"
+
+    if [[ "${FORCE_RECREATE}" == "true" ]]; then
+        JITSI_COMPOSE_DIR="${BLOCK_ROOT}/jitsi/jitsi-docker-jitsi-meet"
+        if [[ -f "${JITSI_COMPOSE_DIR}/docker-compose.yml" ]]; then
+            info "Force-recreating Jitsi containers..."
+            docker compose -f "${JITSI_COMPOSE_DIR}/docker-compose.yml" \
+                -p jitsi-vm up -d --force-recreate
+            ok "Jitsi containers force-recreated"
+        else
+            info "Jitsi compose file not found at ${JITSI_COMPOSE_DIR} — skipping force-recreate"
+        fi
+    fi
 
     echo ""
     echo "  Jitsi web:    https://${_IP}:${_HP}"
