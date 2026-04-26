@@ -199,15 +199,25 @@ for i in {1..30}; do
     sleep 5
 done
 
-# Restore MLflow model registry
-echo "Restoring MLflow model registry..."
+# Restore MLflow model registry (skip if already restored)
+echo "Checking if MLflow registry already restored..."
 MLFLOW_CONTAINER=$(docker ps --format '{{.Names}}' | grep mlflow | grep -v minio | head -1)
 
-if [ -f "${HOME}/restore_mlflow.py" ]; then
-    docker cp ${HOME}/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py
-    docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py
+_mlflow_already_restored() {
+    # Returns 0 (true) if jitsi-topic-segmenter exists AND has a 'production' alias
+    curl -sf "http://localhost:5000/api/2.0/mlflow/registered-models/alias?name=jitsi-topic-segmenter&alias=production" \
+        >/dev/null 2>&1
+}
 
-    docker exec ${MLFLOW_CONTAINER} python -c "
+if _mlflow_already_restored; then
+    echo -e "${GREEN}MLflow registry already has jitsi-topic-segmenter@production — skipping restore${NC}"
+else
+    echo "Restoring MLflow model registry..."
+    if [ -f "${HOME}/restore_mlflow.py" ]; then
+        docker cp ${HOME}/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py
+        docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py
+
+        docker exec ${MLFLOW_CONTAINER} python -c "
 import mlflow
 mlflow.set_tracking_uri('http://localhost:5000')
 client = mlflow.tracking.MlflowClient()
@@ -239,11 +249,12 @@ except Exception as e:
 
 print('Registry restore complete')
 " && echo -e "${GREEN}Model registry restored — production + fallback aliases set${NC}"
-else
-    echo -e "${YELLOW}restore_mlflow.py not found at ${HOME}/${NC}"
-    echo "Copy it there and run manually:"
-    echo "  docker cp ~/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py"
-    echo "  docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py"
+    else
+        echo -e "${YELLOW}restore_mlflow.py not found at ${HOME}/${NC}"
+        echo "Copy it there and run manually:"
+        echo "  docker cp ~/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py"
+        echo "  docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py"
+    fi
 fi
 
 # Start retrain-watcher last
