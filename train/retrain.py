@@ -234,7 +234,7 @@ def resolve_feedback_path(cfg: Dict) -> Optional[str]:
         if os.path.exists(cfg["feedback_data_dir"]):
             return cfg["feedback_data_dir"]
         version = cfg["feedback_data_dir"].rstrip("/").split("/")[-1]
-        local_dir = os.path.join(cfg["staging_base"], "roberta_stage1", version)
+        local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback", version)
         if stage_data_from_objstore(cfg["feedback_data_dir"], local_dir, cfg):
             return local_dir
     db_url = os.environ.get("DATABASE_URL", "postgresql://recap:changeme@postgres:5432/proj07_sql_db")

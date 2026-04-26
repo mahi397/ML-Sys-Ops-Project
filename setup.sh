@@ -15,7 +15,7 @@ BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-chi_tacc}"
 OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
-FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
+FEEDBACK_DATASET_VERSION="${FEEDBACK_DATASET_VERSION:-v3}"
 DEPLOY_JITSI="${DEPLOY_JITSI:-true}"
 
 GREEN='\033[0;32m'
@@ -116,10 +116,9 @@ echo -e "\n${YELLOW}[4/10] Block storage layout...${NC}"
 sudo mkdir -p \
     "${BLOCK_ROOT}/postgres_data" \
     "${BLOCK_ROOT}/minio_data" \
-    "${BLOCK_ROOT}/ray-checkpoints" \
     "${BLOCK_ROOT}/jitsi" \
     "${BLOCK_ROOT}/roberta_stage1/${DATASET_VERSION}" \
-    "${BLOCK_ROOT}/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}" \
+    "${BLOCK_ROOT}/roberta_stage1_feedback/${FEEDBACK_DATASET_VERSION}" \
     "${BLOCK_ROOT}/ingest_logs" \
     "${BLOCK_ROOT}/staging/current_job/raw" \
     "${BLOCK_ROOT}/staging/current_job/processed" \
@@ -140,7 +139,7 @@ ok "Block storage ready at ${BLOCK_ROOT}"
 echo -e "\n${YELLOW}[5/10] Staging training data from object storage...${NC}"
 
 DATASET_LOCAL="${BLOCK_ROOT}/roberta_stage1/${DATASET_VERSION}"
-FEEDBACK_LOCAL="${BLOCK_ROOT}/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
+FEEDBACK_LOCAL="${BLOCK_ROOT}/roberta_stage1_feedback/${FEEDBACK_DATASET_VERSION}"
 
 if ls "${DATASET_LOCAL}"/*.jsonl >/dev/null 2>&1; then
     ok "Training data already staged at ${DATASET_LOCAL}"
@@ -152,11 +151,11 @@ else
 fi
 
 if ls "${FEEDBACK_LOCAL}"/*.jsonl >/dev/null 2>&1; then
-    ok "Feedback pool already staged at ${FEEDBACK_LOCAL}"
+    ok "Feedback data already staged at ${FEEDBACK_LOCAL}"
 else
-    info "Downloading roberta_stage1_feedback_pool/${FEEDBACK_VERSION} ..."
+    info "Downloading roberta_stage1/${FEEDBACK_DATASET_VERSION} for feedback ..."
     rclone copy \
-        "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/" \
+        "${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/" \
         "${FEEDBACK_LOCAL}/" --progress
 fi
 ok "Training datasets staged"
@@ -271,13 +270,17 @@ INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
 SELECT 'roberta_stage1', 'stage1', 'ami',
        'datasets/roberta_stage1/${DATASET_VERSION}/'
 WHERE NOT EXISTS (
-    SELECT 1 FROM dataset_versions WHERE dataset_name = 'roberta_stage1'
+    SELECT 1 FROM dataset_versions
+    WHERE dataset_name = 'roberta_stage1'
+    AND object_key = 'datasets/roberta_stage1/${DATASET_VERSION}/'
 );
 INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
-SELECT 'roberta_stage1_feedback_pool', 'stage1', 'production_feedback',
-       'datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/'
+SELECT 'roberta_stage1', 'stage1', 'ami',
+       'datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/'
 WHERE NOT EXISTS (
-    SELECT 1 FROM dataset_versions WHERE dataset_name = 'roberta_stage1_feedback_pool'
+    SELECT 1 FROM dataset_versions
+    WHERE dataset_name = 'roberta_stage1'
+    AND object_key = 'datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/'
 );
 " && ok "dataset_versions seeded"
 
@@ -435,8 +438,8 @@ echo "    @production -> Optuna best (test_pk=0.213)"
 echo "    @fallback   -> distilroberta full finetune (test_pk=0.286)"
 echo ""
 echo "  Training datasets in use:"
-echo "    roberta_stage1/${DATASET_VERSION}"
-echo "    roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
+echo "    roberta_stage1/${DATASET_VERSION} (primary training)"
+echo "    roberta_stage1/${FEEDBACK_DATASET_VERSION} (feedback, staged to roberta_stage1_feedback/)"
 echo ""
 echo "  To trigger a retrain manually:"
 echo "    docker compose --profile retrain run retrain-job"
