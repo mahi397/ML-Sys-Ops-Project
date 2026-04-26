@@ -101,11 +101,11 @@ class RetrainingDatasetServiceConfig:
     )
     valid_meeting_threshold: int = env_int(
         "RETRAINING_DATASET_VALID_MEETING_THRESHOLD",
-        50,
+        10,
     )
     feedback_event_threshold: int = env_int(
         "RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD",
-        500,
+        30,
     )
     advisory_lock_key: int = env_int(
         "RETRAINING_DATASET_ADVISORY_LOCK_KEY",
@@ -141,7 +141,7 @@ class RetrainingDatasetService:
 
             metrics = collect_retraining_metrics(conn)
             self.logger.info(
-                "Retraining metrics | valid_unversioned_meetings=%s stage1_segmented_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s thresholds=(segmented_meetings>%s feedback_events>%s)",
+                "Retraining metrics | valid_unversioned_meetings=%s stage1_segmented_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s thresholds=(segmented_meetings>=%s feedback_events>=%s)",
                 metrics.valid_unversioned_meeting_count,
                 metrics.stage1_segmented_meeting_count,
                 metrics.structural_feedback_event_count,
@@ -151,8 +151,8 @@ class RetrainingDatasetService:
             )
 
             threshold_met = (
-                metrics.stage1_segmented_meeting_count > self.config.valid_meeting_threshold
-                or metrics.structural_feedback_event_count > self.config.feedback_event_threshold
+                metrics.stage1_segmented_meeting_count >= self.config.valid_meeting_threshold
+                or metrics.structural_feedback_event_count >= self.config.feedback_event_threshold
             )
             if not force_run and not threshold_met:
                 return False

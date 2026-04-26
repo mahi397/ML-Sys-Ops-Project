@@ -40,6 +40,21 @@ The archived `initial_implementation/` tree is independent reference material. T
 
 ## One-Off Jobs
 
+Bootstrap AMI corpus data into Postgres:
+
+```bash
+cd data/proj07-runtime
+python -m proj07_services.pipeline.bootstrap_ami_corpus \
+  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
+  --bucket "${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}" \
+  --prefix "${AMI_OBJECT_PREFIX:-ami_public_manual_1.6.2}" \
+  --raw-root "${BLOCK_ROOT:-/mnt/block}/staging/current_job/raw" \
+  --processed-root "${BLOCK_ROOT:-/mnt/block}/staging/current_job/processed" \
+  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/ami_corpus_bootstrap.log"
+```
+
+Add `--meeting ES2002a` to ingest a single AMI meeting instead of the full corpus. This command expects the raw AMI corpus to already be present in object storage; `./data/setup.sh` can stage it first.
+
 Generate synthetic Stage 1 bootstrap data:
 
 ```bash
