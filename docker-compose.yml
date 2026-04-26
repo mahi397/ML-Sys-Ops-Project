@@ -21,6 +21,7 @@
 #   --profile training starts retrain/online-eval jobs
 #   --profile monitoring starts Grafana/Prometheus/Alertmanager
 #   --profile emulated-traffic starts the manual traffic generator
+#   --profile drift-monitor starts the manual production drift monitor
 ###############################################################################
 
 volumes:
@@ -474,7 +475,12 @@ services:
     networks:
       - recap-net
 
+  # Manual-only production drift monitor.
+  # It is excluded from default startup; start it explicitly with:
+  # docker compose --profile drift-monitor up -d production_drift_monitor
   production_drift_monitor:
+    profiles:
+      - drift-monitor
     build:
       context: ./data/proj07-runtime
       dockerfile: Dockerfile

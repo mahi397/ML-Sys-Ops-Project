@@ -47,7 +47,6 @@ RUNTIME_CONTAINER_NAMES=(
   stage2_forward_service
   user_summary_materialize_service
   retraining_dataset_service
-  production_drift_monitor
 )
 RUNTIME_SERVICES=("${RUNTIME_CONTAINER_NAMES[@]}")
 
@@ -676,6 +675,7 @@ Next steps:
    ${COMMON_ENV_FILE}
 3. The integrated runtime stack is now running from the root compose file:
    ${REPO_ROOT}/docker-compose.yml
-4. Traffic generation remains manual-only:
+4. Manual profile services remain opt-in:
    cd "${REPO_ROOT}" && docker compose --profile emulated-traffic up -d traffic-generator
+   cd "${REPO_ROOT}" && docker compose --profile drift-monitor up -d production_drift_monitor
 EOF

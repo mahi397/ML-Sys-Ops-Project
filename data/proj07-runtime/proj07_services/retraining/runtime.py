@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +44,10 @@ STRUCTURAL_FEEDBACK_EVENT_TYPES = (
     "split_segment",
     "boundary_correction",
 )
+PREFERRED_STAGE1_SEGMENT_TYPES = (
+    "user_corrected",
+    "predicted",
+)
 VERSION_DIR_RE = re.compile(r"^v(\d+)$")
 MEETING_ID_RE = re.compile(r"^jitsi_(?P<ts>\d{8}T\d{6}Z)_[0-9a-f]{8}$")
 EMULATED_HOST_EMAIL_SUFFIX = ".mock@example.com"
@@ -71,6 +75,7 @@ class RetrainingBuildConfig:
 @dataclass(frozen=True)
 class RetrainingDatasetMetrics:
     valid_unversioned_meeting_count: int
+    stage1_segmented_meeting_count: int
     structural_feedback_event_count: int
     structural_feedback_meeting_count: int
 
@@ -127,7 +132,14 @@ def quality_gate_config(config: RetrainingBuildConfig) -> DriftGateConfig:
     )
 
 
-def quality_report_allows_publish(report: dict[str, Any], *, reference_version: int | None) -> bool:
+def quality_report_allows_publish(
+    report: dict[str, Any],
+    *,
+    reference_version: int | None,
+    force_publish: bool = False,
+) -> bool:
+    if force_publish:
+        return True
     status = str(report.get("status") or "")
     if status == "passed":
         return True
@@ -336,6 +348,13 @@ def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
                   AND is_valid = TRUE
                   AND dataset_version IS NULL
             ),
+            eligible_segmented_meetings AS (
+                SELECT DISTINCT em.meeting_id
+                FROM eligible_meetings em
+                JOIN topic_segments ts
+                  ON ts.meeting_id = em.meeting_id
+                WHERE ts.segment_type = ANY(%s)
+            ),
             eligible_feedback AS (
                 SELECT fe.feedback_event_id, fe.meeting_id
                 FROM feedback_events fe
@@ -345,14 +364,17 @@ def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
             )
             SELECT
                 (SELECT COUNT(*) FROM eligible_meetings) AS valid_unversioned_meeting_count,
+                (SELECT COUNT(*) FROM eligible_segmented_meetings) AS stage1_segmented_meeting_count,
                 (SELECT COUNT(*) FROM eligible_feedback) AS structural_feedback_event_count,
                 (SELECT COUNT(DISTINCT meeting_id) FROM eligible_feedback) AS structural_feedback_meeting_count
-            """
+            """,
+            (list(PREFERRED_STAGE1_SEGMENT_TYPES),),
         )
         row = cur.fetchone()
 
     return RetrainingDatasetMetrics(
         valid_unversioned_meeting_count=int(row["valid_unversioned_meeting_count"] or 0),
+        stage1_segmented_meeting_count=int(row["stage1_segmented_meeting_count"] or 0),
         structural_feedback_event_count=int(row["structural_feedback_event_count"] or 0),
         structural_feedback_meeting_count=int(row["structural_feedback_meeting_count"] or 0),
     )
@@ -364,17 +386,47 @@ def fetch_candidate_meeting_ids(conn) -> list[str]:
             f"""
             SELECT DISTINCT m.meeting_id
             FROM meetings m
-            JOIN feedback_events fe
-              ON fe.meeting_id = m.meeting_id
             WHERE {production_jitsi_meeting_filter_sql("m")}
               AND m.is_valid = TRUE
               AND m.dataset_version IS NULL
-              AND fe.event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
+              AND EXISTS (
+                  SELECT 1
+                  FROM topic_segments ts
+                  WHERE ts.meeting_id = m.meeting_id
+                    AND ts.segment_type = ANY(%s)
+              )
             ORDER BY m.meeting_id
-            """
+            """,
+            (list(PREFERRED_STAGE1_SEGMENT_TYPES),),
         )
         rows = cur.fetchall()
     return [row["meeting_id"] for row in rows]
+
+
+def fetch_preferred_stage1_segments(
+    conn,
+    meeting_ids: list[str],
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    preferred_segments_by_meeting: dict[str, list[dict]] = {}
+    segment_source_by_meeting: dict[str, str] = {}
+    segments_by_type: dict[str, dict[str, list[dict]]] = {}
+
+    for segment_type in PREFERRED_STAGE1_SEGMENT_TYPES:
+        rows = fetch_topic_segments(conn, meeting_ids, segment_type)
+        grouped_rows: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            grouped_rows[row["meeting_id"]].append(row)
+        segments_by_type[segment_type] = dict(grouped_rows)
+
+    for meeting_id in meeting_ids:
+        for segment_type in PREFERRED_STAGE1_SEGMENT_TYPES:
+            chosen = segments_by_type.get(segment_type, {}).get(meeting_id)
+            if chosen:
+                preferred_segments_by_meeting[meeting_id] = chosen
+                segment_source_by_meeting[meeting_id] = segment_type
+                break
+
+    return preferred_segments_by_meeting, segment_source_by_meeting
 
 
 def mark_meetings_as_consumed(conn, snapshot_version: int, split_assignments: dict[str, list[str]]) -> None:
@@ -400,6 +452,7 @@ def build_stage1_feedback_pool(
     config: RetrainingBuildConfig,
     logger,
     candidate_meetings: list[str],
+    force_publish: bool = False,
 ) -> FeedbackPoolBuildResult | None:
     candidate_meetings = sorted(set(candidate_meetings), key=meeting_sort_key)
     if not candidate_meetings:
@@ -407,11 +460,10 @@ def build_stage1_feedback_pool(
         return None
 
     source_rows = fetch_source_utterances(conn, candidate_meetings)
-    corrected_segments = fetch_topic_segments(conn, candidate_meetings, "user_corrected")
-
-    topic_segments_by_meeting: dict[str, list[dict]] = defaultdict(list)
-    for row in corrected_segments:
-        topic_segments_by_meeting[row["meeting_id"]].append(row)
+    topic_segments_by_meeting, segment_source_by_meeting = fetch_preferred_stage1_segments(
+        conn,
+        candidate_meetings,
+    )
 
     model_utterances_by_meeting = build_model_utterances_by_meeting(
         source_rows=source_rows,
@@ -436,6 +488,12 @@ def build_stage1_feedback_pool(
         )
         return None
 
+    segment_source_counts = Counter(
+        segment_source_by_meeting[meeting_id]
+        for meeting_id in eligible_meetings
+        if meeting_id in segment_source_by_meeting
+    )
+
     version = next_dataset_version_number(
         conn,
         dataset_name="roberta_stage1_feedback_pool",
@@ -451,6 +509,11 @@ def build_stage1_feedback_pool(
         logger=logger,
         config=config,
     )
+    publish_allowed_without_force = quality_report_allows_publish(
+        quality_report,
+        reference_version=reference_version,
+    )
+    forced_publish_applied = force_publish and not publish_allowed_without_force
     manifest = {
         "dataset_name": "roberta_stage1_feedback_pool",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -460,20 +523,21 @@ def build_stage1_feedback_pool(
         },
         "packaging": {
             "type": "retraining_pool",
-            "reason": "Runtime service compiled the next feedback-derived Stage 1 retraining pool from valid, unconsumed Jitsi meetings.",
+            "reason": "Runtime service compiled the next Stage 1 retraining pool from valid, unconsumed Jitsi meetings, preferring user-corrected segments when available and otherwise falling back to predicted segments.",
         },
         "params": {
             "window_size": config.window_size,
             "transition_index": config.transition_index,
             "min_utterance_chars": config.min_utterance_chars,
             "max_words_per_utterance": config.max_words_per_utterance,
-            "segment_type": "user_corrected",
+            "segment_selection_policy": "prefer_user_corrected_else_predicted",
         },
         "meetings": {
             "candidate": len(candidate_meetings),
             "eligible": len(eligible_meetings),
             "candidate_meeting_ids": candidate_meetings,
             "eligible_meeting_ids": eligible_meetings,
+            "segment_source_counts": dict(segment_source_counts),
         },
         "rows": label_counts(dataset_rows),
         "quality_gate": {
@@ -483,6 +547,8 @@ def build_stage1_feedback_pool(
             "share_drifted_features": quality_report["share_drifted_features"],
             "drifted_feature_count": quality_report["drifted_feature_count"],
             "total_feature_count": quality_report["total_feature_count"],
+            "publish_allowed_without_force": publish_allowed_without_force,
+            "forced_publish_applied": forced_publish_applied,
         },
     }
     staging_root = candidate_staging_root(config.feedback_pool_root, version)
@@ -504,6 +570,7 @@ def build_stage1_feedback_pool(
     publish_allowed = quality_report_allows_publish(
         quality_report,
         reference_version=reference_version,
+        force_publish=force_publish,
     )
     if publish_allowed:
         out_root = config.feedback_pool_root / f"v{version}"
@@ -547,7 +614,16 @@ def build_stage1_feedback_pool(
         details_json=quality_report,
     )
 
-    if not publish_allowed:
+    if forced_publish_applied:
+        logger.warning(
+            "Force-published Stage 1 feedback pool despite quality gate result | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
+            version,
+            reference_version if reference_version is not None else "none",
+            quality_report["status"],
+            quality_report.get("reason", "n/a"),
+            quality_report["share_drifted_features"],
+        )
+    elif not publish_allowed:
         logger.warning(
             "Feedback pool candidate did not pass quality gate and was quarantined | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
             version,
@@ -580,6 +656,7 @@ def build_retraining_snapshot(
     logger,
     feedback_pool: FeedbackPoolBuildResult,
     selected_meeting_ids: list[str] | None = None,
+    force_publish: bool = False,
 ) -> RetrainingSnapshotBuildResult:
     snapshot_version = next_dataset_version_number(
         conn,
@@ -697,6 +774,11 @@ def build_retraining_snapshot(
         logger=logger,
         config=config,
     )
+    publish_allowed_without_force = quality_report_allows_publish(
+        quality_report,
+        reference_version=reference_version,
+    )
+    forced_publish_applied = force_publish and not publish_allowed_without_force
     manifest = {
         "dataset_name": config.dataset_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -721,6 +803,8 @@ def build_retraining_snapshot(
             "share_drifted_features": quality_report["share_drifted_features"],
             "drifted_feature_count": quality_report["drifted_feature_count"],
             "total_feature_count": quality_report["total_feature_count"],
+            "publish_allowed_without_force": publish_allowed_without_force,
+            "forced_publish_applied": forced_publish_applied,
         },
     }
     staging_root = candidate_staging_root(config.dataset_root, snapshot_version)
@@ -745,6 +829,7 @@ def build_retraining_snapshot(
     publish_allowed = quality_report_allows_publish(
         quality_report,
         reference_version=reference_version,
+        force_publish=force_publish,
     )
     if publish_allowed:
         out_root = config.dataset_root / f"v{snapshot_version}"
@@ -789,7 +874,16 @@ def build_retraining_snapshot(
         details_json=quality_report,
     )
 
-    if not publish_allowed:
+    if forced_publish_applied:
+        logger.warning(
+            "Force-published retraining snapshot despite quality gate result | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
+            snapshot_version,
+            reference_version if reference_version is not None else "none",
+            quality_report["status"],
+            quality_report.get("reason", "n/a"),
+            quality_report["share_drifted_features"],
+        )
+    elif not publish_allowed:
         logger.warning(
             "Retraining snapshot candidate did not pass quality gate and was quarantined | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
             snapshot_version,

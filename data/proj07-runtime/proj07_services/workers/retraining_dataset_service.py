@@ -141,8 +141,9 @@ class RetrainingDatasetService:
 
             metrics = collect_retraining_metrics(conn)
             self.logger.info(
-                "Retraining metrics | valid_unversioned_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s thresholds=(meetings>%s feedback_events>%s)",
+                "Retraining metrics | valid_unversioned_meetings=%s stage1_segmented_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s thresholds=(segmented_meetings>%s feedback_events>%s)",
                 metrics.valid_unversioned_meeting_count,
+                metrics.stage1_segmented_meeting_count,
                 metrics.structural_feedback_event_count,
                 metrics.structural_feedback_meeting_count,
                 self.config.valid_meeting_threshold,
@@ -150,7 +151,7 @@ class RetrainingDatasetService:
             )
 
             threshold_met = (
-                metrics.valid_unversioned_meeting_count > self.config.valid_meeting_threshold
+                metrics.stage1_segmented_meeting_count > self.config.valid_meeting_threshold
                 or metrics.structural_feedback_event_count > self.config.feedback_event_threshold
             )
             if not force_run and not threshold_met:
@@ -159,7 +160,7 @@ class RetrainingDatasetService:
             candidate_meeting_ids = fetch_candidate_meeting_ids(conn)
             if not candidate_meeting_ids:
                 self.logger.info(
-                    "Retraining trigger %s, but no valid unversioned meetings with structural feedback were found",
+                    "Retraining trigger %s, but no valid unversioned meetings with usable Stage 1 segments were found",
                     "forced" if force_run else "met",
                 )
                 return False
@@ -177,6 +178,7 @@ class RetrainingDatasetService:
                 config=self.config.build_config,
                 logger=self.logger,
                 candidate_meetings=candidate_meeting_ids,
+                force_publish=force_run,
             )
             if feedback_pool is None:
                 self.logger.info("Retraining dataset build skipped because no eligible feedback-pool rows were produced")
@@ -188,6 +190,7 @@ class RetrainingDatasetService:
                 logger=self.logger,
                 feedback_pool=feedback_pool,
                 selected_meeting_ids=feedback_pool.eligible_meeting_ids,
+                force_publish=force_run,
             )
             self.logger.info(
                 "Retraining dataset build completed | feedback_pool=v%s snapshot=v%s meetings=%s",
@@ -288,7 +291,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-run",
         action="store_true",
-        help="Bypass thresholds and build a retraining dataset immediately if eligible meetings exist.",
+        help="Bypass thresholds and publish a retraining dataset immediately if eligible meetings exist, even when the quality gate would normally quarantine it.",
     )
     parser.add_argument(
         "--dry-run",

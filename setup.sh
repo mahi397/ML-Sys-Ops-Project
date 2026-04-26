@@ -646,7 +646,6 @@ DATA_SERVICES=(
     stage2_forward_service
     user_summary_materialize_service
     retraining_dataset_service
-    production_drift_monitor
 )
 SERVING_SERVICES=(serving-api)
 TRAINING_SERVICES=(retrain-watcher online-eval)
@@ -666,7 +665,7 @@ if is_truthy "${START_MONITORING_SERVICES}"; then
     SELECTED_SERVICES+=("${MONITORING_SERVICES[@]}")
 fi
 
-# Bring up selected services. The traffic generator remains profile-gated.
+# Bring up selected services. Manual profile services remain opt-in.
 if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
     info "Bringing up selected services with a fresh rebuild/recreate: ${SELECTED_SERVICES[*]}"
 elif is_truthy "${START_MLFLOW_SERVICES}"; then

@@ -23,14 +23,17 @@ The root compose starts these data services by default:
 - `stage2_forward_service`
 - `user_summary_materialize_service`
 - `retraining_dataset_service`
-- `production_drift_monitor`
 
-`traffic-generator` is the only manual service. Start it explicitly when you want emulated production uploads:
+`traffic-generator` and `production_drift_monitor` are manual profile services. Start them explicitly when needed:
 
 ```bash
 docker compose --profile emulated-traffic up -d traffic-generator
 docker compose logs -f traffic-generator
 docker compose --profile emulated-traffic stop traffic-generator
+
+docker compose --profile drift-monitor up -d production_drift_monitor
+docker compose logs -f production_drift_monitor
+docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
 The archived `initial_implementation/` tree is independent reference material. The active runtime and setup flow do not depend on it.
@@ -68,8 +71,10 @@ docker compose exec retraining_dataset_service \
 Force one production drift check:
 
 ```bash
+docker compose --profile drift-monitor up -d production_drift_monitor
 docker compose exec production_drift_monitor \
   python -m proj07_services.workers.production_drift_monitor --once
+docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
 Restore stored dataset lineage:

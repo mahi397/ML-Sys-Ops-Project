@@ -171,7 +171,7 @@ DEPLOY_JITSI=true bash setup.sh
 SETUP_MODE=data-jitsi DEPLOY_JITSI=true bash setup.sh
 ```
 
-`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator is the only manual profile service.
+`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator and production drift monitor are manual profile services.
 
 Manual compose profiles are available when needed:
 
@@ -181,6 +181,7 @@ docker compose --profile mlflow --profile serving up -d serving-api
 docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher online-eval
 docker compose --profile serving --profile monitoring up -d prometheus grafana alertmanager node-exporter
 docker compose --profile emulated-traffic up -d traffic-generator
+docker compose --profile drift-monitor up -d production_drift_monitor
 ```
 
 ### 3. Verify
@@ -245,7 +246,7 @@ Run these from the repository root:
 | `stage2_forward_service` | `docker compose up -d stage2_forward_service` | `docker compose logs -f --since 15m stage2_forward_service` | `docker compose stop stage2_forward_service` |
 | `user_summary_materialize_service` | `docker compose up -d user_summary_materialize_service` | `docker compose logs -f --since 15m user_summary_materialize_service` | `docker compose stop user_summary_materialize_service` |
 | `retraining_dataset_service` | `docker compose up -d retraining_dataset_service` | `docker compose logs -f --since 15m retraining_dataset_service` | `docker compose stop retraining_dataset_service` |
-| `production_drift_monitor` | `docker compose up -d production_drift_monitor` | `docker compose logs -f --since 15m production_drift_monitor` | `docker compose stop production_drift_monitor` |
+| `production_drift_monitor` | `docker compose --profile drift-monitor up -d production_drift_monitor` | `docker compose --profile drift-monitor logs -f --since 15m production_drift_monitor` | `docker compose --profile drift-monitor stop production_drift_monitor` |
 | `minio` | `docker compose --profile mlflow up -d minio` | `docker compose --profile mlflow logs -f --since 15m minio` | `docker compose --profile mlflow stop minio` |
 | `minio-create-buckets` | `docker compose --profile mlflow up minio-create-buckets` | `docker compose --profile mlflow logs --since 15m minio-create-buckets` | `docker compose --profile mlflow stop minio-create-buckets` |
 | `mlflow` | `docker compose --profile mlflow up -d mlflow` | `docker compose --profile mlflow logs -f --since 15m mlflow` | `docker compose --profile mlflow stop mlflow` |
@@ -308,8 +309,10 @@ docker compose exec retraining_dataset_service \
 Run a single production drift monitoring cycle on demand:
 
 ```bash
+docker compose --profile drift-monitor up -d production_drift_monitor
 docker compose exec production_drift_monitor \
   python -m proj07_services.workers.production_drift_monitor --once
+docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
 ### Promote a candidate model to production
