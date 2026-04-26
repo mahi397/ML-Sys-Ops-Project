@@ -115,7 +115,7 @@ ML-Sys-Ops-Project/
 
 6. **Retraining trigger** — `retrain_watcher` polls the table every 5 minutes. When accumulated corrections above the watermark reach the threshold (5 for demo, 500 for prod), it fires the retrain pipeline.
 
-7. **Dataset build** — `retraining_dataset_service` assembles `feedback_examples.jsonl` from corrected meeting windows, runs a drift quality gate, and uploads to chi.tacc object storage. The new version is registered in `dataset_versions`.
+7. **Dataset build** — `retraining_dataset_service` assembles `feedback_examples.jsonl` from corrected meeting windows, runs a drift quality gate, and uploads to chi.tacc object storage. The new version is registered in `dataset_versions`; local `/mnt/block/...` copies are treated as cache/staging only.
 
 8. **Training** — `retrain.py` warm-starts from the current `production` model, trains with Ray Train (fault-tolerant, MinIO checkpoints), then runs evaluation: aggregate metrics (Pk, F1, WindowDiff), fairness slice evaluation, and failure mode tests. Metrics and a model card are logged to MLflow.
 

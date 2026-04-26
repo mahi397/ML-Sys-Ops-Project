@@ -12,11 +12,16 @@ from typing import Any
 from proj07_services.common.feedback_common import (
     build_model_utterances_by_meeting,
     build_stage1_rows,
+    dataset_object_prefix_from_key,
+    download_dir,
     fetch_source_utterances,
     fetch_topic_segments,
     insert_dataset_quality_report,
     insert_dataset_version,
     label_counts,
+    latest_dataset_version_record,
+    list_dataset_version_records,
+    next_dataset_version_number,
     pick_stage1_examples,
     stable_split_70_15_15,
     upload_dir,
@@ -193,9 +198,52 @@ def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
     return profile
 
 
-def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
-    for version in reversed(existing_versions(root)):
-        profile = load_or_build_dataset_profile(root / f"v{version}")
+def ensure_cached_version_dir(
+    local_root: Path,
+    *,
+    version: int,
+    object_key: str,
+    logger,
+    required_files: tuple[str, ...] = ("manifest.json",),
+) -> Path:
+    version_root = local_root / f"v{version}"
+    if all((version_root / relative_path).exists() for relative_path in required_files):
+        return version_root
+
+    download_dir(
+        dataset_object_prefix_from_key(object_key),
+        version_root,
+        logger,
+    )
+    if not all((version_root / relative_path).exists() for relative_path in required_files):
+        raise RuntimeError(
+            f"Dataset cache under {version_root} is incomplete after staging from object storage"
+        )
+    return version_root
+
+
+def latest_reference_profile(
+    conn,
+    *,
+    dataset_name: str,
+    stage: str,
+    reference_root: Path,
+    logger,
+) -> tuple[int | None, dict[str, Any] | None]:
+    records = list_dataset_version_records(conn, dataset_name=dataset_name, stage=stage)
+    for record in reversed(records):
+        version = int(record["version"])
+        version_root = reference_root / f"v{version}"
+        profile = load_or_build_dataset_profile(version_root)
+        if not is_usable_reference_profile(profile):
+            version_root = ensure_cached_version_dir(
+                reference_root,
+                version=version,
+                object_key=str(record["object_key"]),
+                logger=logger,
+                required_files=("manifest.json",),
+            )
+            profile = load_or_build_dataset_profile(version_root)
         if is_usable_reference_profile(profile):
             return version, profile
     return None, None
@@ -220,9 +268,13 @@ def move_tree(source: Path, destination: Path) -> None:
 
 def evaluate_stage1_quality_gate(
     *,
+    conn,
     rows: list[dict],
     include_label: bool,
+    reference_dataset_name: str,
+    reference_stage: str,
     reference_root: Path,
+    logger,
     config: RetrainingBuildConfig,
 ) -> tuple[dict[str, Any], dict[str, Any], int | None]:
     feature_columns, metadata = extract_stage1_feature_columns(rows, include_label=include_label)
@@ -231,7 +283,13 @@ def evaluate_stage1_quality_gate(
         metadata=metadata,
         bin_count=config.quality_numeric_bin_count,
     )
-    reference_version, reference_profile = latest_reference_profile(reference_root)
+    reference_version, reference_profile = latest_reference_profile(
+        conn,
+        dataset_name=reference_dataset_name,
+        stage=reference_stage,
+        reference_root=reference_root,
+        logger=logger,
+    )
     report = compare_feature_columns_to_reference(
         reference_profile=reference_profile,
         current_feature_columns=feature_columns,
@@ -364,11 +422,19 @@ def build_stage1_feedback_pool(
         )
         return None
 
-    version = next_version(config.feedback_pool_root)
+    version = next_dataset_version_number(
+        conn,
+        dataset_name="roberta_stage1_feedback_pool",
+        stage="stage1",
+    )
     profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+        conn=conn,
         rows=dataset_rows,
         include_label=True,
+        reference_dataset_name="roberta_stage1_feedback_pool",
+        reference_stage="stage1",
         reference_root=config.feedback_pool_root,
+        logger=logger,
         config=config,
     )
     manifest = {
@@ -493,8 +559,17 @@ def build_retraining_snapshot(
     feedback_pool: FeedbackPoolBuildResult,
     selected_meeting_ids: list[str] | None = None,
 ) -> RetrainingSnapshotBuildResult:
-    snapshot_version = next_version(config.dataset_root)
-    base_version = latest_version(config.dataset_root)
+    snapshot_version = next_dataset_version_number(
+        conn,
+        dataset_name=config.dataset_name,
+        stage="stage1",
+    )
+    base_record = latest_dataset_version_record(
+        conn,
+        dataset_name=config.dataset_name,
+        stage="stage1",
+    )
+    base_version = None if base_record is None else int(base_record["version"])
     feedback_dir = feedback_pool.output_root
 
     feedback_rows = _read_jsonl(feedback_dir / "feedback_examples.jsonl")
@@ -545,7 +620,15 @@ def build_retraining_snapshot(
             "feedback_pool_source": f"roberta_stage1_feedback_pool/v{feedback_pool.version}",
         }
     else:
-        base_dir = config.dataset_root / f"v{base_version}"
+        if base_record is None:
+            raise RuntimeError("Latest dataset version record disappeared before base snapshot staging")
+        base_dir = ensure_cached_version_dir(
+            config.dataset_root,
+            version=base_version,
+            object_key=str(base_record["object_key"]),
+            logger=logger,
+            required_files=("manifest.json", "train.jsonl", "val.jsonl", "test.jsonl"),
+        )
         train_rows_base = _read_jsonl(base_dir / "train.jsonl")
         val_rows_base = _read_jsonl(base_dir / "val.jsonl")
         test_rows_base = _read_jsonl(base_dir / "test.jsonl")
@@ -583,9 +666,13 @@ def build_retraining_snapshot(
 
     combined_rows = train_rows + val_rows + test_rows
     profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+        conn=conn,
         rows=combined_rows,
         include_label=True,
+        reference_dataset_name=config.dataset_name,
+        reference_stage="stage1",
         reference_root=config.dataset_root,
+        logger=logger,
         config=config,
     )
     manifest = {
