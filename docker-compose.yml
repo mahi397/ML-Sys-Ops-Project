@@ -522,7 +522,7 @@ services:
         condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
-      RAY_STORAGE: s3://objstore-proj07/ray-checkpoints
+      RAY_STORAGE: s3://proj07-mlflow-artifacts/ray-checkpoints
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
@@ -561,7 +561,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
-      RAY_STORAGE: s3://objstore-proj07/ray-checkpoints
+      RAY_STORAGE: s3://proj07-mlflow-artifacts/ray-checkpoints
       MODEL_NAME: jitsi-topic-segmenter
       OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
       TOKENIZERS_PARALLELISM: "false"

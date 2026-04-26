@@ -129,7 +129,7 @@ DEFAULT_RETRAIN_CONFIG = {
     # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
-    "ray_storage_path": os.environ.get("RAY_STORAGE", "s3://objstore-proj07/ray-checkpoints"),
+    "ray_storage_path": os.environ.get("RAY_STORAGE", "s3://proj07-mlflow-artifacts/ray-checkpoints"),
     "ray_max_failures": 2,
 }
 
