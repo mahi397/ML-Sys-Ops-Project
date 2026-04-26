@@ -38,11 +38,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ── Config from environment ──
-# [FIX 3] Default DB name corrected to proj07_sql_db (Aneesh's actual DB)
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://recap:changeme@postgres:5432/proj07_sql_db"
-)
+def _default_database_url() -> str:
+    user = os.environ.get("POSTGRES_USER", "proj07_user")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    database = os.environ.get("POSTGRES_DB", "proj07_sql_db")
+    auth = f"{user}:{password}@" if password else f"{user}@"
+    return f"postgresql://{auth}{host}:{port}/{database}"
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL") or _default_database_url()
 RETRAIN_THRESHOLD = int(os.environ.get("RETRAIN_THRESHOLD", "5"))     # 5 for demo, 500 for prod
 CHECK_INTERVAL = int(os.environ.get("RETRAIN_CHECK_INTERVAL_SECONDS", "300"))
 MAX_DAYS_BETWEEN_RETRAINS = int(os.environ.get("MAX_DAYS_BETWEEN_RETRAINS", "30"))

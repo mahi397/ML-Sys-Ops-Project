@@ -68,7 +68,7 @@ DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "10"))
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "").strip()
 HOST_EXTERNAL_KEY = os.environ.get(
     "HOST_EXTERNAL_KEY",
-    os.environ.get("JITSI_HOST_EXTERNAL_KEY", "emulated-traffic-generator"),
+    "emulated-traffic-generator",
 ).strip()
 MEETING_SOURCE_MODE = os.environ.get("MEETING_SOURCE_MODE", "mixed").strip().lower() or "mixed"
 ARCHIVED_TRANSCRIPT_ROOT = Path(
