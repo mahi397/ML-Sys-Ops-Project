@@ -769,9 +769,9 @@ class SegmenterDeployment:
         results = []
         for prob, meta in zip(boundary_probs, metadata):
             is_boundary = prob >= self.threshold
-            # Record metrics async (non-blocking)
+            # Record metrics async (non-blocking), "batch_size": batch_size,
             self.metrics.record.remote({
-                "endpoint": "segment", "batch_size": batch_size,
+                "endpoint": "segment", 
                 "confidence": prob, "is_boundary": is_boundary
             })
             results.append({
