@@ -846,8 +846,8 @@ fi
 echo ""
 if is_truthy "${START_MLFLOW_SERVICES}"; then
     echo "  Registered models:"
-    echo "    @production -> Optuna best (test_pk=0.213)"
-    echo "    @fallback   -> distilroberta full finetune (test_pk=0.286)"
+    echo "    @production -> distilroberta full finetune (test_pk=0.286)"
+    echo "    @fallback   -> Optuna best (test_pk=0.213)"
     echo ""
 fi
 if is_truthy "${START_DATA_SERVICES}"; then
