@@ -117,8 +117,8 @@ DEFAULT_RETRAIN_CONFIG = {
     "seed": 42,
     "debug_subsample": False,
     "warm_start_model_alias": "",  # re-enable after first successful retrain registers a model
-    # Data paths
-    "data_dir": "/mnt/block/roberta_stage1/v3",
+    # Data paths — resolved at runtime via resolve_dataset_path(); do not set a default here
+    "data_dir": "",
     # Object storage
     "objstore_bucket": "objstore-proj07",
     "staging_base": "/mnt/block",
@@ -228,11 +228,12 @@ def stage_data_from_objstore(objstore_path: str, local_dir: str, cfg: Dict = Non
 
 
 def resolve_dataset_path(cfg: Dict) -> str:
-    if os.path.exists(cfg["data_dir"]):
-        jsonl_files = [f for f in os.listdir(cfg["data_dir"]) if f.endswith(".jsonl")]
+    explicit = cfg.get("data_dir", "")
+    if explicit and os.path.exists(explicit):
+        jsonl_files = [f for f in os.listdir(explicit) if f.endswith(".jsonl")]
         if jsonl_files:
-            log.info(f"Using explicit data_dir: {cfg['data_dir']} ({len(jsonl_files)} files)")
-            return cfg["data_dir"]
+            log.info(f"Using explicit data_dir: {explicit} ({len(jsonl_files)} files)")
+            return explicit
     db_url = os.environ.get("DATABASE_URL") or _default_database_url()
     try:
         import psycopg2
@@ -257,8 +258,11 @@ def resolve_dataset_path(cfg: Dict) -> str:
             log.warning("No roberta_stage1 entry in dataset_versions — falling back to default")
     except Exception as e:
         log.warning(f"Could not resolve dataset from DB: {e}")
-    log.info(f"Falling back to default data_dir: {cfg['data_dir']}")
-    return cfg["data_dir"]
+    raise RuntimeError(
+        "Could not resolve a dataset path: dataset_versions table returned no "
+        "roberta_stage1/production_feedback row, DB was unreachable, and no explicit "
+        "--data_dir / DATA_DIR was provided. Check rclone staging and DB connectivity."
+    )
 
 
 
