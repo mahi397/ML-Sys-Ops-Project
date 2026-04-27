@@ -643,22 +643,22 @@ except: pass
 try:
     mv1 = client.create_model_version('jitsi-topic-segmenter',
         source='s3://proj07-mlflow-artifacts/1/fdc4b6d0966b4aa9bbc6f95c01b5fcda/artifacts/model',
-        description='Optuna trial #10, test_pk=0.213, test_f1=0.232, production model')
-    client.set_registered_model_alias('jitsi-topic-segmenter', 'production', mv1.version)
-    print(f'production -> v{mv1.version}')
+        description='Optuna trial #10, test_pk=0.213, test_f1=0.232')
+    client.set_registered_model_alias('jitsi-topic-segmenter', 'fallback', mv1.version)
+    print(f'fallback -> v{mv1.version}')
 except Exception as e:
-    print(f'production: {e}')
+    print(f'fallback: {e}')
 
 try:
     mv2 = client.create_model_version('jitsi-topic-segmenter',
         source='s3://proj07-mlflow-artifacts/1/dbd0cb5d052c42f5bae2e898684be6cc/artifacts/model',
-        description='distilroberta-base full fine-tune, test_pk=0.286, fallback model')
-    client.set_registered_model_alias('jitsi-topic-segmenter', 'fallback', mv2.version)
-    print(f'fallback -> v{mv2.version}')
+        description='distilroberta-base full fine-tune, test_pk=0.286')
+    client.set_registered_model_alias('jitsi-topic-segmenter', 'production', mv2.version)
+    print(f'production -> v{mv2.version}')
 except Exception as e:
-    print(f'fallback: {e}')
+    print(f'production: {e}')
 print('Registry restore complete')
-" && ok "Model registry restored — production + fallback aliases set"
+" && ok "Model registry restored — production aliases set"
     else
         info "restore_mlflow.py not found at ${HOME}/ — skipping registry restore"
         echo "  Copy it there and run manually after stack is up"
