@@ -130,12 +130,15 @@ DEFAULT_RETRAIN_CONFIG = {
     # production baseline: test_pk=0.286, test_wd=0.479, test_f1=0.208, test_recall=0.444
     # Gates are set slightly above baseline to pass equivalent-quality retrained models
     # while rejecting significant regressions.
+    # Gates calibrated to distilroberta-base production baseline (test_pk=0.286,
+    # test_wd=0.479, test_f1=0.208). Feedback-retrained models observed at
+    # test_pk≈0.16-0.20, test_wd≈0.50-0.54, test_f1≈0.10-0.13.
+    # Gates are set so well-converged runs pass, poorly-converged runs fail.
     "gate_min_f1": 0.10,
-    "gate_max_pk": 0.32,
+    "gate_max_pk": 0.22,
     "gate_max_windowdiff": 0.52,
     # Slice fairness gate — no single slice may exceed this Pk
-    # Set higher than aggregate gate to allow for small-slice noise
-    "slice_gate_max_pk": 0.45,
+    "slice_gate_max_pk": 0.40,
     # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
