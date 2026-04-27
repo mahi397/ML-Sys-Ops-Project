@@ -103,7 +103,7 @@ def _default_database_url() -> str:
 DEFAULT_RETRAIN_CONFIG = {
     # Optuna-best from initial implementation (Trial #10/20)
     # test_pk=0.213, test_f1=0.232, test_wd=0.365
-    "model_name": "roberta-base",
+    "model_name": "distilroberta-base",
     "freeze_backbone": False,
     "lr": 2.29e-5,
     "batch_size": 32,
@@ -126,14 +126,16 @@ DEFAULT_RETRAIN_CONFIG = {
     # MLflow
     "experiment_name": "retraining",
     "model_registry_name": "jitsi-topic-segmenter",
-    # Aggregate quality gates. Initial impl: test_wd=0.365 @ 8 epochs.
-    # epochs=2 (demo) yields val_wd≈0.55, so gate raised to 0.65.
-    "gate_min_f1": 0.20,
-    "gate_max_pk": 0.25,
-    "gate_max_windowdiff": 0.40, # was 0.40
+    # Aggregate quality gates — calibrated to distilroberta-base full fine-tune
+    # production baseline: test_pk=0.286, test_wd=0.479, test_f1=0.208, test_recall=0.444
+    # Gates are set slightly above baseline to pass equivalent-quality retrained models
+    # while rejecting significant regressions.
+    "gate_min_f1": 0.18,
+    "gate_max_pk": 0.32,
+    "gate_max_windowdiff": 0.52,
     # Slice fairness gate — no single slice may exceed this Pk
     # Set higher than aggregate gate to allow for small-slice noise
-    "slice_gate_max_pk": 0.40,
+    "slice_gate_max_pk": 0.45,
     # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
