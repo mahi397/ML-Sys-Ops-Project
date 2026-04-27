@@ -566,9 +566,14 @@ class MetricsDeployment:
 
 @serve.deployment(
     name="segmenter",
-    num_replicas=1,
-    ray_actor_options={"num_gpus": 0.3},
-    #max_ongoing_requests=10, 
+    autoscaling_config={
+        "min_replicas": 1,
+        "max_replicas": 2,
+        "target_ongoing_requests": 4,
+        "upscale_delay_s": 10,
+        "downscale_delay_s": 60,
+    },
+    ray_actor_options={"num_gpus": 0.25},  # 0.25×2 + 0.5 summarizer = 1.0 GPU
 )
 class SegmenterDeployment:
     def __init__(self):
@@ -580,8 +585,10 @@ class SegmenterDeployment:
                 # ── Load model: MLflow registry → local path → base weights ──
         self.model = None
         self.model_version = "base"
+        self.model_version_label = "base"
         self.current_mlflow_version =  None # not yet loaded from MLflow
         self.threshold = BOUNDARY_THRESHOLD  # default fallback 
+        self.current_test_pk = 0.0  # updates it from MLflow tags on load
 
         # 1. Try MLflow registry
         if MLFLOW_TRACKING_URI:
@@ -597,16 +604,20 @@ class SegmenterDeployment:
                     f"/tmp/mlflow_segmenter_{MODEL_ALIAS}"
                 )
                 self.model = mlflow.pytorch.load_model(_local)
-                self.model_version = f"mlflow@{MODEL_ALIAS}"
+                #self.model_version = f"mlflow@{MODEL_ALIAS}"
+                self.model_version = f"mlflow@{MODEL_ALIAS}_v{_alias_mv.version}"
+                self.model_version_label = f"v{_alias_mv.version}"
                 self.current_mlflow_version = str(_alias_mv.version)
-                # ★ READ best_threshold FROM MODEL VERSION TAGS ★
+                #  READ best_threshold AND test_pk FROM MODEL VERSION TAGS
                 tags = _alias_mv.tags or {}
                 if "best_threshold" in tags:
                     self.threshold = float(tags["best_threshold"])
                     print(f"[segmenter] Using best_threshold={self.threshold} from MLflow v{_alias_mv.version}")
                 else:
                     print(f"[segmenter] No best_threshold tag on v{_alias_mv.version}, using default {self.threshold}")
-                print(f"[segmenter] Loaded model from MLflow proxy: {mlflow_uri}")
+                #print(f"[segmenter] Loaded model from MLflow proxy: {mlflow_uri}")
+                self.current_test_pk = float(tags.get("test_pk", 0.0))
+                print(f"[segmenter] Loaded model from MLflow proxy: {mlflow_uri} (test_pk={self.current_test_pk})")
             except Exception as e:
                 print(f"[segmenter] MLflow @{MODEL_ALIAS} failed ({e}), trying @fallback")
                 try:
@@ -619,7 +630,9 @@ class SegmenterDeployment:
                         "/tmp/mlflow_segmenter_fallback"
                     )
                     self.model = mlflow.pytorch.load_model(_local_fb)
-                    self.model_version = "mlflow@fallback"
+                    #self.model_version = "mlflow@fallback"
+                    self.model_version = f"mlflow@fallback_v{_fb_mv.version}"
+                    self.model_version_label = f"v{_fb_mv.version}"
                     fb_tags = _fb_mv.tags or {}
                     if "best_threshold" in fb_tags:
                         self.threshold = float(fb_tags["best_threshold"])
@@ -631,6 +644,7 @@ class SegmenterDeployment:
         if self.model is None and os.path.exists(MODEL_PATH):
             self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
             self.model_version = "local-fine-tuned"
+            self.model_version_label = "local"
             print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
 
         # 3. Last resort — base weights (no fine-tuning)
@@ -650,9 +664,9 @@ class SegmenterDeployment:
         self.metrics.record.remote({
             "endpoint": "segment", "model_loaded": True,
              "model_name": "roberta_segmenter",
-            "model_version": self.model_version
+             "model_version": self.model_version_label
         })
-        print(f"[segmenter] Ready on {self.device}, version={self.model_version}, threshold={self.threshold}")
+        print(f"[segmenter] Ready on {self.device}, version={self.model_version}, label={self.model_version_label}, threshold={self.threshold}")
 
     def _reload_loop(self):
         import mlflow.pytorch
@@ -684,23 +698,40 @@ class SegmenterDeployment:
                      #  READ NEW THRESHOLD 
                     tags = alias_mv.tags or {}
                     new_threshold = float(tags.get("best_threshold", self.threshold))
-                    old_version = self.model_version
+                    new_test_pk = float(tags.get("test_pk", 0.0))
+
+                    # Quality gate: reject if test_pk is below minimum or worse than current
+                    min_test_pk = float(os.getenv("MIN_TEST_PK", "0.10"))
+                    if new_test_pk > 0.0 and new_test_pk < min_test_pk:
+                        print(f"[segmenter] QUALITY GATE FAILED v{new_version}: test_pk={new_test_pk} < min={min_test_pk} — skipping")
+                        _last_failed_version = new_version
+                        continue
+                    if new_test_pk > 0.0 and self.current_test_pk > 0.0 and new_test_pk < self.current_test_pk - 0.05:
+                        print(f"[segmenter] QUALITY GATE FAILED v{new_version}: test_pk={new_test_pk} worse than current={self.current_test_pk} by >0.05 — skipping")
+                        _last_failed_version = new_version
+                        continue
+                    print(f"[segmenter] Quality gate passed v{new_version}: test_pk={new_test_pk} >= current={self.current_test_pk}")
+
+                    old_label = self.model_version_label
                     with self._model_lock:
                         self.model = new_model
                         self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"
+                        self.model_version_label = f"v{new_version}"
                         self.current_mlflow_version = new_version
                         self.threshold = new_threshold
+                        self.current_test_pk = new_test_pk
                     _last_failed_version = None
-                    # Clear old version from Grafana before reporting new one
+                    # Clear old version label from Grafana, register new one
                     self.metrics.record.remote({
                         "endpoint": "segment", "model_loaded": False,
                         "model_name": "roberta_segmenter",
-                        "model_version": old_version
+                        #"model_version": old_version
+                        "model_version": old_label
                     })
                     self.metrics.record.remote({
                         "endpoint": "segment", "model_loaded": True,
                         "model_name": "roberta_segmenter",
-                        "model_version": self.model_version
+                        "model_version": self.model_version_label
                     })
                     print(f"[segmenter] Model reloaded: v{new_version}, threshold={new_threshold}")
                 except Exception as download_err:
@@ -743,9 +774,9 @@ class SegmenterDeployment:
         results = []
         for prob, meta in zip(boundary_probs, metadata):
             is_boundary = prob >= self.threshold
-            # Record metrics async (non-blocking)
+            # Record metrics async (non-blocking), "batch_size": batch_size,
             self.metrics.record.remote({
-                "endpoint": "segment", "batch_size": batch_size,
+                "endpoint": "segment", 
                 "confidence": prob, "is_boundary": is_boundary
             })
             results.append({
@@ -822,9 +853,12 @@ class SegmenterDeployment:
 
 @serve.deployment(
     name="summarizer",
-    num_replicas=1,
-    ray_actor_options={"num_gpus": 0.7},
-    #max_ongoing_requests=3,
+    autoscaling_config={
+        "min_replicas": 1,
+        "max_replicas": 1,   # keeping at 1 — needs 0.5 GPU, can't fit 2
+        "target_ongoing_requests": 2,
+    },
+    ray_actor_options={"num_gpus": 0.5},  # 0.5 GPU
 )
 class SummarizerDeployment:
     def __init__(self):
@@ -1500,6 +1534,174 @@ class HealthDeployment:
             "gpu_memory_gb": gpu_mem_gb
         })
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROLLBACK WEBHOOK
+# Receives Alertmanager POST (severity=critical, action=rollback
+# Promotes @fallback → @production in MLflow
+# The hot-reload thread in SegmenterDeployment picks up the alias change
+# within MODEL_RELOAD_INTERVAL_SECONDS (default 300s) — no container restart needed
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="rollback", num_replicas=1)
+class RollbackDeployment:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._last_rollback_ts = 0.0
+        self._cooldown_s = 300  # ignore repeat fires within 5 min
+        print("[rollback] Ready at /rollback")
+
+    async def __call__(self, request: Request) -> JSONResponse:
+        if request.method != "POST":
+            return JSONResponse({"error": "POST only"}, status_code=405)
+
+        now = time.time()
+        with self._lock:
+            if now - self._last_rollback_ts < self._cooldown_s:
+                remaining = int(self._cooldown_s - (now - self._last_rollback_ts))
+                print(f"[rollback] Cooldown active — skipping ({remaining}s left)")
+                return JSONResponse({"status": "skipped", "reason": f"cooldown {remaining}s remaining"})
+            self._last_rollback_ts = now
+
+        # Log which alerts fired
+        try:
+            body = await request.json()
+            alert_names = [
+                a.get("labels", {}).get("alertname", "unknown")
+                for a in body.get("alerts", [])
+            ]
+        except Exception:
+            alert_names = ["unknown"]
+        print(f"[rollback] Triggered by: {alert_names}")
+
+        # Swap @production → @fallback version in MLflow
+        try:
+            import mlflow
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            client = mlflow.tracking.MlflowClient()
+
+            try:
+                prod_version = str(
+                    client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "production").version
+                )
+            except Exception:
+                prod_version = "unknown"
+
+            fallback_mv = client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "fallback")
+            fallback_version = str(fallback_mv.version)
+
+            # so rollback is reversible
+            client.set_registered_model_alias(MLFLOW_MODEL_NAME, "production", fallback_version)
+            client.set_registered_model_alias(MLFLOW_MODEL_NAME, "fallback", prod_version)
+
+            print(f"[rollback] @production: v{prod_version} → v{fallback_version} | @fallback: v{fallback_version} → v{prod_version}")
+            return JSONResponse({
+                "status":             "rolled_back",
+                "production_was":     prod_version,
+                "production_now":     fallback_version,
+                "fallback_was":       fallback_version,
+                "fallback_now":       prod_version,
+                "triggered_by":       alert_names,
+                "note":               "Hot-reload will pick up new @production within 5 mins",
+            })
+
+        except Exception as e:
+            print(f"[rollback] MLflow error: {e}")
+            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RETRAIN WEBHOOK
+# Receives Alertmanager POST (action=retrain) when feedback threshold is crossed.
+# Calls the training pipeline trigger endpoint (RETRAIN_TRIGGER_URL env var).
+# Falls back to logging the event if the training pipeline is unreachable.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#RETRAIN_TRIGGER_URL = os.getenv("RETRAIN_TRIGGER_URL", "")
+
+#@serve.deployment(name="retrain", num_replicas=1)
+#class RetrainDeployment:
+#    def __init__(self):
+        self._lock = threading.Lock()
+        self._last_trigger_ts = 0.0
+        self._cooldown_s = 3600  # trigger at most once per hour
+        print(f"[retrain] Ready at /retrain  (trigger_url={RETRAIN_TRIGGER_URL or 'not set'})")
+
+#    async def __call__(self, request: Request) -> JSONResponse:
+        if request.method != "POST":
+            return JSONResponse({"error": "POST only"}, status_code=405)
+
+        now = time.time()
+        with self._lock:
+            if now - self._last_trigger_ts < self._cooldown_s:
+                remaining = int(self._cooldown_s - (now - self._last_trigger_ts))
+                print(f"[retrain] Cooldown active — skipping ({remaining}s left)")
+                return JSONResponse({"status": "skipped", "reason": f"cooldown {remaining}s remaining"})
+            self._last_trigger_ts = now
+
+        try:
+            body = await request.json()
+            alert_names = [
+                a.get("labels", {}).get("alertname", "unknown")
+                for a in body.get("alerts", [])
+            ]
+        except Exception:
+            alert_names = ["unknown"]
+        print(f"[retrain] Triggered by: {alert_names}")
+
+        # Get current feedback count from DB for context
+        feedback_count = 0
+        if DATABASE_URL:
+            try:
+                import psycopg2
+                conn = psycopg2.connect(DATABASE_URL)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM feedback_events WHERE used_in_retrain_version IS NULL")
+                feedback_count = cur.fetchone()[0]
+                conn.close()
+            except Exception as e:
+                print(f"[retrain] Could not query feedback count: {e}")
+
+        # Call training pipeline if URL is configured
+        if RETRAIN_TRIGGER_URL:
+            try:
+                import urllib.request
+                payload = json.dumps({
+                    "trigger": "feedback_threshold",
+                    "alert": alert_names,
+                    "pending_feedback_count": feedback_count,
+                    "feedback_endpoint": "/api/feedback/all",
+                }).encode()
+                req = urllib.request.Request(
+                    RETRAIN_TRIGGER_URL,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    status = resp.status
+                print(f"[retrain] Training pipeline triggered: HTTP {status}")
+                return JSONResponse({
+                    "status": "triggered",
+                    "training_pipeline_http": status,
+                    "pending_feedback": feedback_count,
+                    "triggered_by": alert_names,
+                })
+            except Exception as e:
+                print(f"[retrain] Training pipeline call failed: {e}")
+                return JSONResponse({
+                    "status": "logged_only",
+                    "reason": str(e),
+                    "pending_feedback": feedback_count,
+                    "note": "Feedback data available at /api/feedback/all for manual retrain",
+                })
+        else:
+            print(f"[retrain] RETRAIN_TRIGGER_URL not set — logged only. pending_feedback={feedback_count}")
+            return JSONResponse({
+                "status": "logged_only",
+                "reason": "RETRAIN_TRIGGER_URL not configured",
+                "pending_feedback": feedback_count,
+                "note": "Feedback data available at /api/feedback/all for manual retrain",
+            })
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BIND & RUN
@@ -1517,6 +1719,8 @@ health     = HealthDeployment.bind()
 recap      = RecapPipelineDeployment.bind()
 recap_api  = RecapAPIDeployment.bind()
 recap_ui   = RecapUIDeployment.bind()
+rollback   = RollbackDeployment.bind()
+#retrain    = RetrainDeployment.bind()
 
 #serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 # HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.87.115:8000/recap'))
@@ -1545,10 +1749,12 @@ serve.run(summarizer, name="summarizer", route_prefix="/summarize")
 serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap_api,  name="recap_api",  route_prefix="/api")
 serve.run(recap_ui,   name="recap_ui",   route_prefix="/ui")
+serve.run(rollback,   name="rollback",   route_prefix="/rollback")
+#serve.run(retrain,    name="retrain",    route_prefix="/retrain")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
-print("Endpoints: /health, /segment, /summarize, /recap, /metrics")
+print("Endpoints: /health, /segment, /summarize, /recap, /metrics, /rollback")
 print("=" * 60)
 
 import signal

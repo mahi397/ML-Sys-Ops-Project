@@ -17,8 +17,20 @@ route:
     - match:
         severity: critical
       receiver: 'critical'
+#    - match:
+#        action: retrain
+#      receiver: 'retrain-handler'
+#      group_wait: 30s
+#      repeat_interval: 6h  
 
 receivers:
   - name: 'default'
   - name: 'critical'
   - name: 'rollback-handler'
+    webhook_configs:
+      - url: 'http://ray-serve:8000/rollback'
+#      send_resolved: false
+#  - name: 'retrain-handler'
+#    webhook_configs:
+#      - url: 'http://ray-serve:8000/retrain'
+        send_resolved: false

@@ -514,13 +514,13 @@
             {
               "type": "value",
               "options": {
-                "1": { "text": "LOADED ✓", "color": "green" }
+                "1": { "text": "LOADED", "color": "green" }
               }
             },
             {
               "type": "value",
               "options": {
-                "0": { "text": "NOT LOADED ✗", "color": "red" }
+                "0": { "text": "NOT LOADED", "color": "red" }
               }
             }
           ]
