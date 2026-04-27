@@ -675,7 +675,6 @@ DATA_SERVICES=(
     stage2_forward_service
     user_summary_materialize_service
     retraining_dataset_service
-    production_drift_monitor
 )
 SERVING_SERVICES=(serving-api)
 TRAINING_SERVICES=(retrain-watcher online-eval)

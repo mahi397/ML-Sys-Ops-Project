@@ -115,7 +115,7 @@ ML-Sys-Ops-Project/
 
 6. **Retraining trigger** — `retrain_watcher` polls the table every 5 minutes. When accumulated corrections above the watermark reach the threshold (5 for demo, 500 for prod), it fires the retrain pipeline.
 
-7. **Dataset build** — `retraining_dataset_service` assembles `feedback_examples.jsonl` from corrected meeting windows, runs a drift quality gate, and uploads to chi.tacc object storage. The new version is registered in `dataset_versions`.
+7. **Dataset build** — `retraining_dataset_service` assembles `feedback_examples.jsonl` from corrected meeting windows, runs a drift quality gate, and uploads to chi.tacc object storage. The new version is registered in `dataset_versions`; local `/mnt/block/...` copies are treated as cache/staging only.
 
 8. **Training** — `retrain.py` warm-starts from the current `production` model, trains with Ray Train (fault-tolerant, MinIO checkpoints), then runs evaluation: aggregate metrics (Pk, F1, WindowDiff), fairness slice evaluation, and failure mode tests. Metrics and a model card are logged to MLflow.
 
@@ -171,7 +171,7 @@ DEPLOY_JITSI=true bash setup.sh
 SETUP_MODE=data-jitsi DEPLOY_JITSI=true bash setup.sh
 ```
 
-`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator is the only manual profile service.
+`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator and production drift monitor are manual profile services.
 
 Manual compose profiles are available when needed:
 
@@ -181,6 +181,7 @@ docker compose --profile mlflow --profile serving up -d serving-api
 docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher online-eval
 docker compose --profile serving --profile monitoring up -d prometheus grafana alertmanager node-exporter
 docker compose --profile emulated-traffic up -d traffic-generator
+docker compose --profile drift-monitor up -d production_drift_monitor
 ```
 
 ### 3. Verify
@@ -245,7 +246,7 @@ Run these from the repository root:
 | `stage2_forward_service` | `docker compose up -d stage2_forward_service` | `docker compose logs -f --since 15m stage2_forward_service` | `docker compose stop stage2_forward_service` |
 | `user_summary_materialize_service` | `docker compose up -d user_summary_materialize_service` | `docker compose logs -f --since 15m user_summary_materialize_service` | `docker compose stop user_summary_materialize_service` |
 | `retraining_dataset_service` | `docker compose up -d retraining_dataset_service` | `docker compose logs -f --since 15m retraining_dataset_service` | `docker compose stop retraining_dataset_service` |
-| `production_drift_monitor` | `docker compose up -d production_drift_monitor` | `docker compose logs -f --since 15m production_drift_monitor` | `docker compose stop production_drift_monitor` |
+| `production_drift_monitor` | `docker compose --profile drift-monitor up -d production_drift_monitor` | `docker compose --profile drift-monitor logs -f --since 15m production_drift_monitor` | `docker compose --profile drift-monitor stop production_drift_monitor` |
 | `minio` | `docker compose --profile mlflow up -d minio` | `docker compose --profile mlflow logs -f --since 15m minio` | `docker compose --profile mlflow stop minio` |
 | `minio-create-buckets` | `docker compose --profile mlflow up minio-create-buckets` | `docker compose --profile mlflow logs --since 15m minio-create-buckets` | `docker compose --profile mlflow stop minio-create-buckets` |
 | `mlflow` | `docker compose --profile mlflow up -d mlflow` | `docker compose --profile mlflow logs -f --since 15m mlflow` | `docker compose --profile mlflow stop mlflow` |
@@ -308,8 +309,10 @@ docker compose exec retraining_dataset_service \
 Run a single production drift monitoring cycle on demand:
 
 ```bash
+docker compose --profile drift-monitor up -d production_drift_monitor
 docker compose exec production_drift_monitor \
   python -m proj07_services.workers.production_drift_monitor --once
+docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
 ### Promote a candidate model to production
@@ -338,7 +341,7 @@ curl -X POST http://<FLOATING_IP>:9090/-/reload
 - **Ray Serve** for serving: fractional GPU sharing (RoBERTa 0.3 + Mistral 0.7), dynamic batching, deployment handles for pipeline chaining, MLflow hot-reload — all in one container. See [serving/ray_serve/RAY_SERVE_JUSTIFICATION.md](serving/ray_serve/RAY_SERVE_JUSTIFICATION.md).
 - **Ray Train** for retraining: `FailureConfig(max_failures=2)` makes unattended overnight retraining fault-tolerant. Checkpoints go to MinIO so a VM restart mid-epoch resumes from the last saved state.
 - **MLflow `--serve-artifacts`**: The MLflow server proxies all artifact uploads/downloads. Training containers authenticate to chi.tacc S3 through the proxy — no S3 credentials needed in client code.
-- **Strict meeting-ID splits**: Train/val/test splits are fixed by `meeting_id` and never reassigned. New production feedback meetings only enter val/test; the previous dataset version rolls forward into train.
+- **Strict meeting-ID splits**: Train/val/test splits are fixed by `meeting_id` and never reassigned. Each retraining cycle preserves prior split boundaries and appends a fresh meeting-level `70/15/15` split of newly eligible production feedback meetings to train/val/test.
 - **Watermark-based retraining**: The watcher tracks the highest consumed `feedback_event_id`. Corrections are never double-counted across runs even if the watcher restarts.
 
 ---

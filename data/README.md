@@ -23,19 +23,37 @@ The root compose starts these data services by default:
 - `stage2_forward_service`
 - `user_summary_materialize_service`
 - `retraining_dataset_service`
-- `production_drift_monitor`
 
-`traffic-generator` is the only manual service. Start it explicitly when you want emulated production uploads:
+`traffic-generator` and `production_drift_monitor` are manual profile services. Start them explicitly when needed:
 
 ```bash
 docker compose --profile emulated-traffic up -d traffic-generator
 docker compose logs -f traffic-generator
 docker compose --profile emulated-traffic stop traffic-generator
+
+docker compose --profile drift-monitor up -d production_drift_monitor
+docker compose logs -f production_drift_monitor
+docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
 The archived `initial_implementation/` tree is independent reference material. The active runtime and setup flow do not depend on it.
 
 ## One-Off Jobs
+
+Bootstrap AMI corpus data into Postgres:
+
+```bash
+cd data/proj07-runtime
+python -m proj07_services.pipeline.bootstrap_ami_corpus \
+  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
+  --bucket "${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}" \
+  --prefix "${AMI_OBJECT_PREFIX:-ami_public_manual_1.6.2}" \
+  --raw-root "${BLOCK_ROOT:-/mnt/block}/staging/current_job/raw" \
+  --processed-root "${BLOCK_ROOT:-/mnt/block}/staging/current_job/processed" \
+  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/ami_corpus_bootstrap.log"
+```
+
+Add `--meeting ES2002a` to ingest a single AMI meeting instead of the full corpus. This command expects the raw AMI corpus to already be present in object storage; `./data/setup.sh` can stage it first.
 
 Generate synthetic Stage 1 bootstrap data:
 
@@ -68,16 +86,10 @@ docker compose exec retraining_dataset_service \
 Force one production drift check:
 
 ```bash
+docker compose --profile drift-monitor up -d production_drift_monitor
 docker compose exec production_drift_monitor \
   python -m proj07_services.workers.production_drift_monitor --once
+docker compose --profile drift-monitor stop production_drift_monitor
 ```
 
-Restore stored dataset lineage:
-
-```bash
-cd data/proj07-runtime
-python -m proj07_services.retraining.restore_dataset_lineage \
-  --rclone-remote "${RCLONE_REMOTE:-rclone_s3}" \
-  --bucket "${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}" \
-  --log-file "${BLOCK_ROOT:-/mnt/block}/ingest_logs/retraining_dataset_lineage_restore.log"
-```
+`bash setup.sh` no longer runs retraining dataset lineage restore. Any future lineage/restore workflow should be run manually instead.

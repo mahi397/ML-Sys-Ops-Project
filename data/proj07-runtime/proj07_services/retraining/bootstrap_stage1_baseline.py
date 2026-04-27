@@ -17,8 +17,11 @@ from proj07_services.common.feedback_common import (
     insert_dataset_quality_report,
     insert_dataset_version,
     label_counts,
+    latest_dataset_version_record,
+    next_dataset_version_number,
     pick_stage1_examples,
     stable_split_70_15_15,
+    upload_file,
     upload_dir,
     write_json,
     write_jsonl,
@@ -27,11 +30,10 @@ from proj07_services.common.task_service_common import build_logger, env_flag, e
 from proj07_services.retraining.runtime import (
     RetrainingBuildConfig,
     candidate_staging_root,
+    dataset_quality_report_object_key,
     evaluate_stage1_quality_gate,
-    existing_versions,
     mark_meetings_as_consumed,
     move_tree,
-    next_version,
     quality_report_allows_publish,
     quarantine_root,
     rows_for_meetings,
@@ -120,15 +122,20 @@ def main() -> int:
     config = build_config()
     logger = build_logger(APP_NAME, config.log_dir)
 
-    if existing_versions(config.dataset_root) and not args.force:
-        logger.info(
-            "Skipping Stage 1 baseline bootstrap because versioned dataset snapshots already exist under %s",
-            config.dataset_root,
-        )
-        return 0
-
     conn = get_conn()
     try:
+        latest_record = latest_dataset_version_record(
+            conn,
+            dataset_name=config.dataset_name,
+            stage="stage1",
+        )
+        if latest_record is not None and not args.force:
+            logger.info(
+                "Skipping Stage 1 baseline bootstrap because published Stage 1 snapshots already exist in dataset_versions (latest=v%s)",
+                latest_record["version"],
+            )
+            return 0
+
         meeting_ids = discover_ami_meeting_ids(conn)
         if not meeting_ids:
             logger.info("Skipping Stage 1 baseline bootstrap because no AMI meetings with gold segments were found")
@@ -164,11 +171,19 @@ def main() -> int:
         test_rows = rows_for_meetings(dataset_rows, split_assignments["test"])
         combined_rows = train_rows + val_rows + test_rows
 
-        version = next_version(config.dataset_root)
+        version = next_dataset_version_number(
+            conn,
+            dataset_name=config.dataset_name,
+            stage="stage1",
+        )
         profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+            conn=conn,
             rows=combined_rows,
             include_label=True,
+            reference_dataset_name=config.dataset_name,
+            reference_stage="stage1",
             reference_root=config.dataset_root,
+            logger=logger,
             config=retraining_build_config(config),
         )
         manifest = {
@@ -269,6 +284,14 @@ def main() -> int:
             out_root = quarantine_root(config.dataset_root, version)
             move_tree(staging_root, out_root)
 
+        quality_report_object_key = dataset_quality_report_object_key(
+            object_prefix=config.dataset_object_prefix,
+            version=version,
+            out_root=out_root,
+            publish_allowed=publish_allowed,
+        )
+        upload_file(out_root / "quality_report.json", quality_report_object_key, logger)
+
         insert_dataset_quality_report(
             conn,
             dataset_name=config.dataset_name,
@@ -277,7 +300,7 @@ def main() -> int:
             dataset_version=str(version) if publish_allowed else None,
             reference_dataset_name=config.dataset_name,
             reference_dataset_version=None if reference_version is None else str(reference_version),
-            report_path=str((out_root / "quality_report.json").resolve()),
+            report_path=quality_report_object_key,
             share_drifted_features=quality_report["share_drifted_features"],
             drifted_feature_count=quality_report["drifted_feature_count"],
             total_feature_count=quality_report["total_feature_count"],

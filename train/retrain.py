@@ -86,6 +86,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 
+def _default_database_url() -> str:
+    user = os.environ.get("POSTGRES_USER", "proj07_user")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    database = os.environ.get("POSTGRES_DB", "proj07_sql_db")
+    auth = f"{user}:{password}@" if password else f"{user}@"
+    return f"postgresql://{auth}{host}:{port}/{database}"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════════
@@ -221,7 +231,7 @@ def resolve_dataset_path(cfg: Dict) -> str:
         if jsonl_files:
             log.info(f"Using explicit data_dir: {cfg['data_dir']} ({len(jsonl_files)} files)")
             return cfg["data_dir"]
-    db_url = os.environ.get("DATABASE_URL", "postgresql://recap:changeme@postgres:5432/proj07_sql_db")
+    db_url = os.environ.get("DATABASE_URL") or _default_database_url()
     try:
         import psycopg2
         conn = psycopg2.connect(db_url)

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,11 +12,15 @@ from typing import Any
 from proj07_services.common.feedback_common import (
     build_model_utterances_by_meeting,
     build_stage1_rows,
+    dataset_object_prefix_from_key,
+    download_dir,
     fetch_source_utterances,
     fetch_topic_segments,
-    insert_dataset_quality_report,
     insert_dataset_version,
     label_counts,
+    latest_dataset_version_record,
+    list_dataset_version_records,
+    next_dataset_version_number,
     pick_stage1_examples,
     stable_split_70_15_15,
     upload_dir,
@@ -38,6 +41,10 @@ STRUCTURAL_FEEDBACK_EVENT_TYPES = (
     "merge_segments",
     "split_segment",
     "boundary_correction",
+)
+PREFERRED_STAGE1_SEGMENT_TYPES = (
+    "user_corrected",
+    "predicted",
 )
 VERSION_DIR_RE = re.compile(r"^v(\d+)$")
 MEETING_ID_RE = re.compile(r"^jitsi_(?P<ts>\d{8}T\d{6}Z)_[0-9a-f]{8}$")
@@ -66,6 +73,7 @@ class RetrainingBuildConfig:
 @dataclass(frozen=True)
 class RetrainingDatasetMetrics:
     valid_unversioned_meeting_count: int
+    stage1_segmented_meeting_count: int
     structural_feedback_event_count: int
     structural_feedback_meeting_count: int
 
@@ -122,7 +130,14 @@ def quality_gate_config(config: RetrainingBuildConfig) -> DriftGateConfig:
     )
 
 
-def quality_report_allows_publish(report: dict[str, Any], *, reference_version: int | None) -> bool:
+def quality_report_allows_publish(
+    report: dict[str, Any],
+    *,
+    reference_version: int | None,
+    force_publish: bool = False,
+) -> bool:
+    if force_publish:
+        return True
     status = str(report.get("status") or "")
     if status == "passed":
         return True
@@ -194,9 +209,52 @@ def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
     return profile
 
 
-def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
-    for version in reversed(existing_versions(root)):
-        profile = load_or_build_dataset_profile(root / f"v{version}")
+def ensure_cached_version_dir(
+    local_root: Path,
+    *,
+    version: int,
+    object_key: str,
+    logger,
+    required_files: tuple[str, ...] = ("manifest.json",),
+) -> Path:
+    version_root = local_root / f"v{version}"
+    if all((version_root / relative_path).exists() for relative_path in required_files):
+        return version_root
+
+    download_dir(
+        dataset_object_prefix_from_key(object_key),
+        version_root,
+        logger,
+    )
+    if not all((version_root / relative_path).exists() for relative_path in required_files):
+        raise RuntimeError(
+            f"Dataset cache under {version_root} is incomplete after staging from object storage"
+        )
+    return version_root
+
+
+def latest_reference_profile(
+    conn,
+    *,
+    dataset_name: str,
+    stage: str,
+    reference_root: Path,
+    logger,
+) -> tuple[int | None, dict[str, Any] | None]:
+    records = list_dataset_version_records(conn, dataset_name=dataset_name, stage=stage)
+    for record in reversed(records):
+        version = int(record["version"])
+        version_root = reference_root / f"v{version}"
+        profile = load_or_build_dataset_profile(version_root)
+        if not is_usable_reference_profile(profile):
+            version_root = ensure_cached_version_dir(
+                reference_root,
+                version=version,
+                object_key=str(record["object_key"]),
+                logger=logger,
+                required_files=("manifest.json",),
+            )
+            profile = load_or_build_dataset_profile(version_root)
         if is_usable_reference_profile(profile):
             return version, profile
     return None, None
@@ -219,11 +277,28 @@ def move_tree(source: Path, destination: Path) -> None:
     shutil.move(str(source), str(destination))
 
 
+def dataset_quality_report_object_key(
+    *,
+    object_prefix: str,
+    version: int,
+    out_root: Path,
+    publish_allowed: bool,
+) -> str:
+    normalized_prefix = object_prefix.strip("/")
+    if publish_allowed:
+        return f"{normalized_prefix}/v{version}/quality_report.json"
+    return f"{normalized_prefix}/_quarantine/{out_root.name}/quality_report.json"
+
+
 def evaluate_stage1_quality_gate(
     *,
+    conn,
     rows: list[dict],
     include_label: bool,
+    reference_dataset_name: str,
+    reference_stage: str,
     reference_root: Path,
+    logger,
     config: RetrainingBuildConfig,
 ) -> tuple[dict[str, Any], dict[str, Any], int | None]:
     feature_columns, metadata = extract_stage1_feature_columns(rows, include_label=include_label)
@@ -232,7 +307,13 @@ def evaluate_stage1_quality_gate(
         metadata=metadata,
         bin_count=config.quality_numeric_bin_count,
     )
-    reference_version, reference_profile = latest_reference_profile(reference_root)
+    reference_version, reference_profile = latest_reference_profile(
+        conn,
+        dataset_name=reference_dataset_name,
+        stage=reference_stage,
+        reference_root=reference_root,
+        logger=logger,
+    )
     report = compare_feature_columns_to_reference(
         reference_profile=reference_profile,
         current_feature_columns=feature_columns,
@@ -240,6 +321,20 @@ def evaluate_stage1_quality_gate(
         config=quality_gate_config(config),
     )
     return current_profile, report, reference_version
+
+
+def build_stage1_profile(
+    *,
+    rows: list[dict],
+    include_label: bool,
+    config: RetrainingBuildConfig,
+) -> dict[str, Any]:
+    feature_columns, metadata = extract_stage1_feature_columns(rows, include_label=include_label)
+    return build_reference_profile(
+        feature_columns,
+        metadata=metadata,
+        bin_count=config.quality_numeric_bin_count,
+    )
 
 
 def meeting_sort_key(meeting_id: str) -> tuple[int, str]:
@@ -254,15 +349,6 @@ def rows_for_meetings(rows: list[dict], meeting_ids: list[str]) -> list[dict]:
     return [row for row in rows if row["input"]["meeting_id"] in allowed]
 
 
-def split_new_meetings(meeting_ids: list[str]) -> tuple[list[str], list[str]]:
-    if not meeting_ids:
-        return [], []
-    midpoint = max(1, math.ceil(len(meeting_ids) / 2))
-    val_meeting_ids = meeting_ids[:midpoint]
-    test_meeting_ids = meeting_ids[midpoint:]
-    return val_meeting_ids, test_meeting_ids
-
-
 def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
     with conn.cursor() as cur:
         cur.execute(
@@ -274,6 +360,13 @@ def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
                   AND is_valid = TRUE
                   AND dataset_version IS NULL
             ),
+            eligible_segmented_meetings AS (
+                SELECT DISTINCT em.meeting_id
+                FROM eligible_meetings em
+                JOIN topic_segments ts
+                  ON ts.meeting_id = em.meeting_id
+                WHERE ts.segment_type = ANY(%s)
+            ),
             eligible_feedback AS (
                 SELECT fe.feedback_event_id, fe.meeting_id
                 FROM feedback_events fe
@@ -283,14 +376,17 @@ def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
             )
             SELECT
                 (SELECT COUNT(*) FROM eligible_meetings) AS valid_unversioned_meeting_count,
+                (SELECT COUNT(*) FROM eligible_segmented_meetings) AS stage1_segmented_meeting_count,
                 (SELECT COUNT(*) FROM eligible_feedback) AS structural_feedback_event_count,
                 (SELECT COUNT(DISTINCT meeting_id) FROM eligible_feedback) AS structural_feedback_meeting_count
-            """
+            """,
+            (list(PREFERRED_STAGE1_SEGMENT_TYPES),),
         )
         row = cur.fetchone()
 
     return RetrainingDatasetMetrics(
         valid_unversioned_meeting_count=int(row["valid_unversioned_meeting_count"] or 0),
+        stage1_segmented_meeting_count=int(row["stage1_segmented_meeting_count"] or 0),
         structural_feedback_event_count=int(row["structural_feedback_event_count"] or 0),
         structural_feedback_meeting_count=int(row["structural_feedback_meeting_count"] or 0),
     )
@@ -302,17 +398,47 @@ def fetch_candidate_meeting_ids(conn) -> list[str]:
             f"""
             SELECT DISTINCT m.meeting_id
             FROM meetings m
-            JOIN feedback_events fe
-              ON fe.meeting_id = m.meeting_id
             WHERE {production_jitsi_meeting_filter_sql("m")}
               AND m.is_valid = TRUE
               AND m.dataset_version IS NULL
-              AND fe.event_type IN ('merge_segments', 'split_segment', 'boundary_correction')
+              AND EXISTS (
+                  SELECT 1
+                  FROM topic_segments ts
+                  WHERE ts.meeting_id = m.meeting_id
+                    AND ts.segment_type = ANY(%s)
+              )
             ORDER BY m.meeting_id
-            """
+            """,
+            (list(PREFERRED_STAGE1_SEGMENT_TYPES),),
         )
         rows = cur.fetchall()
     return [row["meeting_id"] for row in rows]
+
+
+def fetch_preferred_stage1_segments(
+    conn,
+    meeting_ids: list[str],
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    preferred_segments_by_meeting: dict[str, list[dict]] = {}
+    segment_source_by_meeting: dict[str, str] = {}
+    segments_by_type: dict[str, dict[str, list[dict]]] = {}
+
+    for segment_type in PREFERRED_STAGE1_SEGMENT_TYPES:
+        rows = fetch_topic_segments(conn, meeting_ids, segment_type)
+        grouped_rows: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            grouped_rows[row["meeting_id"]].append(row)
+        segments_by_type[segment_type] = dict(grouped_rows)
+
+    for meeting_id in meeting_ids:
+        for segment_type in PREFERRED_STAGE1_SEGMENT_TYPES:
+            chosen = segments_by_type.get(segment_type, {}).get(meeting_id)
+            if chosen:
+                preferred_segments_by_meeting[meeting_id] = chosen
+                segment_source_by_meeting[meeting_id] = segment_type
+                break
+
+    return preferred_segments_by_meeting, segment_source_by_meeting
 
 
 def mark_meetings_as_consumed(conn, snapshot_version: int, split_assignments: dict[str, list[str]]) -> None:
@@ -338,18 +464,29 @@ def build_stage1_feedback_pool(
     config: RetrainingBuildConfig,
     logger,
     candidate_meetings: list[str],
+    metrics: RetrainingDatasetMetrics | None = None,
+    force_publish: bool = False,
 ) -> FeedbackPoolBuildResult | None:
     candidate_meetings = sorted(set(candidate_meetings), key=meeting_sort_key)
+    structural_feedback_event_count = (
+        "n/a" if metrics is None else metrics.structural_feedback_event_count
+    )
+    structural_feedback_meeting_count = (
+        "n/a" if metrics is None else metrics.structural_feedback_meeting_count
+    )
     if not candidate_meetings:
-        logger.info("No eligible retraining meetings were discovered; skipping feedback-pool build")
+        logger.info(
+            "No eligible retraining meetings were discovered; skipping feedback-pool build | candidate_meetings=0 structural_feedback_events=%s structural_feedback_meetings=%s",
+            structural_feedback_event_count,
+            structural_feedback_meeting_count,
+        )
         return None
 
     source_rows = fetch_source_utterances(conn, candidate_meetings)
-    corrected_segments = fetch_topic_segments(conn, candidate_meetings, "user_corrected")
-
-    topic_segments_by_meeting: dict[str, list[dict]] = defaultdict(list)
-    for row in corrected_segments:
-        topic_segments_by_meeting[row["meeting_id"]].append(row)
+    topic_segments_by_meeting, segment_source_by_meeting = fetch_preferred_stage1_segments(
+        conn,
+        candidate_meetings,
+    )
 
     model_utterances_by_meeting = build_model_utterances_by_meeting(
         source_rows=source_rows,
@@ -370,15 +507,27 @@ def build_stage1_feedback_pool(
     )
     if not dataset_rows or not eligible_meetings:
         logger.info(
-            "No retraining rows were produced from the eligible meetings; skipping feedback-pool build"
+            "No retraining rows were produced for this retraining scan; skipping feedback-pool build | eligible_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
+            len(eligible_meetings),
+            structural_feedback_event_count,
+            structural_feedback_meeting_count,
         )
         return None
 
-    version = next_version(config.feedback_pool_root)
-    profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+    segment_source_counts = Counter(
+        segment_source_by_meeting[meeting_id]
+        for meeting_id in eligible_meetings
+        if meeting_id in segment_source_by_meeting
+    )
+
+    version = next_dataset_version_number(
+        conn,
+        dataset_name="roberta_stage1_feedback_pool",
+        stage="stage1",
+    )
+    profile = build_stage1_profile(
         rows=dataset_rows,
         include_label=True,
-        reference_root=config.feedback_pool_root,
         config=config,
     )
     manifest = {
@@ -390,30 +539,23 @@ def build_stage1_feedback_pool(
         },
         "packaging": {
             "type": "retraining_pool",
-            "reason": "Runtime service compiled the next feedback-derived Stage 1 retraining pool from valid, unconsumed Jitsi meetings.",
+            "reason": "Runtime service compiled the next Stage 1 retraining pool from valid, unconsumed Jitsi meetings, preferring user-corrected segments when available and otherwise falling back to predicted segments.",
         },
         "params": {
             "window_size": config.window_size,
             "transition_index": config.transition_index,
             "min_utterance_chars": config.min_utterance_chars,
             "max_words_per_utterance": config.max_words_per_utterance,
-            "segment_type": "user_corrected",
+            "segment_selection_policy": "prefer_user_corrected_else_predicted",
         },
         "meetings": {
             "candidate": len(candidate_meetings),
             "eligible": len(eligible_meetings),
             "candidate_meeting_ids": candidate_meetings,
             "eligible_meeting_ids": eligible_meetings,
+            "segment_source_counts": dict(segment_source_counts),
         },
         "rows": label_counts(dataset_rows),
-        "quality_gate": {
-            "status": quality_report["status"],
-            "reason": quality_report.get("reason"),
-            "reference_version": reference_version,
-            "share_drifted_features": quality_report["share_drifted_features"],
-            "drifted_feature_count": quality_report["drifted_feature_count"],
-            "total_feature_count": quality_report["total_feature_count"],
-        },
     }
     staging_root = candidate_staging_root(config.feedback_pool_root, version)
     staging_root.mkdir(parents=True, exist_ok=True)
@@ -428,62 +570,30 @@ def build_stage1_feedback_pool(
     )
     write_json(staging_root / "examples.json", pick_stage1_examples(dataset_rows))
     write_json(staging_root / "profile.json", profile)
-    write_json(staging_root / "quality_report.json", quality_report)
     write_json(staging_root / "manifest.json", manifest)
 
-    publish_allowed = quality_report_allows_publish(
-        quality_report,
-        reference_version=reference_version,
-    )
-    if publish_allowed:
-        out_root = config.feedback_pool_root / f"v{version}"
-        move_tree(staging_root, out_root)
-        object_prefix = f"{config.feedback_pool_object_prefix.strip('/')}/v{version}"
-        if config.upload_artifacts:
-            upload_dir(out_root, object_prefix, logger)
+    out_root = config.feedback_pool_root / f"v{version}"
+    move_tree(staging_root, out_root)
+    object_prefix = f"{config.feedback_pool_object_prefix.strip('/')}/v{version}"
+    if config.upload_artifacts:
+        upload_dir(out_root, object_prefix, logger)
 
-        insert_dataset_version(
-            conn=conn,
-            dataset_name="roberta_stage1_feedback_pool",
-            stage="stage1",
-            source_type="production_feedback",
-            object_key=f"{object_prefix}/manifest.json",
-            manifest_json=manifest,
-        )
-    else:
-        out_root = quarantine_root(config.feedback_pool_root, version)
-        move_tree(staging_root, out_root)
-
-    insert_dataset_quality_report(
-        conn,
+    insert_dataset_version(
+        conn=conn,
         dataset_name="roberta_stage1_feedback_pool",
-        report_scope="feedback_pool",
-        report_status=quality_report["status"],
-        dataset_version=str(version) if publish_allowed else None,
-        reference_dataset_name="roberta_stage1_feedback_pool",
-        reference_dataset_version=None if reference_version is None else str(reference_version),
-        report_path=str((out_root / "quality_report.json").resolve()),
-        share_drifted_features=quality_report["share_drifted_features"],
-        drifted_feature_count=quality_report["drifted_feature_count"],
-        total_feature_count=quality_report["total_feature_count"],
-        details_json=quality_report,
+        stage="stage1",
+        source_type="production_feedback",
+        object_key=f"{object_prefix}/manifest.json",
+        manifest_json=manifest,
     )
-
-    if not publish_allowed:
-        logger.warning(
-            "Feedback pool candidate did not pass quality gate and was quarantined | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
-            version,
-            reference_version if reference_version is not None else "none",
-            quality_report["status"],
-            quality_report.get("reason", "n/a"),
-            quality_report["share_drifted_features"],
-        )
-        return None
 
     logger.info(
-        "Built Stage 1 feedback pool v%s | meetings=%s rows=%s",
+        "Built Stage 1 feedback pool v%s | candidate_meetings=%s eligible_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s rows=%s",
         version,
+        len(candidate_meetings),
         len(eligible_meetings),
+        structural_feedback_event_count,
+        structural_feedback_meeting_count,
         len(dataset_rows),
     )
     return FeedbackPoolBuildResult(
@@ -502,9 +612,19 @@ def build_retraining_snapshot(
     logger,
     feedback_pool: FeedbackPoolBuildResult,
     selected_meeting_ids: list[str] | None = None,
+    force_publish: bool = False,
 ) -> RetrainingSnapshotBuildResult:
-    snapshot_version = next_version(config.dataset_root)
-    base_version = latest_version(config.dataset_root)
+    snapshot_version = next_dataset_version_number(
+        conn,
+        dataset_name=config.dataset_name,
+        stage="stage1",
+    )
+    base_record = latest_dataset_version_record(
+        conn,
+        dataset_name=config.dataset_name,
+        stage="stage1",
+    )
+    base_version = None if base_record is None else int(base_record["version"])
     feedback_dir = feedback_pool.output_root
 
     feedback_rows = _read_jsonl(feedback_dir / "feedback_examples.jsonl")
@@ -555,31 +675,44 @@ def build_retraining_snapshot(
             "feedback_pool_source": f"roberta_stage1_feedback_pool/v{feedback_pool.version}",
         }
     else:
-        base_dir = config.dataset_root / f"v{base_version}"
-        train_rows = _read_jsonl(base_dir / "train.jsonl")
+        if base_record is None:
+            raise RuntimeError("Latest dataset version record disappeared before base snapshot staging")
+        base_dir = ensure_cached_version_dir(
+            config.dataset_root,
+            version=base_version,
+            object_key=str(base_record["object_key"]),
+            logger=logger,
+            required_files=("manifest.json", "train.jsonl", "val.jsonl", "test.jsonl"),
+        )
+        train_rows_base = _read_jsonl(base_dir / "train.jsonl")
         val_rows_base = _read_jsonl(base_dir / "val.jsonl")
         test_rows_base = _read_jsonl(base_dir / "test.jsonl")
-        train_rows = train_rows + val_rows_base + test_rows_base
-        val_meeting_ids, test_meeting_ids = split_new_meetings(new_meeting_ids)
-        val_rows = rows_for_meetings(feedback_rows, val_meeting_ids)
-        test_rows = rows_for_meetings(feedback_rows, test_meeting_ids)
+        new_split_assignments = stable_split_70_15_15(new_meeting_ids)
+        new_train_meeting_ids = new_split_assignments["train"]
+        new_val_meeting_ids = new_split_assignments["val"]
+        new_test_meeting_ids = new_split_assignments["test"]
+        train_rows = train_rows_base + rows_for_meetings(feedback_rows, new_train_meeting_ids)
+        val_rows = val_rows_base + rows_for_meetings(feedback_rows, new_val_meeting_ids)
+        test_rows = test_rows_base + rows_for_meetings(feedback_rows, new_test_meeting_ids)
         split_assignments = {
-            "val": val_meeting_ids,
-            "test": test_meeting_ids,
+            "train": new_train_meeting_ids,
+            "val": new_val_meeting_ids,
+            "test": new_test_meeting_ids,
         }
         split_info = {
             "base_version": base_version,
             "feedback_pool_version": feedback_pool.version,
             "snapshot_version": snapshot_version,
-            "base_roll_forward_policy": "The previous dataset version train/val/test are merged into the new train split before new production meetings are assigned.",
+            "base_roll_forward_policy": "The previous dataset version keeps its train/val/test split assignments, and only newly eligible production meetings are appended to the corresponding split.",
             "new_meeting_selection_policy": "Only meetings whose dataset_version was NULL at retraining discovery time are eligible for assignment.",
             "new_meeting_ids": new_meeting_ids,
-            "val_meeting_ids": val_meeting_ids,
-            "test_meeting_ids": test_meeting_ids,
+            "new_train_meeting_ids": new_train_meeting_ids,
+            "new_val_meeting_ids": new_val_meeting_ids,
+            "new_test_meeting_ids": new_test_meeting_ids,
         }
         packaging = {
             "type": "rolling_temporal_snapshot",
-            "reason": "Each new retraining run rolls the previous dataset version forward into train and reserves only newly-ingested production meetings for validation and test.",
+            "reason": "Each new retraining run preserves the prior split boundaries and appends a fresh meeting-level 70/15/15 split of newly eligible production feedback meetings to train, validation, and test respectively.",
         }
         composition = {
             "base_source": f"{config.dataset_name}/v{base_version}",
@@ -587,10 +720,9 @@ def build_retraining_snapshot(
         }
 
     combined_rows = train_rows + val_rows + test_rows
-    profile, quality_report, reference_version = evaluate_stage1_quality_gate(
+    profile = build_stage1_profile(
         rows=combined_rows,
         include_label=True,
-        reference_root=config.dataset_root,
         config=config,
     )
     manifest = {
@@ -610,14 +742,6 @@ def build_retraining_snapshot(
             "test": label_counts(test_rows),
         },
         "meetings": split_info,
-        "quality_gate": {
-            "status": quality_report["status"],
-            "reason": quality_report.get("reason"),
-            "reference_version": reference_version,
-            "share_drifted_features": quality_report["share_drifted_features"],
-            "drifted_feature_count": quality_report["drifted_feature_count"],
-            "total_feature_count": quality_report["total_feature_count"],
-        },
     }
     staging_root = candidate_staging_root(config.dataset_root, snapshot_version)
     staging_root.mkdir(parents=True, exist_ok=True)
@@ -635,60 +759,23 @@ def build_retraining_snapshot(
         },
     )
     write_json(staging_root / "profile.json", profile)
-    write_json(staging_root / "quality_report.json", quality_report)
     write_json(staging_root / "manifest.json", manifest)
 
-    publish_allowed = quality_report_allows_publish(
-        quality_report,
-        reference_version=reference_version,
-    )
-    if publish_allowed:
-        out_root = config.dataset_root / f"v{snapshot_version}"
-        move_tree(staging_root, out_root)
-        object_prefix = f"{config.dataset_object_prefix.strip('/')}/v{snapshot_version}"
-        if config.upload_artifacts:
-            upload_dir(out_root, object_prefix, logger)
+    out_root = config.dataset_root / f"v{snapshot_version}"
+    move_tree(staging_root, out_root)
+    object_prefix = f"{config.dataset_object_prefix.strip('/')}/v{snapshot_version}"
+    if config.upload_artifacts:
+        upload_dir(out_root, object_prefix, logger)
 
-        insert_dataset_version(
-            conn=conn,
-            dataset_name=config.dataset_name,
-            stage="stage1",
-            source_type="production_feedback",
-            object_key=f"{object_prefix}/manifest.json",
-            manifest_json=manifest,
-        )
-        mark_meetings_as_consumed(conn, snapshot_version, split_assignments)
-    else:
-        out_root = quarantine_root(config.dataset_root, snapshot_version)
-        move_tree(staging_root, out_root)
-
-    insert_dataset_quality_report(
-        conn,
+    insert_dataset_version(
+        conn=conn,
         dataset_name=config.dataset_name,
-        report_scope="retraining_snapshot",
-        report_status=quality_report["status"],
-        dataset_version=str(snapshot_version) if publish_allowed else None,
-        reference_dataset_name=config.dataset_name,
-        reference_dataset_version=None if reference_version is None else str(reference_version),
-        report_path=str((out_root / "quality_report.json").resolve()),
-        share_drifted_features=quality_report["share_drifted_features"],
-        drifted_feature_count=quality_report["drifted_feature_count"],
-        total_feature_count=quality_report["total_feature_count"],
-        details_json=quality_report,
+        stage="stage1",
+        source_type="production_feedback",
+        object_key=f"{object_prefix}/manifest.json",
+        manifest_json=manifest,
     )
-
-    if not publish_allowed:
-        logger.warning(
-            "Retraining snapshot candidate did not pass quality gate and was quarantined | candidate_version=v%s reference=v%s status=%s reason=%s share_drifted=%.3f",
-            snapshot_version,
-            reference_version if reference_version is not None else "none",
-            quality_report["status"],
-            quality_report.get("reason", "n/a"),
-            quality_report["share_drifted_features"],
-        )
-        raise RuntimeError(
-            f"Retraining snapshot v{snapshot_version} did not pass the quality gate and was quarantined"
-        )
+    mark_meetings_as_consumed(conn, snapshot_version, split_assignments)
 
     row_counts = {
         "train": len(train_rows),
@@ -696,10 +783,11 @@ def build_retraining_snapshot(
         "test": len(test_rows),
     }
     logger.info(
-        "Built retraining snapshot v%s | base=%s feedback_pool=%s train_rows=%s val_rows=%s test_rows=%s",
+        "Built retraining snapshot v%s | base=%s feedback_pool=%s meetings=%s train_rows=%s val_rows=%s test_rows=%s",
         snapshot_version,
         f"v{base_version}" if base_version is not None else "bootstrap",
         feedback_pool.version,
+        len(new_meeting_ids),
         row_counts["train"],
         row_counts["val"],
         row_counts["test"],

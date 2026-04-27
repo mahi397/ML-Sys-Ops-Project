@@ -101,11 +101,11 @@ class RetrainingDatasetServiceConfig:
     )
     valid_meeting_threshold: int = env_int(
         "RETRAINING_DATASET_VALID_MEETING_THRESHOLD",
-        50,
+        10,
     )
     feedback_event_threshold: int = env_int(
         "RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD",
-        500,
+        30,
     )
     advisory_lock_key: int = env_int(
         "RETRAINING_DATASET_ADVISORY_LOCK_KEY",
@@ -141,8 +141,9 @@ class RetrainingDatasetService:
 
             metrics = collect_retraining_metrics(conn)
             self.logger.info(
-                "Retraining metrics | valid_unversioned_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s thresholds=(meetings>%s feedback_events>%s)",
+                "Retraining metrics | valid_unversioned_meetings=%s stage1_segmented_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s thresholds=(segmented_meetings>=%s feedback_events>=%s)",
                 metrics.valid_unversioned_meeting_count,
+                metrics.stage1_segmented_meeting_count,
                 metrics.structural_feedback_event_count,
                 metrics.structural_feedback_meeting_count,
                 self.config.valid_meeting_threshold,
@@ -150,8 +151,8 @@ class RetrainingDatasetService:
             )
 
             threshold_met = (
-                metrics.valid_unversioned_meeting_count > self.config.valid_meeting_threshold
-                or metrics.structural_feedback_event_count > self.config.feedback_event_threshold
+                metrics.stage1_segmented_meeting_count >= self.config.valid_meeting_threshold
+                or metrics.structural_feedback_event_count >= self.config.feedback_event_threshold
             )
             if not force_run and not threshold_met:
                 return False
@@ -159,7 +160,7 @@ class RetrainingDatasetService:
             candidate_meeting_ids = fetch_candidate_meeting_ids(conn)
             if not candidate_meeting_ids:
                 self.logger.info(
-                    "Retraining trigger %s, but no valid unversioned meetings with structural feedback were found",
+                    "Retraining trigger %s, but no valid unversioned meetings with usable Stage 1 segments were found",
                     "forced" if force_run else "met",
                 )
                 return False
@@ -177,9 +178,15 @@ class RetrainingDatasetService:
                 config=self.config.build_config,
                 logger=self.logger,
                 candidate_meetings=candidate_meeting_ids,
+                metrics=metrics,
+                force_publish=force_run,
             )
             if feedback_pool is None:
-                self.logger.info("Retraining dataset build skipped because no eligible feedback-pool rows were produced")
+                self.logger.info(
+                    "Retraining dataset build skipped because no eligible feedback-pool rows were produced | eligible_meetings=0 structural_feedback_events=%s structural_feedback_meetings=%s",
+                    metrics.structural_feedback_event_count,
+                    metrics.structural_feedback_meeting_count,
+                )
                 return False
 
             snapshot = build_retraining_snapshot(
@@ -188,6 +195,7 @@ class RetrainingDatasetService:
                 logger=self.logger,
                 feedback_pool=feedback_pool,
                 selected_meeting_ids=feedback_pool.eligible_meeting_ids,
+                force_publish=force_run,
             )
             self.logger.info(
                 "Retraining dataset build completed | feedback_pool=v%s snapshot=v%s meetings=%s",
@@ -272,12 +280,6 @@ def validate_config(config: RetrainingDatasetServiceConfig) -> None:
         raise ValueError("RETRAINING_DATASET_MIN_UTTERANCE_CHARS must be > 0")
     if config.build_config.max_words_per_utterance <= 0:
         raise ValueError("RETRAINING_DATASET_MAX_WORDS_PER_UTTERANCE must be > 0")
-    if config.build_config.quality_psi_threshold <= 0:
-        raise ValueError("RETRAINING_DATASET_QUALITY_PSI_THRESHOLD must be > 0")
-    if config.build_config.quality_max_drift_share < 0:
-        raise ValueError("RETRAINING_DATASET_QUALITY_MAX_DRIFT_SHARE must be >= 0")
-    if config.build_config.quality_min_feature_samples <= 0:
-        raise ValueError("RETRAINING_DATASET_QUALITY_MIN_FEATURE_SAMPLES must be > 0")
     if config.build_config.quality_numeric_bin_count < 2:
         raise ValueError("RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT must be >= 2")
 
@@ -288,7 +290,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-run",
         action="store_true",
-        help="Bypass thresholds and build a retraining dataset immediately if eligible meetings exist.",
+        help="Bypass thresholds and publish a retraining dataset immediately if eligible meetings exist.",
     )
     parser.add_argument(
         "--dry-run",
@@ -307,15 +309,13 @@ def main() -> None:
 
     logger.info("Starting %s", APP_NAME)
     logger.info(
-        "Config | poll_interval=%ss valid_meeting_threshold=%s feedback_event_threshold=%s upload_artifacts=%s dataset_root=%s feedback_pool_root=%s quality_psi_threshold=%s quality_max_drift_share=%s",
+        "Config | poll_interval=%ss valid_meeting_threshold=%s feedback_event_threshold=%s upload_artifacts=%s dataset_root=%s feedback_pool_root=%s",
         config.poll_interval_seconds,
         config.valid_meeting_threshold,
         config.feedback_event_threshold,
         config.build_config.upload_artifacts,
         config.build_config.dataset_root,
         config.build_config.feedback_pool_root,
-        config.build_config.quality_psi_threshold,
-        config.build_config.quality_max_drift_share,
     )
 
     if args.once:

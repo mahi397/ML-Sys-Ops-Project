@@ -21,6 +21,7 @@
 #   --profile training starts retrain/online-eval jobs
 #   --profile monitoring starts Grafana/Prometheus/Alertmanager
 #   --profile emulated-traffic starts the manual traffic generator
+#   --profile drift-monitor starts the manual production drift monitor
 ###############################################################################
 
 volumes:
@@ -185,7 +186,7 @@ services:
         condition: service_healthy
     environment:
       INGEST_TOKEN: ${INGEST_TOKEN:-}
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       JITSI_SAVE_DIR: /mnt/block/user-behaviour/received_transcripts
       JITSI_LOG_DIR: /mnt/block/ingest_logs/jitsi_transcript
       JITSI_TRANSCRIPT_TIMEZONE: ${JITSI_TRANSCRIPT_TIMEZONE:-UTC}
@@ -223,7 +224,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       DB_TASK_LOG_DIR: /mnt/block/ingest_logs/db_task_worker
       DB_TASK_POLL_INTERVAL_SECONDS: ${DB_TASK_POLL_INTERVAL_SECONDS:-5}
       DB_TASK_FULL_SCAN_INTERVAL_SECONDS: ${DB_TASK_FULL_SCAN_INTERVAL_SECONDS:-300}
@@ -234,7 +235,7 @@ services:
       DB_TASK_STAGE2_BUILD_ENABLED: ${DB_TASK_STAGE2_BUILD_ENABLED:-true}
       DB_TASK_STAGE2_FORWARD_ENABLED: ${DB_TASK_STAGE2_FORWARD_ENABLED:-true}
       DB_TASK_USER_SUMMARY_ENABLED: ${DB_TASK_USER_SUMMARY_ENABLED:-true}
-      DB_TASK_MEETING_VALIDITY_ENABLED: ${DB_TASK_MEETING_VALIDITY_ENABLED:-true}
+      DB_TASK_MEETING_VALIDITY_ENABLED: ${DB_TASK_MEETING_VALIDITY_ENABLED:-false}
       STAGE1_ARTIFACT_VERSION: ${STAGE1_ARTIFACT_VERSION:-1}
       STAGE1_BUILD_MAX_ATTEMPTS: ${STAGE1_BUILD_MAX_ATTEMPTS:-8}
       STAGE1_FORWARD_MAX_ATTEMPTS: ${STAGE1_FORWARD_MAX_ATTEMPTS:-8}
@@ -258,7 +259,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       STAGE1_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_payload_service
       STAGE1_BUILD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE1_BUILD_WORKER_POLL_INTERVAL_SECONDS:-5}
       STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
@@ -297,7 +298,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       STAGE1_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage1_forward_service
       STAGE1_FORWARD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE1_FORWARD_WORKER_POLL_INTERVAL_SECONDS:-5}
       STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
@@ -334,7 +335,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       STAGE2_BUILD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_input_service
       STAGE2_BUILD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE2_BUILD_WORKER_POLL_INTERVAL_SECONDS:-5}
       STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
@@ -373,7 +374,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       STAGE2_FORWARD_WORKER_LOG_DIR: /mnt/block/ingest_logs/stage2_forward_service
       STAGE2_FORWARD_WORKER_POLL_INTERVAL_SECONDS: ${STAGE2_FORWARD_WORKER_POLL_INTERVAL_SECONDS:-5}
       STAGE2_INPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage2
@@ -412,7 +413,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       USER_SUMMARY_WORKER_LOG_DIR: /mnt/block/ingest_logs/user_summary_materialize_service
       USER_SUMMARY_WORKER_POLL_INTERVAL_SECONDS: ${USER_SUMMARY_WORKER_POLL_INTERVAL_SECONDS:-5}
       USER_SUMMARY_OUTPUT_ROOT: /mnt/block/user-behaviour/user_summary_edits
@@ -442,11 +443,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       RETRAINING_DATASET_WORKER_LOG_DIR: /mnt/block/ingest_logs/retraining_dataset_service
       RETRAINING_DATASET_WORKER_POLL_INTERVAL_SECONDS: ${RETRAINING_DATASET_WORKER_POLL_INTERVAL_SECONDS:-300}
-      RETRAINING_DATASET_VALID_MEETING_THRESHOLD: ${RETRAINING_DATASET_VALID_MEETING_THRESHOLD:-50}
-      RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD: ${RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD:-500}
+      RETRAINING_DATASET_VALID_MEETING_THRESHOLD: ${RETRAINING_DATASET_VALID_MEETING_THRESHOLD:-10}
+      RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD: ${RETRAINING_DATASET_FEEDBACK_EVENT_THRESHOLD:-30}
       RETRAINING_DATASET_ADVISORY_LOCK_KEY: ${RETRAINING_DATASET_ADVISORY_LOCK_KEY:-700507}
       RETRAINING_DATASET_UPLOAD_ARTIFACTS: ${RETRAINING_DATASET_UPLOAD_ARTIFACTS:-true}
       RETRAINING_DATASET_NAME: ${RETRAINING_DATASET_NAME:-roberta_stage1}
@@ -474,7 +475,12 @@ services:
     networks:
       - recap-net
 
+  # Manual-only production drift monitor.
+  # It is excluded from default startup; start it explicitly with:
+  # docker compose --profile drift-monitor up -d production_drift_monitor
   production_drift_monitor:
+    profiles:
+      - drift-monitor
     build:
       context: ./data/proj07-runtime
       dockerfile: Dockerfile
@@ -484,7 +490,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       PRODUCTION_DRIFT_MONITOR_LOG_DIR: /mnt/block/ingest_logs/production_drift_monitor
       PRODUCTION_DRIFT_MONITOR_REPORT_ROOT: /mnt/block/staging/feedback_loop/production_drift_reports
       PRODUCTION_DRIFT_MONITOR_POLL_INTERVAL_SECONDS: ${PRODUCTION_DRIFT_MONITOR_POLL_INTERVAL_SECONDS:-900}
@@ -500,11 +506,16 @@ services:
       PRODUCTION_DRIFT_MONITOR_MAX_DRIFT_SHARE: ${PRODUCTION_DRIFT_MONITOR_MAX_DRIFT_SHARE:-0.35}
       PRODUCTION_DRIFT_MONITOR_MIN_FEATURE_SAMPLES: ${PRODUCTION_DRIFT_MONITOR_MIN_FEATURE_SAMPLES:-25}
       PRODUCTION_DRIFT_MONITOR_NUMERIC_BIN_COUNT: ${PRODUCTION_DRIFT_MONITOR_NUMERIC_BIN_COUNT:-10}
+      PRODUCTION_DRIFT_MONITOR_REPORT_OBJECT_PREFIX: ${PRODUCTION_DRIFT_MONITOR_REPORT_OBJECT_PREFIX:-quality_reports/production_live/roberta_stage1}
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      BUCKET: ${OBJECT_BUCKET:-${BUCKET:-objstore-proj07}}
     command: ["python", "-m", "proj07_services.workers.production_drift_monitor"]
     volumes:
       - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
       - /mnt/block/roberta_stage1:/mnt/block/roberta_stage1
       - /mnt/block/ingest_logs/production_drift_monitor:/mnt/block/ingest_logs/production_drift_monitor
+      - ${HOME}/.config/rclone:/config/rclone:ro
     networks:
       - recap-net
 
@@ -533,7 +544,7 @@ services:
       MAX_SEGMENT_UTTERANCES: "200"
       RAY_DEDUP_LOGS: "0"
       MODEL_VERSION: roberta-base-v0
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MODEL_ALIAS: production
       MODEL_RELOAD_INTERVAL_SECONDS: "300"
@@ -664,7 +675,7 @@ services:
     environment:
       INGEST_URL: http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript
       INGEST_TOKEN: ${INGEST_TOKEN:-}
-      HOST_EXTERNAL_KEY: ${JITSI_HOST_EXTERNAL_KEY:-emulated-traffic-generator}
+      HOST_EXTERNAL_KEY: ${TRAFFIC_GENERATOR_HOST_EXTERNAL_KEY:-emulated-traffic-generator}
       MEETING_SOURCE_MODE: ${MEETING_SOURCE_MODE:-mixed}
       MEETING_COUNT: ${MEETING_COUNT:-0}
       DELAY_SECONDS: ${DELAY_SECONDS:-15}
@@ -704,7 +715,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       MLFLOW_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480

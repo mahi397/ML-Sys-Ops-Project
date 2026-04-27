@@ -64,7 +64,12 @@ def create_user(user_id: str, display_name: str, email: str, password: str) -> t
             conn.commit()
     except psycopg.Error as exc:
         if exc.sqlstate == "23505":
-            return False, "That username or email is already in use."
+            constraint_name = str(getattr(getattr(exc, "diag", None), "constraint_name", "") or "")
+            if constraint_name == "users_email_key":
+                return False, "That email is already in use."
+            if constraint_name == "users_pkey":
+                return False, "Generated user ID collision."
+            return False, "That account could not be created because one of the identity fields is already in use."
         raise
 
     return True, ""
