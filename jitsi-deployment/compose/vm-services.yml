@@ -24,6 +24,7 @@ services:
     volumes:
       - ${CONFIG}/meeting-portal-app:/data:Z
       - ${CONFIG}/rclone:/root/.config/rclone:ro
+      - /mnt/block:/mnt/block:ro
     environment:
       MEETING_PORTAL_DATABASE_URL: ${MEETING_PORTAL_DATABASE_URL}
       MEETING_PORTAL_HTTPS_ONLY: ${MEETING_PORTAL_HTTPS_ONLY}
@@ -66,6 +67,9 @@ services:
       JITSI_TRANSCRIPT_POLL_SECONDS: ${JITSI_TRANSCRIPT_POLL_SECONDS:-5}
       JITSI_TRANSCRIPT_SETTLE_SECONDS: ${JITSI_TRANSCRIPT_SETTLE_SECONDS:-3}
       JITSI_TRANSCRIPT_UPLOAD_TIMEOUT: ${JITSI_TRANSCRIPT_UPLOAD_TIMEOUT:-120}
+      TZ: ${TZ}
+    extra_hosts:
+      - host.docker.internal:host-gateway
     networks:
       meet.jitsi:
 

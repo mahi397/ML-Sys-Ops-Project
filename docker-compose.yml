@@ -3,7 +3,7 @@
 #
 # Usage:
 #   cp .env.example .env        # fill in secrets + floating IP
-#   docker compose up -d        # brings up everything
+#   docker compose up -d        # brings up platform + data/Jitsi workers
 #   docker compose logs -f      # watch logs
 #
 # Services are grouped:
@@ -15,9 +15,12 @@
 #
 # Jitsi stack is a separate compose project: bash jitsi-deployment/install-jitsi-vm.sh
 #
-# Single docker compose up brings up the entire system.
-# Profiles:
-#   --profile retrain          triggers retraining pipeline
+# Heavy services are profile-gated so a data/Jitsi VM does not pull CUDA images:
+#   --profile mlflow starts local MinIO + MLflow
+#   --profile serving starts local Ray Serve
+#   --profile training starts retrain/online-eval jobs
+#   --profile monitoring starts Grafana/Prometheus/Alertmanager
+#   --profile emulated-traffic starts the manual traffic generator
 ###############################################################################
 
 volumes:
@@ -42,7 +45,7 @@ services:
   #
   # It lives in /mnt/block/jitsi/ and uses the meet.jitsi Docker network.
   # It connects to this ML stack via FLOATING_IP:
-  #   - transcript-uploader  → http://FLOATING_IP:9000/ingest/jitsi-transcript
+  #   - transcript-uploader  → http://FLOATING_IP:9099/ingest/jitsi-transcript
   #   - meeting-portal-app   → postgresql://FLOATING_IP:5432/proj07_sql_db
   #
   # Set DEPLOY_JITSI=true in setup.sh to auto-install it.
@@ -63,8 +66,8 @@ services:
       POSTGRES_DB: proj07_sql_db
     volumes:
       # Bind mount to block storage — survives VM restarts and reattachment
-      - /mnt/block/postgres_data:/var/lib/postgresql/data
-      - ./platform/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ${POSTGRES_DATA_DIR:-/mnt/block/postgres-data}:/var/lib/postgresql/data
+      - ./data/proj07-db/init_sql:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -75,6 +78,8 @@ services:
       - recap-net
 
   minio:
+    profiles:
+      - mlflow
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
     restart: unless-stopped
@@ -98,6 +103,8 @@ services:
 
   # Add after minio service — bucket creation for both MLflow and Ray
   minio-create-buckets:
+    profiles:
+      - mlflow
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
     container_name: minio-create-buckets
     depends_on:
@@ -122,6 +129,8 @@ services:
       - recap-net
 
   mlflow:
+    profiles:
+      - mlflow
     # Using v3.9.0 to match the lab setup that has historical training runs
     image: ghcr.io/mlflow/mlflow:v3.9.0
     container_name: mlflow
@@ -179,6 +188,7 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}"
       JITSI_SAVE_DIR: /mnt/block/user-behaviour/received_transcripts
       JITSI_LOG_DIR: /mnt/block/ingest_logs/jitsi_transcript
+      JITSI_TRANSCRIPT_TIMEZONE: ${JITSI_TRANSCRIPT_TIMEZONE:-UTC}
       JITSI_BUILD_STAGE1_AFTER_INGEST: ${JITSI_BUILD_STAGE1_AFTER_INGEST:-false}
       JITSI_STAGE1_OUTPUT_ROOT: /mnt/block/user-behaviour/inference_requests/stage1
       JITSI_STAGE1_WINDOW_SIZE: ${JITSI_STAGE1_WINDOW_SIZE:-7}
@@ -504,6 +514,8 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   serving-api:
+    profiles:
+      - serving
     build:
       context: ./serving/ray_serve
       dockerfile: Dockerfile.ray
@@ -558,6 +570,8 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   retrain-watcher:
+    profiles:
+      - training
     build: ./train
     container_name: retrain-watcher
     command: retrain_watcher.py
@@ -579,8 +593,8 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
       AWS_ENDPOINT_URL: http://minio:9000
-      RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
-      OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
+      OBJSTORE_BUCKET: ${OBJECT_BUCKET:-${OBJSTORE_BUCKET:-objstore-proj07}}
       MODEL_NAME: jitsi-topic-segmenter
       TOKENIZERS_PARALLELISM: "false"
       DATASET_VERSION: "2"
@@ -627,10 +641,44 @@ services:
     profiles:
       - retrain   # docker compose --profile retrain run retrain-job
 
+
+  # Manual-only traffic generator for archived and synthetic Jitsi transcript uploads.
+  # It is excluded from default startup; start it explicitly with:
+  # docker compose --profile emulated-traffic up -d traffic-generator
+  traffic-generator:
+    build:
+      context: ./data/proj07-runtime
+      dockerfile: Dockerfile
+    container_name: traffic-generator
+    depends_on:
+      jitsi_transcript_receiver:
+        condition: service_started
+    environment:
+      INGEST_URL: http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript
+      INGEST_TOKEN: ${INGEST_TOKEN:-}
+      HOST_EXTERNAL_KEY: ${JITSI_HOST_EXTERNAL_KEY:-emulated-traffic-generator}
+      MEETING_SOURCE_MODE: ${MEETING_SOURCE_MODE:-mixed}
+      MEETING_COUNT: ${MEETING_COUNT:-0}
+      DELAY_SECONDS: ${DELAY_SECONDS:-15}
+      ARCHIVED_TRANSCRIPT_ROOT: /app/traffic_samples/mock_jitsi_meet
+      IDENTITY_SOURCE: ${IDENTITY_SOURCE:-emulate_production}
+      MEETING_NAME_PREFIX: ${MEETING_NAME_PREFIX:-synthetic}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-120}
+      SEED: ${SEED:-42}
+    command: ["python", "/app/emulate_production.py"]
+    volumes:
+      - ./data/emulate_production.py:/app/emulate_production.py:ro
+      - ./data/proj07-runtime/traffic_samples/mock_jitsi_meet:/app/traffic_samples/mock_jitsi_meet:ro
+    networks:
+      - recap-net
+    profiles:
+      - emulated-traffic
+
   # Runs online_eval.py hourly — logs correction rate / FPR / FNR to MLflow.
   # Keeps the online-evaluation experiment current for the demo.
-  # Start with: docker compose --profile monitoring up -d online-eval
   online-eval:
+    profiles:
+      - training
     build: ./train
     container_name: online-eval
     entrypoint: ["/bin/bash", "-c"]
@@ -656,14 +704,13 @@ services:
       - /mnt/block:/mnt/block
     networks:
       - recap-net
-    profiles:
-      - monitoring  # docker compose --profile monitoring up -d online-eval
-
   # ═══════════════════════════════════════════════════════════════════════════
   # 6. MONITORING — Prometheus + Grafana + Alertmanager + Node Exporter
   # ═══════════════════════════════════════════════════════════════════════════
 
   prometheus:
+    profiles:
+      - monitoring
     image: prom/prometheus:v2.50.1
     container_name: jitsi-prometheus
     restart: unless-stopped
@@ -685,6 +732,8 @@ services:
       - recap-net
 
   grafana:
+    profiles:
+      - monitoring
     image: grafana/grafana:10.3.3
     container_name: jitsi-grafana
     restart: unless-stopped
@@ -705,6 +754,8 @@ services:
       - recap-net
 
   alertmanager:
+    profiles:
+      - monitoring
     image: prom/alertmanager:v0.27.0
     container_name: jitsi-alertmanager
     restart: unless-stopped
@@ -720,6 +771,8 @@ services:
       - recap-net
 
   node-exporter:
+    profiles:
+      - monitoring
     image: prom/node-exporter:v1.7.0
     container_name: jitsi-node-exporter
     restart: unless-stopped

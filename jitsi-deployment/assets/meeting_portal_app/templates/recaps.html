@@ -33,12 +33,12 @@
                 {% endif %}
             </p>
             {% if item.started_at %}
-            <p class="muted">Started: {{ item.started_at }}</p>
+            <p class="muted">Started: <span class="local-datetime" data-datetime="{{ item.started_at_iso }}">{{ item.started_at }}</span></p>
             {% endif %}
             {% if item.summary_updated_at %}
-            <p class="muted">Latest summary update: {{ item.summary_updated_at }}</p>
+            <p class="muted">Latest summary update: <span class="local-datetime" data-datetime="{{ item.summary_updated_at_iso }}">{{ item.summary_updated_at }}</span></p>
             {% elif item.summary_created_at %}
-            <p class="muted">Summary created: {{ item.summary_created_at }}</p>
+            <p class="muted">Summary created: <span class="local-datetime" data-datetime="{{ item.summary_created_at_iso }}">{{ item.summary_created_at }}</span></p>
             {% endif %}
             {% if item.has_recap %}
             <div class="row" style="margin-top:0.9rem;">
@@ -52,4 +52,20 @@
     </div>
     {% endif %}
 </section>
+<script>
+  document.querySelectorAll('.local-datetime[data-datetime]').forEach((element) => {
+    const rawValue = element.dataset.datetime;
+    if (!rawValue) {
+      return;
+    }
+    const parsedDate = new Date(rawValue);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return;
+    }
+    element.textContent = new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    }).format(parsedDate);
+  });
+</script>
 {% endblock %}

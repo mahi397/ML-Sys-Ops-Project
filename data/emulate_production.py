@@ -24,7 +24,7 @@ Environment variables:
   MEETING_SOURCE_MODE         synthetic | archived | mixed
                               (default: mixed)
   ARCHIVED_TRANSCRIPT_ROOT    Root folder for archived Jitsi mock transcripts
-                              (default: ./initial_implementation/mock_jitsi_meet)
+                              (default: ./proj07-runtime/traffic_samples/mock_jitsi_meet)
   IDENTITY_SOURCE             Identity source sent with synthetic participants
                               (default: emulate_production)
   MEETING_NAME_PREFIX         Prefix for synthetic meeting names
@@ -47,8 +47,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
-
+from urllib.parse import urlsplit
 import requests
 
 logging.basicConfig(
@@ -62,7 +61,7 @@ log = logging.getLogger("emulate_production")
 
 INGEST_URL = os.environ.get(
     "INGEST_URL",
-    "http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript",
+    "http://129.114.25.64:9000/ingest/jitsi-transcript",
 ).rstrip("/")
 MEETING_COUNT = int(os.environ.get("MEETING_COUNT", "5"))
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "10"))
@@ -75,7 +74,7 @@ MEETING_SOURCE_MODE = os.environ.get("MEETING_SOURCE_MODE", "mixed").strip().low
 ARCHIVED_TRANSCRIPT_ROOT = Path(
     os.environ.get(
         "ARCHIVED_TRANSCRIPT_ROOT",
-        str(Path(__file__).resolve().parent / "initial_implementation" / "mock_jitsi_meet"),
+        str(Path(__file__).resolve().parent / "proj07-runtime" / "traffic_samples" / "mock_jitsi_meet"),
     )
 ).expanduser()
 IDENTITY_SOURCE = os.environ.get("IDENTITY_SOURCE", "emulate_production").strip()
@@ -235,11 +234,6 @@ def meeting_log_fields(payload: dict[str, Any]) -> dict[str, Any]:
         "mock_user_email": mock_user["email"],
         "host_external_key": HOST_EXTERNAL_KEY,
     }
-
-
-def ingest_base_url() -> str:
-    parts = urlsplit(INGEST_URL)
-    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
 def derive_meeting_id_from_original_filename(original_filename: str) -> str:
@@ -544,28 +538,6 @@ def post_transcript(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-def wait_for_endpoint(name: str, url: str, max_wait: int = 120) -> bool:
-    structured_log("info", "endpoint_wait_start", endpoint_name=name, url=url, timeout_seconds=max_wait)
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
-        try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                structured_log(
-                    "info",
-                    "endpoint_ready",
-                    endpoint_name=name,
-                    url=url,
-                    response=response.json(),
-                )
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(5)
-    structured_log("error", "endpoint_wait_timeout", endpoint_name=name, url=url, timeout_seconds=max_wait)
-    return False
-
-
 def run_batch(
     rng: random.Random,
     batch_size: int,
@@ -615,7 +587,6 @@ def run_batch(
 
 
 def main() -> None:
-    ingest_health_url = f"{ingest_base_url()}/health"
     archived_paths = list_archived_transcripts(ARCHIVED_TRANSCRIPT_ROOT)
     archived_count = len(archived_paths)
 
@@ -639,9 +610,6 @@ def main() -> None:
         delay_seconds=DELAY_SECONDS,
         seed=SEED,
     )
-
-    if not wait_for_endpoint("ingest API", ingest_health_url):
-        sys.exit(1)
 
     rng = random.Random(SEED)
     meeting_number = 1

@@ -72,9 +72,9 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 
 ```
 ML-Sys-Ops-Project/
-├── docker-compose.yml          # Full system: platform + data pipeline + serving + training + monitoring
+├── docker-compose.yml          # Single compose entry point for platform, data, serving, training, monitoring
 ├── setup.sh                    # One-command bootstrap for a fresh Chameleon GPU node
-├── env.example                 # Environment variable template — copy to .env
+├── .env.example                # Global environment template — copy to .env
 │
 ├── serving/                    # Ray Serve, RoBERTa + Mistral, Prometheus/Grafana
 │   ├── ray_serve/              # serve.py, storage.py, Dockerfile.ray
@@ -89,14 +89,13 @@ ML-Sys-Ops-Project/
 │   └── Dockerfile              # Training container image
 │
 ├── data/                       # ingest, workflow workers, dataset pipeline
-│   ├── proj07-runtime/         # Production service bundle (docker-compose + workers)
+│   ├── proj07-runtime/         # Production service package and Docker image context
 │   ├── proj07-db/              # Postgres schema and migrations
-│   └── initial_implementation/ # Archived standalone scripts
+│   └── initial_implementation/ # Archived independent standalone scripts
 │
 │
 └── jitsi-deployment/           # Jitsi Meet + meeting portal + transcript uploader
     ├── install-jitsi-vm.sh     # Automated Jitsi installer
-    ├── stack.env.example       # Jitsi environment template
     └── compose/                # Custom service definitions (portal, uploader, vosk)
 ```
 
@@ -131,19 +130,35 @@ ML-Sys-Ops-Project/
 ### Prerequisites
 
 - Chameleon Cloud GPU node with a floating IP and attached block volume at `/mnt/block`
-- `~/.config/rclone/rclone.conf` with a `chi_tacc` remote (CHI@TACC S3)
-- AWS credentials for chi.tacc object storage (for MLflow artifacts)
+- `~/.config/rclone/rclone.conf` with an `rclone_s3` remote (CHI@TACC S3)
+- `setup.sh` reads object-storage credentials from that rclone remote and fills the MLflow/boto3 env vars when they are blank.
 
 ### 1. Clone and configure
 
 ```bash
 git clone https://github.com/mahi397/ML-Sys-Ops-Project.git
 cd ML-Sys-Ops-Project
-cp env.example .env
-# Edit .env: set FLOATING_IP, POSTGRES_PASSWORD, MINIO_PASSWORD,
-#            AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BUCKET_NAME
+cp .env.example .env
+# Edit .env: set FLOATING_IP, POSTGRES_PASSWORD,
+# and for full mode also MINIO_PASSWORD / GRAFANA_PASSWORD.
+# If MLflow is on another host, set MLFLOW_TRACKING_URI too.
 nano .env
 ```
+
+For a VM that only runs data + Jitsi and forwards inference to another serving VM, set:
+
+```bash
+SETUP_MODE=data-jitsi
+STAGE1_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/segment
+STAGE2_FORWARD_URL=http://<SERVING_FLOATING_IP>:8000/summarize
+```
+
+You do not need to hand-build `DATABASE_URL`, `MEETING_PORTAL_DATABASE_URL`, or
+`JITSI_TRANSCRIPT_INGEST_URL` in the root `.env`. The setup/installer scripts
+derive those from `POSTGRES_*`, `INGEST_PORT`, and the Jitsi host-access target.
+For same-host Jitsi + data deployments, that target defaults to
+`host.docker.internal`. For split deployments, override
+`JITSI_TRANSCRIPT_INGEST_URL` and `MEETING_PORTAL_DATABASE_URL`.
 
 ### 2. Bootstrap
 
@@ -152,9 +167,21 @@ chmod +x setup.sh
 bash setup.sh
 # For Jitsi as well:
 DEPLOY_JITSI=true bash setup.sh
+# For data + Jitsi only:
+SETUP_MODE=data-jitsi DEPLOY_JITSI=true bash setup.sh
 ```
 
-`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, RoBERTa + Mistral model downloads, Postgres schema init + migrations, MLflow startup + model registry restore, and `docker compose up -d` for all services.
+`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator is the only manual profile service.
+
+Manual compose profiles are available when needed:
+
+```bash
+docker compose --profile mlflow up -d minio minio-create-buckets mlflow
+docker compose --profile mlflow --profile serving up -d serving-api
+docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher online-eval
+docker compose --profile serving --profile monitoring up -d prometheus grafana alertmanager node-exporter
+docker compose --profile emulated-traffic up -d traffic-generator
+```
 
 ### 3. Verify
 
@@ -180,20 +207,74 @@ docker compose ps
 
 ## Environment Variables
 
-See [`.env.example`](.env.example) for the full list. Key variables:
+The root [`.env.example`](.env.example) is intentionally short. Most worker
+settings, Jitsi auth defaults, meeting-portal DB wiring, and generated secrets
+are now derived by `setup.sh` and `install-jitsi-vm.sh`. The main values you
+typically edit are:
 
 | Variable | Description |
 |----------|-------------|
-| `FLOATING_IP` | Public IP of the Chameleon node |
-| `POSTGRES_PASSWORD` | Postgres password |
-| `MINIO_PASSWORD` | MinIO root password |
-| `AWS_ACCESS_KEY_ID` | CHI@TACC S3 key (MLflow artifacts) |
-| `AWS_SECRET_ACCESS_KEY` | CHI@TACC S3 secret |
-| `BUCKET_NAME` | MLflow artifact bucket (default: `proj07-mlflow-artifacts`) |
+| `FLOATING_IP` | Public IP of the data/Jitsi VM, or the single full-stack VM |
+| `POSTGRES_PASSWORD` | Shared Postgres password for the runtime DB and meeting portal |
+| `OBJECT_BUCKET` | Main object-storage bucket used by the data pipeline |
+| `MLFLOW_TRACKING_URI` | Optional MLflow server URI when it lives on a different host than this VM |
+| `MINIO_PASSWORD` | MinIO root password for full mode |
+| `AWS_ACCESS_KEY_ID` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
+| `AWS_SECRET_ACCESS_KEY` | Optional; auto-filled from `rclone_s3` for MLflow/boto3 when blank |
+| `BUCKET_NAME` | MLflow artifact bucket; this can differ from `OBJECT_BUCKET` |
+| `STAGE1_FORWARD_URL` | Stage 1 serving endpoint; set this to the serving VM in `data-jitsi` mode |
+| `STAGE2_FORWARD_URL` | Stage 2 serving endpoint; set this to the serving VM in `data-jitsi` mode |
 | `RETRAIN_THRESHOLD` | Feedback events to trigger retraining (default: `5` for demo) |
-| `GRAFANA_PASSWORD` |admin  |
+| `GRAFANA_PASSWORD` | Grafana admin password in full mode |
 
 ## Manual Operations
+
+### Root Compose Services
+
+Run these from the repository root:
+
+| Service | Manual run | Logs | Stop |
+|---------|------------|------|------|
+| `postgres` | `docker compose up -d postgres` | `docker compose logs -f --since 15m postgres` | `docker compose stop postgres` |
+| `adminer` | `docker compose up -d adminer` | `docker compose logs -f --since 15m adminer` | `docker compose stop adminer` |
+| `jitsi_transcript_receiver` | `docker compose up -d jitsi_transcript_receiver` | `docker compose logs -f --since 15m jitsi_transcript_receiver` | `docker compose stop jitsi_transcript_receiver` |
+| `db_task_worker` | `docker compose up -d db_task_worker` | `docker compose logs -f --since 15m db_task_worker` | `docker compose stop db_task_worker` |
+| `stage1_payload_service` | `docker compose up -d stage1_payload_service` | `docker compose logs -f --since 15m stage1_payload_service` | `docker compose stop stage1_payload_service` |
+| `stage1_forward_service` | `docker compose up -d stage1_forward_service` | `docker compose logs -f --since 15m stage1_forward_service` | `docker compose stop stage1_forward_service` |
+| `stage2_input_service` | `docker compose up -d stage2_input_service` | `docker compose logs -f --since 15m stage2_input_service` | `docker compose stop stage2_input_service` |
+| `stage2_forward_service` | `docker compose up -d stage2_forward_service` | `docker compose logs -f --since 15m stage2_forward_service` | `docker compose stop stage2_forward_service` |
+| `user_summary_materialize_service` | `docker compose up -d user_summary_materialize_service` | `docker compose logs -f --since 15m user_summary_materialize_service` | `docker compose stop user_summary_materialize_service` |
+| `retraining_dataset_service` | `docker compose up -d retraining_dataset_service` | `docker compose logs -f --since 15m retraining_dataset_service` | `docker compose stop retraining_dataset_service` |
+| `production_drift_monitor` | `docker compose up -d production_drift_monitor` | `docker compose logs -f --since 15m production_drift_monitor` | `docker compose stop production_drift_monitor` |
+| `minio` | `docker compose --profile mlflow up -d minio` | `docker compose --profile mlflow logs -f --since 15m minio` | `docker compose --profile mlflow stop minio` |
+| `minio-create-buckets` | `docker compose --profile mlflow up minio-create-buckets` | `docker compose --profile mlflow logs --since 15m minio-create-buckets` | `docker compose --profile mlflow stop minio-create-buckets` |
+| `mlflow` | `docker compose --profile mlflow up -d mlflow` | `docker compose --profile mlflow logs -f --since 15m mlflow` | `docker compose --profile mlflow stop mlflow` |
+| `serving-api` | `docker compose --profile mlflow --profile serving up -d serving-api` | `docker compose --profile mlflow --profile serving logs -f --since 15m serving-api` | `docker compose --profile mlflow --profile serving stop serving-api` |
+| `retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training logs -f --since 15m retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training stop retrain-watcher` |
+| `online-eval` | `docker compose --profile mlflow --profile training up -d online-eval` | `docker compose --profile mlflow --profile training logs -f --since 15m online-eval` | `docker compose --profile mlflow --profile training stop online-eval` |
+| `traffic-generator` | `docker compose --profile emulated-traffic up -d traffic-generator` | `docker compose --profile emulated-traffic logs -f --since 15m traffic-generator` | `docker compose --profile emulated-traffic stop traffic-generator` |
+| `prometheus` | `docker compose --profile serving --profile monitoring up -d prometheus` | `docker compose --profile serving --profile monitoring logs -f --since 15m prometheus` | `docker compose --profile serving --profile monitoring stop prometheus` |
+| `grafana` | `docker compose --profile serving --profile monitoring up -d grafana` | `docker compose --profile serving --profile monitoring logs -f --since 15m grafana` | `docker compose --profile serving --profile monitoring stop grafana` |
+| `alertmanager` | `docker compose --profile monitoring up -d alertmanager` | `docker compose --profile monitoring logs -f --since 15m alertmanager` | `docker compose --profile monitoring stop alertmanager` |
+| `node-exporter` | `docker compose --profile monitoring up -d node-exporter` | `docker compose --profile monitoring logs -f --since 15m node-exporter` | `docker compose --profile monitoring stop node-exporter` |
+
+### Jitsi Compose Services
+
+After Jitsi is installed, run these from `/mnt/block/jitsi/jitsi-docker-jitsi-meet`:
+
+| Service | Manual run | Logs | Stop |
+|---------|------------|------|------|
+| `web` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d web` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m web` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop web` |
+| `prosody` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d prosody` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m prosody` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop prosody` |
+| `jicofo` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d jicofo` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m jicofo` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop jicofo` |
+| `jvb` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d jvb` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m jvb` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop jvb` |
+| `jigasi` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d jigasi` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m jigasi` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop jigasi` |
+| `transcriber` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d transcriber` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m transcriber` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop transcriber` |
+| `meeting-portal-app` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d meeting-portal-app` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m meeting-portal-app` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop meeting-portal-app` |
+| `transcript-uploader` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d transcript-uploader` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m transcript-uploader` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop transcript-uploader` |
+| `vosk` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml up -d vosk` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml logs -f --since 15m vosk` | `docker compose --project-name jitsi-vm -f docker-compose.yml -f jigasi.yml -f transcriber.yml -f jitsi-deployment/compose/vm-services.yml stop vosk` |
+
+The same Jitsi commands are also documented in [jitsi-deployment/README.md](jitsi-deployment/README.md).
 
 ### Trigger a retrain manually
 
@@ -206,6 +287,29 @@ docker compose exec retrain-watcher python /app/retrain.py
 ```bash
 docker compose exec retraining_dataset_service \
   python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+### Manual worker runs with CLI args
+
+Check retraining thresholds and candidate meetings without building artifacts:
+
+```bash
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --dry-run
+```
+
+Force a one-shot retraining dataset cycle even if thresholds are not met:
+
+```bash
+docker compose exec retraining_dataset_service \
+  python -m proj07_services.workers.retraining_dataset_service --once --force-run
+```
+
+Run a single production drift monitoring cycle on demand:
+
+```bash
+docker compose exec production_drift_monitor \
+  python -m proj07_services.workers.production_drift_monitor --once
 ```
 
 ### Promote a candidate model to production

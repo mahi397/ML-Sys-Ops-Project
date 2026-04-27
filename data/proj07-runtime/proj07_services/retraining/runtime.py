@@ -24,6 +24,7 @@ from proj07_services.common.feedback_common import (
     write_json,
     write_jsonl,
 )
+from proj07_services.common.task_service_common import env_int
 from proj07_services.quality.drift_control import (
     DriftGateConfig,
     build_reference_profile,
@@ -40,6 +41,8 @@ STRUCTURAL_FEEDBACK_EVENT_TYPES = (
 )
 VERSION_DIR_RE = re.compile(r"^v(\d+)$")
 MEETING_ID_RE = re.compile(r"^jitsi_(?P<ts>\d{8}T\d{6}Z)_[0-9a-f]{8}$")
+EMULATED_HOST_EMAIL_SUFFIX = ".mock@example.com"
+EMULATED_SOURCE_NAME_PREFIX = "synthetic-"
 
 
 @dataclass(frozen=True)
@@ -130,11 +133,73 @@ def quality_report_allows_publish(report: dict[str, Any], *, reference_version: 
     )
 
 
+def is_usable_reference_profile(profile: dict[str, Any] | None) -> bool:
+    if not profile:
+        return False
+    return bool(profile.get("features"))
+
+
+def production_jitsi_meeting_filter_sql(meeting_alias: str = "m") -> str:
+    alias = meeting_alias.strip() or "m"
+    return f"""
+        {alias}.source_type = 'jitsi'
+        AND LEFT(
+            LOWER(COALESCE({alias}.source_name, '')),
+            LENGTH('{EMULATED_SOURCE_NAME_PREFIX}')
+        ) != '{EMULATED_SOURCE_NAME_PREFIX}'
+        AND NOT EXISTS (
+            SELECT 1
+            FROM meeting_participants host_mp
+            JOIN users host_user
+              ON host_user.user_id = host_mp.user_id
+            WHERE host_mp.meeting_id = {alias}.meeting_id
+              AND host_mp.role = 'host'
+              AND RIGHT(
+                  LOWER(COALESCE(host_user.email, '')),
+                  LENGTH('{EMULATED_HOST_EMAIL_SUFFIX}')
+              ) = '{EMULATED_HOST_EMAIL_SUFFIX}'
+        )
+    """
+
+
+def load_or_build_dataset_profile(version_root: Path) -> dict[str, Any] | None:
+    profile_path = version_root / "profile.json"
+    profile = load_reference_profile(profile_path)
+    if is_usable_reference_profile(profile):
+        return profile
+
+    split_paths = (
+        version_root / "train.jsonl",
+        version_root / "val.jsonl",
+        version_root / "test.jsonl",
+    )
+    rows: list[dict[str, Any]] = []
+    if all(path.exists() for path in split_paths):
+        for path in split_paths:
+            rows.extend(_read_jsonl(path))
+    if not rows:
+        feedback_pool_path = version_root / "feedback_examples.jsonl"
+        if feedback_pool_path.exists():
+            rows = _read_jsonl(feedback_pool_path)
+    if not rows:
+        return None
+
+    feature_columns, metadata = extract_stage1_feature_columns(rows, include_label=True)
+    profile = build_reference_profile(
+        feature_columns,
+        metadata=metadata,
+        bin_count=env_int("RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT", 10),
+    )
+    write_json(profile_path, profile)
+    return profile
+
+
 def latest_reference_profile(root: Path) -> tuple[int | None, dict[str, Any] | None]:
-    version = latest_version(root)
-    if version is None:
-        return None, None
-    return version, load_reference_profile(root / f"v{version}" / "profile.json")
+    for version in reversed(existing_versions(root)):
+        profile = load_or_build_dataset_profile(root / f"v{version}")
+        if is_usable_reference_profile(profile):
+            return version, profile
+    return None, None
 
 
 def candidate_staging_root(base_root: Path, version_hint: int) -> Path:
@@ -201,11 +266,11 @@ def split_new_meetings(meeting_ids: list[str]) -> tuple[list[str], list[str]]:
 def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH eligible_meetings AS (
                 SELECT meeting_id
-                FROM meetings
-                WHERE source_type = 'jitsi'
+                FROM meetings m
+                WHERE {production_jitsi_meeting_filter_sql("m")}
                   AND is_valid = TRUE
                   AND dataset_version IS NULL
             ),
@@ -234,12 +299,12 @@ def collect_retraining_metrics(conn) -> RetrainingDatasetMetrics:
 def fetch_candidate_meeting_ids(conn) -> list[str]:
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT m.meeting_id
             FROM meetings m
             JOIN feedback_events fe
               ON fe.meeting_id = m.meeting_id
-            WHERE m.source_type = 'jitsi'
+            WHERE {production_jitsi_meeting_filter_sql("m")}
               AND m.is_valid = TRUE
               AND m.dataset_version IS NULL
               AND fe.event_type IN ('merge_segments', 'split_segment', 'boundary_correction')

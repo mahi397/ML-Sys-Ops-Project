@@ -22,6 +22,13 @@ def env(name: str, default: str | None = None) -> str:
     return value
 
 
+def object_bucket() -> str:
+    bucket = os.getenv("OBJECT_BUCKET", "").strip() or os.getenv("BUCKET", "").strip()
+    if not bucket:
+        raise RuntimeError("Missing required environment variable: OBJECT_BUCKET or BUCKET")
+    return bucket
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -79,7 +86,7 @@ def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
 
 
 def build_object_uri(object_key: str) -> str:
-    return f"{env('RCLONE_REMOTE')}:{env('BUCKET')}/{object_key}"
+    return f"{env('RCLONE_REMOTE')}:{object_bucket()}/{object_key}"
 
 
 def run_command(cmd: list[str], logger: logging.Logger, label: str) -> None:

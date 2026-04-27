@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -23,6 +23,22 @@ def format_display_datetime(value: datetime | str | None) -> str:
             return value
 
     return value.astimezone().strftime("%b %d, %Y at %I:%M %p")
+
+
+def format_datetime_iso(value: datetime | str | None) -> str:
+    if not value:
+        return ""
+
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def format_duration_label(total_seconds: float | int | None) -> str:
@@ -127,9 +143,13 @@ def fetch_recaps_for_user(user_id: str) -> list[dict[str, Any]]:
                 "summary_version": row["summary_version"],
                 "recap_status": "complete" if row["is_complete"] else "draft",
                 "started_at": format_display_datetime(row.get("started_at")),
+                "started_at_iso": format_datetime_iso(row.get("started_at")),
                 "ended_at": format_display_datetime(row.get("ended_at")),
+                "ended_at_iso": format_datetime_iso(row.get("ended_at")),
                 "summary_created_at": format_display_datetime(row.get("summary_created_at")),
+                "summary_created_at_iso": format_datetime_iso(row.get("summary_created_at")),
                 "summary_updated_at": format_display_datetime(row.get("summary_updated_at")),
+                "summary_updated_at_iso": format_datetime_iso(row.get("summary_updated_at")),
                 "model_version": row.get("model_version") or "",
                 "has_recap": True,
                 "recap_url": f"{APP_PREFIX}/recaps/{quote(meeting_id)}",
@@ -222,7 +242,9 @@ def fetch_recap_for_user(
                 "summary_type_label": summary_source_label(str(variant["summary_type"])),
                 "summary_version": int(variant["summary_version"] or 0),
                 "summary_created_at": format_display_datetime(variant.get("summary_created_at")),
+                "summary_created_at_iso": format_datetime_iso(variant.get("summary_created_at")),
                 "summary_updated_at": format_display_datetime(variant.get("summary_updated_at")),
+                "summary_updated_at_iso": format_datetime_iso(variant.get("summary_updated_at")),
                 "segment_count": int(variant.get("segment_count") or 0),
                 "is_complete": bool(variant.get("is_complete")),
                 "model_version": variant.get("model_version") or "",
@@ -393,6 +415,31 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
     if not source_variant or str(source_variant.get("summary_type")) != source_summary_type:
         raise HTTPException(status_code=404, detail="Source summary not found")
 
+    final_segments: list[dict[str, Any]] = []
+    raw_final_segments = payload.get("final_segments")
+    if isinstance(raw_final_segments, list):
+        for raw_segment in raw_final_segments:
+            if not isinstance(raw_segment, dict):
+                continue
+            start_utt = raw_segment.get("start_utt", raw_segment.get("start_utterance_index"))
+            end_utt = raw_segment.get("end_utt", raw_segment.get("end_utterance_index"))
+            try:
+                start_utt_int = int(start_utt)
+                end_utt_int = int(end_utt)
+            except (TypeError, ValueError):
+                continue
+
+            final_segments.append(
+                {
+                    "segment_summary_id": raw_segment.get("segment_summary_id"),
+                    "segment_index": raw_segment.get("segment_index"),
+                    "start_utterance_index": start_utt_int,
+                    "end_utterance_index": end_utt_int,
+                    "topic_label": str(raw_segment.get("topic_label") or "").strip(),
+                    "summary_bullets": normalize_summary_bullets(raw_segment.get("summary_bullets")),
+                }
+            )
+
     edit_session_id = str(payload.get("edit_session_id") or "").strip() or secrets.token_hex(12)
     operation_rows: list[tuple[int | None, str, dict[str, Any], dict[str, Any]]] = []
 
@@ -508,6 +555,33 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
             )
         )
 
+    if final_segments:
+        operation_rows[-1][3]["final_segments"] = final_segments
+
+    text_only_user_summary_update = (
+        source_summary_type == "user_edited"
+        and all(
+            event_type in {"edit_topic_label", "edit_summary_bullets"}
+            for _segment_summary_id, event_type, _before_payload, _after_payload in operation_rows
+        )
+    )
+    if text_only_user_summary_update:
+        updated_count = repository.update_user_summary_text_edits(
+            meeting_id,
+            source_summary_id,
+            operation_rows,
+        )
+        if updated_count <= 0:
+            raise HTTPException(status_code=404, detail="No editable summary segments were updated")
+        return {
+            "edit_session_id": edit_session_id,
+            "source_summary_id": source_summary_id,
+            "source_summary_type": source_summary_type,
+            "operation_count": len(operation_rows),
+            "feedback_event_count": 0,
+            "updated_in_place": True,
+        }
+
     for segment_summary_id, event_type, before_payload, after_payload in operation_rows:
         repository.insert_feedback_event(
             meeting_id=meeting_id,
@@ -519,9 +593,16 @@ def append_summary_edit_events(user_id: str, payload: dict[str, Any]) -> dict[st
             user_id=user_id,
         )
 
+    repository.enqueue_user_summary_materialize_task(
+        meeting_id,
+        edit_session_id=edit_session_id,
+    )
+
     return {
         "edit_session_id": edit_session_id,
         "source_summary_id": source_summary_id,
         "source_summary_type": source_summary_type,
         "operation_count": len(operation_rows),
+        "feedback_event_count": len(operation_rows),
+        "updated_in_place": False,
     }

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from auth.service import fetch_authenticated_user
 from core.config import APP_PREFIX
 from core.templates import render_template
 from core.urls import build_auth_redirect
-from summaries.service import fetch_recap_for_user, fetch_recaps_for_user
+from summaries.service import fetch_recaps_for_user
 
 router = APIRouter(tags=["summary-pages"])
 
@@ -37,10 +37,6 @@ def recap_detail_page(request: Request, meeting_id: str) -> HTMLResponse | Redir
     next_path = f"{APP_PREFIX}/recaps/{quote(meeting_id)}"
     if not user:
         return RedirectResponse(build_auth_redirect(next_path), status_code=303)
-
-    recap = fetch_recap_for_user(user["user_id"], meeting_id)
-    if recap is None:
-        raise HTTPException(status_code=404, detail="No recap summary found.")
 
     return render_template(
         request,
