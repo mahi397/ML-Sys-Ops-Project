@@ -245,9 +245,10 @@ def resolve_dataset_path(cfg: Dict) -> str:
         cur.close(); conn.close()
         if row:
             obj_key = row[0]
-            version = obj_key.rstrip("/").split("/")[-1]
+            dir_key = obj_key if obj_key.endswith("/") else obj_key.rsplit("/", 1)[0] + "/"
+            version = dir_key.rstrip("/").split("/")[-1]
             local_dir = os.path.join(cfg["staging_base"], "roberta_stage1", version)
-            if stage_data_from_objstore(obj_key, local_dir, cfg):
+            if stage_data_from_objstore(dir_key, local_dir, cfg):
                 log.info(f"Resolved dataset from dataset_versions: {local_dir}")
                 return local_dir
         else:
