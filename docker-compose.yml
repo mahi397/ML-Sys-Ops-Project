@@ -594,8 +594,8 @@ services:
         condition: service_healthy
       serving-api:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      # minio:
+      #   condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       RAY_STORAGE: s3://ray-checkpoints
@@ -634,8 +634,8 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
-      minio:
-        condition: service_healthy
+      # minio:
+      #   condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
