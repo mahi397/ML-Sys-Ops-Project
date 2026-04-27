@@ -116,7 +116,7 @@ DEFAULT_RETRAIN_CONFIG = {
     "max_oversample": 4.1,
     "seed": 42,
     "debug_subsample": False,
-    "warm_start_model_alias": "production",
+    "warm_start_model_alias": "",  # re-enable after first successful retrain registers a model
     # Data paths
     "data_dir": "/mnt/block/roberta_stage1/v3",
     # Object storage
@@ -887,6 +887,7 @@ def train_func(config: Dict):
 
     # Restore from checkpoint if resuming after Ray failure
     start_epoch, best_val_pk, best_threshold = 1, float("inf"), 0.5
+    best_model_state = None  # tracks state_dict of the best-Pk epoch
     checkpoint = train.get_checkpoint()
     if checkpoint:
         with checkpoint.as_directory() as ckpt_dir:
@@ -898,6 +899,7 @@ def train_func(config: Dict):
             start_epoch = ckpt["epoch"] + 1
             best_val_pk = ckpt.get("best_val_pk", float("inf"))
             best_threshold = ckpt.get("best_threshold", 0.5)
+            best_model_state = ckpt["model_state_dict"]
             log.info(f"Resumed from checkpoint epoch {ckpt['epoch']}, best_pk={best_val_pk:.4f}")
 
     patience_counter = 0
@@ -936,6 +938,7 @@ def train_func(config: Dict):
         if val_pk < best_val_pk:
             best_val_pk = val_pk
             best_threshold = epoch_threshold
+            best_model_state = (model.module if hasattr(model, "module") else model).state_dict()
             patience_counter = 0
         else:
             patience_counter += 1
@@ -944,7 +947,7 @@ def train_func(config: Dict):
             underlying = model.module if hasattr(model, "module") else model
             torch.save({
                 "epoch": epoch,
-                "model_state_dict": underlying.state_dict(),
+                "model_state_dict": best_model_state if best_model_state is not None else underlying.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_pk": best_val_pk,
@@ -1158,7 +1161,6 @@ def evaluate_and_register(config: Dict, result, ckpt_data: dict | None = None) -
                     log.warning(f"Could not set alias/tags: {e}")
         else:
             log.warning("Gates FAILED — model NOT registered")
-            mlflow.pytorch.log_model(model, artifact_path="model-failed")
 
     _log_to_audit_db("retrain_completed", {
         "run_id": run.info.run_id,
