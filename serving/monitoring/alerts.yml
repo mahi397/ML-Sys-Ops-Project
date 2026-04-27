@@ -74,7 +74,6 @@ groups:
   - name: model_health
     rules:
       - alert: ModelNotLoaded
-        expr: jitsi_model_loaded == 0
         expr: |
           jitsi_model_loaded == 0
           unless on(model_name)
