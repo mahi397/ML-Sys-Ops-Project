@@ -75,6 +75,10 @@ groups:
     rules:
       - alert: ModelNotLoaded
         expr: jitsi_model_loaded == 0
+        expr: |
+          jitsi_model_loaded == 0
+          unless on(model_name)
+          jitsi_model_loaded == 1
         for: 1m
         labels:
           severity: critical
