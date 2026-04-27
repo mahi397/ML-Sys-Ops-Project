@@ -580,6 +580,7 @@ class SegmenterDeployment:
                 # ── Load model: MLflow registry → local path → base weights ──
         self.model = None
         self.model_version = "base"
+        self.model_version_label = "base"
         self.current_mlflow_version =  None # not yet loaded from MLflow
         self.threshold = BOUNDARY_THRESHOLD  # default fallback 
         self.current_test_pk = 0.0  # updates it from MLflow tags on load
@@ -598,7 +599,9 @@ class SegmenterDeployment:
                     f"/tmp/mlflow_segmenter_{MODEL_ALIAS}"
                 )
                 self.model = mlflow.pytorch.load_model(_local)
-                self.model_version = f"mlflow@{MODEL_ALIAS}"
+                #self.model_version = f"mlflow@{MODEL_ALIAS}"
+                self.model_version = f"mlflow@{MODEL_ALIAS}_v{_alias_mv.version}"
+                self.model_version_label = f"v{_alias_mv.version}"
                 self.current_mlflow_version = str(_alias_mv.version)
                 #  READ best_threshold AND test_pk FROM MODEL VERSION TAGS
                 tags = _alias_mv.tags or {}
@@ -622,7 +625,9 @@ class SegmenterDeployment:
                         "/tmp/mlflow_segmenter_fallback"
                     )
                     self.model = mlflow.pytorch.load_model(_local_fb)
-                    self.model_version = "mlflow@fallback"
+                    #self.model_version = "mlflow@fallback"
+                    self.model_version = f"mlflow@fallback_v{_fb_mv.version}"
+                    self.model_version_label = f"v{_fb_mv.version}"
                     fb_tags = _fb_mv.tags or {}
                     if "best_threshold" in fb_tags:
                         self.threshold = float(fb_tags["best_threshold"])
@@ -634,6 +639,7 @@ class SegmenterDeployment:
         if self.model is None and os.path.exists(MODEL_PATH):
             self.model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
             self.model_version = "local-fine-tuned"
+            self.model_version_label = "local"
             print(f"[segmenter] Loaded local fine-tuned model from {MODEL_PATH}")
 
         # 3. Last resort — base weights (no fine-tuning)
@@ -653,9 +659,9 @@ class SegmenterDeployment:
         self.metrics.record.remote({
             "endpoint": "segment", "model_loaded": True,
              "model_name": "roberta_segmenter",
-            "model_version": self.model_version
+             "model_version": self.model_version_label
         })
-        print(f"[segmenter] Ready on {self.device}, version={self.model_version}, threshold={self.threshold}")
+        print(f"[segmenter] Ready on {self.device}, version={self.model_version}, label={self.model_version_label}, threshold={self.threshold}")
 
     def _reload_loop(self):
         import mlflow.pytorch
@@ -701,24 +707,26 @@ class SegmenterDeployment:
                         continue
                     print(f"[segmenter] Quality gate passed v{new_version}: test_pk={new_test_pk} >= current={self.current_test_pk}")
 
-                    old_version = self.model_version
+                    old_label = self.model_version_label
                     with self._model_lock:
                         self.model = new_model
                         self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"
+                        self.model_version_label = f"v{new_version}"
                         self.current_mlflow_version = new_version
                         self.threshold = new_threshold
                         self.current_test_pk = new_test_pk
                     _last_failed_version = None
-                    # Clear old version from Grafana before reporting new one
+                    # Clear old version label from Grafana, register new one
                     self.metrics.record.remote({
                         "endpoint": "segment", "model_loaded": False,
                         "model_name": "roberta_segmenter",
-                        "model_version": old_version
+                        #"model_version": old_version
+                        "model_version": old_label
                     })
                     self.metrics.record.remote({
                         "endpoint": "segment", "model_loaded": True,
                         "model_name": "roberta_segmenter",
-                        "model_version": self.model_version
+                        "model_version": self.model_version_label
                     })
                     print(f"[segmenter] Model reloaded: v{new_version}, threshold={new_threshold}")
                 except Exception as download_err:
