@@ -201,7 +201,7 @@ services:
       JITSI_STAGE1_OBJECT_PREFIX: ${JITSI_STAGE1_OBJECT_PREFIX:-production/inference_requests/stage1}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     ports:
       - "${INGEST_PORT:-9099}:9000"
     volumes:
@@ -278,7 +278,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     command: ["python", "-m", "proj07_services.workers.stage1_payload_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
@@ -314,7 +314,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     command: ["python", "-m", "proj07_services.workers.stage1_forward_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
@@ -351,7 +351,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     command: ["python", "-m", "proj07_services.workers.stage2_input_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage1:/mnt/block/user-behaviour/inference_requests/stage1
@@ -392,7 +392,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     command: ["python", "-m", "proj07_services.workers.stage2_forward_service"]
     volumes:
       - /mnt/block/user-behaviour/inference_requests/stage2:/mnt/block/user-behaviour/inference_requests/stage2
@@ -423,7 +423,7 @@ services:
       WORKFLOW_TASK_BACKOFF_MAX_SECONDS: ${WORKFLOW_TASK_BACKOFF_MAX_SECONDS:-900}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     command: ["python", "-m", "proj07_services.workers.user_summary_materialize_service"]
     volumes:
       - /mnt/block/user-behaviour/user_summary_edits:/mnt/block/user-behaviour/user_summary_edits
@@ -464,7 +464,7 @@ services:
       RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT: ${RETRAINING_DATASET_QUALITY_NUMERIC_BIN_COUNT:-10}
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      BUCKET: ${BUCKET:-objstore-proj07}
+      BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
     command: ["python", "-m", "proj07_services.workers.retraining_dataset_service"]
     volumes:
       - /mnt/block/staging/feedback_loop:/mnt/block/staging/feedback_loop
@@ -591,7 +591,7 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_USER: ${MINIO_USER:-minioadmin}
       MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme_minio}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
       RETRAIN_THRESHOLD: ${RETRAIN_THRESHOLD:-5}
       RETRAIN_CHECK_INTERVAL_SECONDS: 300
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -599,7 +599,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_S3_ENDPOINT_URL: https://chi.tacc.chameleoncloud.org:7480
       RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
-      OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      OBJSTORE_BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
       MODEL_NAME: jitsi-topic-segmenter
       TOKENIZERS_PARALLELISM: "false"
       DATASET_VERSION: "3"
@@ -626,7 +626,7 @@ services:
       minio:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
@@ -636,10 +636,10 @@ services:
       MINIO_USER: ${MINIO_USER:-minioadmin}
       MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme_minio}
       MODEL_NAME: jitsi-topic-segmenter
-      OBJSTORE_BUCKET: ${OBJSTORE_BUCKET:-objstore-proj07}
+      OBJSTORE_BUCKET: ${OBJECT_BUCKET:-objstore-proj07}
       TOKENIZERS_PARALLELISM: "false"
       DATASET_VERSION: "3"
-      RCLONE_REMOTE: ${RCLONE_REMOTE:-chi_tacc}
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-rclone_s3}
     volumes:
       - /mnt/block:/mnt/block
       - /home/cc/.config/rclone:/root/.config/rclone:ro
@@ -703,7 +703,7 @@ services:
       mlflow:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD}@postgres:5432/proj07_sql_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-proj07_user}:${POSTGRES_PASSWORD:-proj07}@postgres:5432/${POSTGRES_DB:-proj07_sql_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
