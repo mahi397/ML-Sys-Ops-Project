@@ -601,17 +601,7 @@ INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
 SELECT 'roberta_stage1', 'stage1', 'ami',
        'datasets/roberta_stage1/${DATASET_VERSION}/'
 WHERE NOT EXISTS (
-    SELECT 1 FROM dataset_versions
-    WHERE dataset_name = 'roberta_stage1'
-    AND object_key = 'datasets/roberta_stage1/${DATASET_VERSION}/'
-);
-INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
-SELECT 'roberta_stage1', 'stage1', 'ami',
-       'datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/'
-WHERE NOT EXISTS (
-    SELECT 1 FROM dataset_versions
-    WHERE dataset_name = 'roberta_stage1'
-    AND object_key = 'datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/'
+    SELECT 1 FROM dataset_versions WHERE dataset_name = 'roberta_stage1'
 );
 INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
 SELECT 'roberta_stage1_feedback_pool', 'stage1', 'production_feedback',
