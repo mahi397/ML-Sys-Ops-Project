@@ -178,16 +178,25 @@ class RetrainingDatasetService:
                 config=self.config.build_config,
                 logger=self.logger,
                 candidate_meetings=candidate_meeting_ids,
+                min_eligible_meetings=self.config.valid_meeting_threshold,
                 metrics=metrics,
                 force_publish=force_run,
             )
             if feedback_pool is None:
                 self.logger.info(
-                    "Retraining dataset build skipped because no eligible feedback-pool rows were produced | eligible_meetings=0 structural_feedback_events=%s structural_feedback_meetings=%s",
+                    "Retraining dataset build skipped because eligible feedback-pool rows did not satisfy publish requirements | minimum_eligible_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
+                    self.config.valid_meeting_threshold,
                     metrics.structural_feedback_event_count,
                     metrics.structural_feedback_meeting_count,
                 )
                 return False
+
+            self.logger.info(
+                "Eligible meetings after Stage 1 row generation | candidate_meetings=%s eligible_meetings=%s minimum_required=%s",
+                len(feedback_pool.candidate_meeting_ids),
+                len(feedback_pool.eligible_meeting_ids),
+                self.config.valid_meeting_threshold,
+            )
 
             snapshot = build_retraining_snapshot(
                 conn,
@@ -198,10 +207,11 @@ class RetrainingDatasetService:
                 force_publish=force_run,
             )
             self.logger.info(
-                "Retraining dataset build completed | feedback_pool=v%s snapshot=v%s meetings=%s",
+                "Retraining dataset build completed | feedback_pool=v%s snapshot=v%s meetings=%s eligible_meetings=%s",
                 feedback_pool.version,
                 snapshot.snapshot_version,
                 len(snapshot.selected_meeting_ids),
+                len(feedback_pool.eligible_meeting_ids),
             )
             return True
         finally:

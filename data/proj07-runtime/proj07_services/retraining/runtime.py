@@ -464,6 +464,7 @@ def build_stage1_feedback_pool(
     config: RetrainingBuildConfig,
     logger,
     candidate_meetings: list[str],
+    min_eligible_meetings: int = 0,
     metrics: RetrainingDatasetMetrics | None = None,
     force_publish: bool = False,
 ) -> FeedbackPoolBuildResult | None:
@@ -509,6 +510,16 @@ def build_stage1_feedback_pool(
         logger.info(
             "No retraining rows were produced for this retraining scan; skipping feedback-pool build | eligible_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
             len(eligible_meetings),
+            structural_feedback_event_count,
+            structural_feedback_meeting_count,
+        )
+        return None
+    if len(eligible_meetings) < max(0, min_eligible_meetings):
+        logger.info(
+            "Retraining feedback-pool build skipped because only %s eligible meetings survived row generation; minimum required=%s | candidate_meetings=%s structural_feedback_events=%s structural_feedback_meetings=%s",
+            len(eligible_meetings),
+            min_eligible_meetings,
+            len(candidate_meetings),
             structural_feedback_event_count,
             structural_feedback_meeting_count,
         )

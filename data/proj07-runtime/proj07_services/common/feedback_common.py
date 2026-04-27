@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -251,19 +250,25 @@ def upsert_meeting_artifact(
 
 
 def stable_split_70_15_15(meeting_ids: list[str]) -> dict[str, list[str]]:
-    train: list[str] = []
-    val: list[str] = []
-    test: list[str] = []
+    """
+    Deterministically slice sorted meeting IDs into approximate 70/15/15
+    train/val/test partitions for the current batch.
 
-    for meeting_id in sorted(set(meeting_ids)):
-        bucket = int(hashlib.md5(meeting_id.encode()).hexdigest(), 16) % 20
-        if bucket < 14:
-            train.append(meeting_id)
-        elif bucket < 17:
-            val.append(meeting_id)
-        else:
-            test.append(meeting_id)
+    This uses batch-relative percentage cutoffs rather than hashing each
+    meeting independently, so small retraining batches are more likely to
+    contribute examples to validation and test.
+    """
+    ordered_meeting_ids = sorted(set(meeting_ids))
+    total = len(ordered_meeting_ids)
+    if total == 0:
+        return {"train": [], "val": [], "test": []}
 
+    train_cutoff = max(1, (total * 70) // 100)
+    val_cutoff = max(train_cutoff, (total * 85) // 100)
+
+    train = ordered_meeting_ids[:train_cutoff]
+    val = ordered_meeting_ids[train_cutoff:val_cutoff]
+    test = ordered_meeting_ids[val_cutoff:]
     return {"train": train, "val": val, "test": test}
 
 
