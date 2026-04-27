@@ -167,6 +167,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
     ports:
       - "${ADMINER_PORT:-5050}:8080"
     networks:
