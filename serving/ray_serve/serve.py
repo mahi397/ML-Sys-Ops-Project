@@ -566,9 +566,14 @@ class MetricsDeployment:
 
 @serve.deployment(
     name="segmenter",
-    num_replicas=1,
-    ray_actor_options={"num_gpus": 0.3},
-    #max_ongoing_requests=10, 
+    autoscaling_config={
+        "min_replicas": 1,
+        "max_replicas": 2,
+        "target_ongoing_requests": 4,
+        "upscale_delay_s": 10,
+        "downscale_delay_s": 60,
+    },
+    ray_actor_options={"num_gpus": 0.25},  # 0.25×2 + 0.5 summarizer = 1.0 GPU
 )
 class SegmenterDeployment:
     def __init__(self):
@@ -848,9 +853,12 @@ class SegmenterDeployment:
 
 @serve.deployment(
     name="summarizer",
-    num_replicas=1,
-    ray_actor_options={"num_gpus": 0.7},
-    #max_ongoing_requests=3,
+    autoscaling_config={
+        "min_replicas": 1,
+        "max_replicas": 1,   # keeping at 1 — needs 0.5 GPU, can't fit 2
+        "target_ongoing_requests": 2,
+    },
+    ray_actor_options={"num_gpus": 0.5},  # 0.5 GPU
 )
 class SummarizerDeployment:
     def __init__(self):
