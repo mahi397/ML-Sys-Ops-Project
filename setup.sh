@@ -695,18 +695,32 @@ if is_truthy "${START_MONITORING_SERVICES}"; then
     SELECTED_SERVICES+=("${MONITORING_SERVICES[@]}")
 fi
 
-# Bring up selected services. The traffic generator remains profile-gated.
+# When we target application services that depend on profile-gated infra
+# (notably serving/training -> mlflow/minio), Docker Compose may fail to
+# resolve those dependencies unless they are part of the same explicit up call.
+PROFILE_DEPENDENCY_SERVICES=()
+if is_truthy "${START_MLFLOW_SERVICES}" && \
+   { is_truthy "${START_SERVING_SERVICES}" || is_truthy "${START_TRAINING_SERVICES}"; }; then
+    PROFILE_DEPENDENCY_SERVICES+=(minio minio-create-buckets mlflow)
+fi
+
+STARTUP_SERVICES=("${PROFILE_DEPENDENCY_SERVICES[@]}")
 if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
-    info "Bringing up selected services with a fresh rebuild/recreate: ${SELECTED_SERVICES[*]}"
+    STARTUP_SERVICES+=("${SELECTED_SERVICES[@]}")
+fi
+
+# Bring up selected services. The traffic generator remains profile-gated.
+if [[ "${#STARTUP_SERVICES[@]}" -gt 0 ]]; then
+    info "Bringing up selected services with a fresh rebuild/recreate: ${STARTUP_SERVICES[*]}"
 elif is_truthy "${START_MLFLOW_SERVICES}"; then
     info "Only MinIO/MLflow services requested; skipping application service startup"
 else
     info "No application service groups selected"
 fi
 
-if [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]] && compose_up_fresh "${SELECTED_SERVICES[@]}"; then
+if [[ "${#STARTUP_SERVICES[@]}" -gt 0 ]] && compose_up_fresh "${STARTUP_SERVICES[@]}"; then
     ok "Selected services started"
-elif [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]]; then
+elif [[ "${#STARTUP_SERVICES[@]}" -gt 0 ]]; then
     record_step_failure "start selected docker compose services" 1
 else
     ok "Docker service startup step complete"
