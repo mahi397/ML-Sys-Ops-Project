@@ -11,9 +11,10 @@ from pathlib import Path
 from proj07_services.common.feedback_common import (
     fetch_source_utterances,
     get_conn,
-    write_json,
-    insert_dataset_quality_report,
     build_model_utterances_by_meeting,
+    insert_dataset_quality_report,
+    upload_file,
+    write_json,
 )
 from proj07_services.common.task_service_common import build_logger, env_float, env_int
 from proj07_services.quality.drift_control import (
@@ -21,12 +22,22 @@ from proj07_services.quality.drift_control import (
     build_reference_profile,
     compare_feature_columns_to_reference,
     extract_live_feature_columns,
-    load_reference_profile,
 )
-from proj07_services.retraining.runtime import latest_version
+from proj07_services.retraining.runtime import (
+    latest_reference_profile,
+    production_jitsi_meeting_filter_sql,
+)
 
 
 APP_NAME = "production_drift_monitor"
+
+
+def default_report_object_prefix() -> str:
+    dataset_name = os.getenv("PRODUCTION_DRIFT_MONITOR_DATASET_NAME", "roberta_stage1").strip() or "roberta_stage1"
+    return os.getenv(
+        "PRODUCTION_DRIFT_MONITOR_REPORT_OBJECT_PREFIX",
+        f"quality_reports/production_live/{dataset_name}",
+    ).strip()
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,7 @@ class ProductionDriftMonitorConfig:
             "/mnt/block/staging/feedback_loop/production_drift_reports",
         )
     )
+    report_object_prefix: str = default_report_object_prefix()
     lookback_hours: int = env_int("PRODUCTION_DRIFT_MONITOR_LOOKBACK_HOURS", 24)
     min_valid_meetings: int = env_int("PRODUCTION_DRIFT_MONITOR_MIN_VALID_MEETINGS", 5)
     dataset_name: str = os.getenv("PRODUCTION_DRIFT_MONITOR_DATASET_NAME", "roberta_stage1").strip()
@@ -118,10 +130,10 @@ def validate_config(config: ProductionDriftMonitorConfig) -> None:
 def fetch_recent_valid_meeting_ids(conn, *, since: datetime) -> list[str]:
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT meeting_id
-            FROM meetings
-            WHERE source_type = 'jitsi'
+            FROM meetings m
+            WHERE {production_jitsi_meeting_filter_sql("m")}
               AND is_valid = TRUE
               AND ended_at >= %s
             ORDER BY ended_at DESC
@@ -132,11 +144,18 @@ def fetch_recent_valid_meeting_ids(conn, *, since: datetime) -> list[str]:
     return [str(row["meeting_id"]) for row in rows]
 
 
-def load_current_reference_profile(config: ProductionDriftMonitorConfig) -> tuple[int | None, dict | None]:
-    version = latest_version(config.dataset_root)
-    if version is None:
-        return None, None
-    return version, load_reference_profile(config.dataset_root / f"v{version}" / "profile.json")
+def load_current_reference_profile(
+    conn,
+    config: ProductionDriftMonitorConfig,
+    logger,
+) -> tuple[int | None, dict | None]:
+    return latest_reference_profile(
+        conn,
+        dataset_name=config.dataset_name,
+        stage="stage1",
+        reference_root=config.dataset_root,
+        logger=logger,
+    )
 
 
 def monitor_gate_config(config: ProductionDriftMonitorConfig) -> DriftGateConfig:
@@ -154,16 +173,22 @@ class ProductionDriftMonitor:
     logger: object
 
     def run_cycle(self) -> bool:
-        reference_version, reference_profile = load_current_reference_profile(self.config)
-        if reference_profile is None:
-            self.logger.info("Skipping production drift check because no approved reference profile was found")
-            return False
-
-        until = datetime.now(timezone.utc)
-        since = until - timedelta(hours=self.config.lookback_hours)
-
         conn = get_conn()
         try:
+            reference_version, reference_profile = load_current_reference_profile(
+                conn,
+                self.config,
+                self.logger,
+            )
+            if reference_profile is None:
+                self.logger.info(
+                    "Skipping production drift check because no usable Stage 1 reference profile was found"
+                )
+                return False
+
+            until = datetime.now(timezone.utc)
+            since = until - timedelta(hours=self.config.lookback_hours)
+
             meeting_ids = fetch_recent_valid_meeting_ids(conn, since=since)
             if len(meeting_ids) < self.config.min_valid_meetings:
                 report = {
@@ -254,6 +279,10 @@ class ProductionDriftMonitor:
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / "quality_report.json"
         write_json(report_path, report)
+        report_object_key = (
+            f"{self.config.report_object_prefix.strip('/')}/{stamp}/quality_report.json"
+        )
+        upload_file(report_path, report_object_key, self.logger)
 
         insert_dataset_quality_report(
             conn,
@@ -263,7 +292,7 @@ class ProductionDriftMonitor:
             dataset_version=None,
             reference_dataset_name=self.config.dataset_name,
             reference_dataset_version=None if reference_version is None else str(reference_version),
-            report_path=str(report_path.resolve()),
+            report_path=report_object_key,
             share_drifted_features=report.get("share_drifted_features"),
             drifted_feature_count=report.get("drifted_feature_count"),
             total_feature_count=report.get("total_feature_count"),

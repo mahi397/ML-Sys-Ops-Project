@@ -49,10 +49,17 @@ DEFAULT_CONFIG = {
     "alert_fnr": 0.10,               # > 10% false negative rate
 }
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://proj07_user:proj07@postgres:5432/proj07_sql_db"
-)
+def _default_database_url() -> str:
+    user = os.environ.get("POSTGRES_USER", "proj07_user")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    database = os.environ.get("POSTGRES_DB", "proj07_sql_db")
+    auth = f"{user}:{password}@" if password else f"{user}@"
+    return f"postgresql://{auth}{host}:{port}/{database}"
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL") or _default_database_url()
 
 
 def _get_conn():

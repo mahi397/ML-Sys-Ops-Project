@@ -21,4 +21,4 @@ It contains the schema and migration assets that the runnable stack under `../pr
 - `init_sql/004_retrain_audit_logs.sql`
 - `init_sql/005_meeting_validity.sql`
 
-The SQL files under `init_sql/` are mounted by `../proj07-runtime/docker-compose.yml`. On a fresh Postgres data volume they run automatically during container initialization, and the global `data/setup.sh` also re-applies the idempotent post-bootstrap migrations so existing volumes pick up schema additions such as `meetings.is_valid`.
+The SQL files under `init_sql/` are mounted by the root `docker-compose.yml`. On a fresh Postgres data volume they run automatically during container initialization, and `data/setup.sh` also re-applies the idempotent post-bootstrap migrations so existing volumes pick up schema additions such as `meetings.is_valid`.

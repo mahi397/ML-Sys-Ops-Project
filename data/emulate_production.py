@@ -24,7 +24,7 @@ Environment variables:
   MEETING_SOURCE_MODE         synthetic | archived | mixed
                               (default: mixed)
   ARCHIVED_TRANSCRIPT_ROOT    Root folder for archived Jitsi mock transcripts
-                              (default: ./initial_implementation/mock_jitsi_meet)
+                              (default: ./proj07-runtime/traffic_samples/mock_jitsi_meet)
   IDENTITY_SOURCE             Identity source sent with synthetic participants
                               (default: emulate_production)
   MEETING_NAME_PREFIX         Prefix for synthetic meeting names
@@ -47,8 +47,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
-
+from urllib.parse import urlsplit
 import requests
 
 logging.basicConfig(
@@ -62,20 +61,20 @@ log = logging.getLogger("emulate_production")
 
 INGEST_URL = os.environ.get(
     "INGEST_URL",
-    "http://jitsi_transcript_receiver:9000/ingest/jitsi-transcript",
+    "http://129.114.25.64:9000/ingest/jitsi-transcript",
 ).rstrip("/")
 MEETING_COUNT = int(os.environ.get("MEETING_COUNT", "5"))
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "10"))
 INGEST_TOKEN = os.environ.get("INGEST_TOKEN", "").strip()
 HOST_EXTERNAL_KEY = os.environ.get(
     "HOST_EXTERNAL_KEY",
-    os.environ.get("JITSI_HOST_EXTERNAL_KEY", "emulated-traffic-generator"),
+    "emulated-traffic-generator",
 ).strip()
 MEETING_SOURCE_MODE = os.environ.get("MEETING_SOURCE_MODE", "mixed").strip().lower() or "mixed"
 ARCHIVED_TRANSCRIPT_ROOT = Path(
     os.environ.get(
         "ARCHIVED_TRANSCRIPT_ROOT",
-        str(Path(__file__).resolve().parent / "initial_implementation" / "mock_jitsi_meet"),
+        str(Path(__file__).resolve().parent / "proj07-runtime" / "traffic_samples" / "mock_jitsi_meet"),
     )
 ).expanduser()
 IDENTITY_SOURCE = os.environ.get("IDENTITY_SOURCE", "emulate_production").strip()
@@ -204,22 +203,31 @@ def slugify(value: str) -> str:
     return slug or "mock-user"
 
 
-def make_mock_user(display_name: str) -> dict[str, str]:
+def make_mock_user(display_name: str, meeting_id: str) -> dict[str, str]:
     slug = slugify(display_name)
+    meeting_slug = slugify(meeting_id)
+    meeting_user_suffix = meeting_slug.replace("-", "_")
     return {
-        "user_id": f"speaker_{slug}",
+        "user_id": f"speaker_{slug}__{meeting_user_suffix}",
         "display_name": display_name,
-        "email": f"{slug}.mock@example.com",
+        "email": f"{slug}.{meeting_slug}.mock@example.com",
         "identity_source": IDENTITY_SOURCE,
     }
 
 
-def select_mock_user(speaker_names: list[str], rng: random.Random) -> dict[str, str]:
-    return make_mock_user(rng.choice(speaker_names))
+def select_mock_user(
+    speaker_names: list[str],
+    rng: random.Random,
+    meeting_id: str,
+) -> dict[str, str]:
+    return make_mock_user(rng.choice(speaker_names), meeting_id)
 
 
-def build_room_participants(speaker_names: list[str]) -> list[dict[str, str]]:
-    return [make_mock_user(speaker_name) for speaker_name in speaker_names]
+def build_room_participants(
+    speaker_names: list[str],
+    meeting_id: str,
+) -> list[dict[str, str]]:
+    return [make_mock_user(speaker_name, meeting_id) for speaker_name in speaker_names]
 
 
 def meeting_log_fields(payload: dict[str, Any]) -> dict[str, Any]:
@@ -235,11 +243,6 @@ def meeting_log_fields(payload: dict[str, Any]) -> dict[str, Any]:
         "mock_user_email": mock_user["email"],
         "host_external_key": HOST_EXTERNAL_KEY,
     }
-
-
-def ingest_base_url() -> str:
-    parts = urlsplit(INGEST_URL)
-    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
 def derive_meeting_id_from_original_filename(original_filename: str) -> str:
@@ -420,8 +423,8 @@ def build_synthetic_meeting_payload(rng: random.Random) -> dict[str, Any]:
     meeting_room = meeting_name
     utterances = build_utterances(rng)
     speaker_names = list(dict.fromkeys(utterance["speaker"] for utterance in utterances))
-    mock_user = select_mock_user(speaker_names, rng)
-    room_participants = build_room_participants(speaker_names)
+    mock_user = select_mock_user(speaker_names, rng, meeting_id)
+    room_participants = build_room_participants(speaker_names, meeting_id)
     transcript_text = render_transcript(meeting_start, meeting_room, utterances)
     return {
         "meeting_id": meeting_id,
@@ -446,8 +449,8 @@ def build_archived_meeting_payload(path: Path, rng: random.Random) -> dict[str, 
     meeting_room = metadata["meeting_room"] or make_meeting_name(meeting_id)
     speaker_names = metadata["speaker_names"] or ["Archived Speaker"]
     participant_names = metadata["participants"] or speaker_names
-    mock_user = select_mock_user(speaker_names, rng)
-    room_participants = build_room_participants(participant_names)
+    mock_user = select_mock_user(speaker_names, rng, meeting_id)
+    room_participants = build_room_participants(participant_names, meeting_id)
     return {
         "meeting_id": meeting_id,
         "meeting_name": meeting_room,
@@ -544,28 +547,6 @@ def post_transcript(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-def wait_for_endpoint(name: str, url: str, max_wait: int = 120) -> bool:
-    structured_log("info", "endpoint_wait_start", endpoint_name=name, url=url, timeout_seconds=max_wait)
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
-        try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                structured_log(
-                    "info",
-                    "endpoint_ready",
-                    endpoint_name=name,
-                    url=url,
-                    response=response.json(),
-                )
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(5)
-    structured_log("error", "endpoint_wait_timeout", endpoint_name=name, url=url, timeout_seconds=max_wait)
-    return False
-
-
 def run_batch(
     rng: random.Random,
     batch_size: int,
@@ -615,7 +596,6 @@ def run_batch(
 
 
 def main() -> None:
-    ingest_health_url = f"{ingest_base_url()}/health"
     archived_paths = list_archived_transcripts(ARCHIVED_TRANSCRIPT_ROOT)
     archived_count = len(archived_paths)
 
@@ -639,9 +619,6 @@ def main() -> None:
         delay_seconds=DELAY_SECONDS,
         seed=SEED,
     )
-
-    if not wait_for_endpoint("ingest API", ingest_health_url):
-        sys.exit(1)
 
     rng = random.Random(SEED)
     meeting_number = 1

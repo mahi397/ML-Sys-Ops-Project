@@ -31,6 +31,7 @@ INGEST_MODULE = os.getenv(
     "proj07_services.pipeline.ingest_saved_jitsi_transcript",
 ).strip()
 INGEST_TIMEOUT_SECONDS = int(os.getenv("JITSI_INGEST_TIMEOUT_SECONDS", "300"))
+TRANSCRIPT_TIMEZONE = os.getenv("JITSI_TRANSCRIPT_TIMEZONE", "UTC").strip() or "UTC"
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -228,6 +229,8 @@ def run_ingester(
         original_filename,
         "--host-external-key",
         host_external_key,
+        "--timezone",
+        TRANSCRIPT_TIMEZONE,
     ]
 
     if metadata_path is not None:
@@ -277,6 +280,7 @@ async def startup_event() -> None:
     logger.info("Log file: %s", LOG_FILE.resolve())
     logger.info("Bearer token enabled: %s", bool(INGEST_TOKEN))
     logger.info("Ingester module: %s", INGEST_MODULE)
+    logger.info("Transcript timezone: %s", TRANSCRIPT_TIMEZONE)
     logger.info(
         "Stage 1 build mode: %s",
         "sync_ingest" if BUILD_STAGE1_AFTER_INGEST else "async_db_worker",
