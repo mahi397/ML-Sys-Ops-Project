@@ -2,7 +2,9 @@ FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y git wget curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git wget curl unzip && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://rclone.org/install.sh | bash
 
 RUN pip install --no-cache-dir \
     transformers==4.40.0 \

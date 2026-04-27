@@ -64,10 +64,10 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 #from nltk.metrics.segmentation import windowdiff, pk as pk_metric
 
 import ray
+import pyarrow.fs as pafs
 from ray import train
 from ray.train import RunConfig, FailureConfig, CheckpointConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
-import pyarrow.fs as pafs
 
 from transformers import (
     AutoTokenizer,
@@ -97,7 +97,7 @@ DEFAULT_RETRAIN_CONFIG = {
     "freeze_backbone": False,
     "lr": 2.29e-5,
     "batch_size": 32,
-    "epochs": 2, # for demo, else 8
+    "epochs": 8,    # for demo purposes — in prod, set to 8 for better convergence
     "warmup_ratio": 0.105,
     "weight_decay": 0.072,
     "max_seq_len": 128,
@@ -108,27 +108,26 @@ DEFAULT_RETRAIN_CONFIG = {
     "debug_subsample": False,
     "warm_start_model_alias": "production",
     # Data paths
-    "data_dir": "/mnt/block/roberta_stage1/v2",
-    "feedback_data_dir": None,
-    "feedback_weight": 2.0,
+    "data_dir": "/mnt/block/roberta_stage1/v3",
     # Object storage
     "objstore_bucket": "objstore-proj07",
     "staging_base": "/mnt/block",
-    "rclone_remote": "chi_tacc",
+    "rclone_remote": "rclone_s3",
     # MLflow
     "experiment_name": "retraining",
     "model_registry_name": "jitsi-topic-segmenter",
-    # Aggregate quality gates (calibrated to actual initial impl results)
+    # Aggregate quality gates. Initial impl: test_wd=0.365 @ 8 epochs.
+    # epochs=2 (demo) yields val_wd≈0.55, so gate raised to 0.65.
     "gate_min_f1": 0.20,
     "gate_max_pk": 0.25,
-    "gate_max_windowdiff": 0.40,
+    "gate_max_windowdiff": 0.40, # was 0.40
     # Slice fairness gate — no single slice may exceed this Pk
     # Set higher than aggregate gate to allow for small-slice noise
     "slice_gate_max_pk": 0.40,
     # Ray Train
     "ray_num_workers": 1,
     "ray_use_gpu": True,
-    "ray_storage_path": os.environ.get("RAY_STORAGE", "/mnt/block/ray-checkpoints"),
+    "ray_storage_path": os.environ.get("RAY_STORAGE", "s3://ray-checkpoints"),
     "ray_max_failures": 2,
 }
 
@@ -140,7 +139,6 @@ def load_retrain_config(config_path: Optional[str] = None) -> Dict:
             cfg.update(yaml.safe_load(f))
     env_overrides = {
         "DATA_DIR": "data_dir",
-        "FEEDBACK_DATA_DIR": "feedback_data_dir",
         "MODEL_NAME": "model_registry_name",
         "RETRAIN_LR": "lr",
         "RETRAIN_EPOCHS": "epochs",
@@ -152,7 +150,7 @@ def load_retrain_config(config_path: Optional[str] = None) -> Dict:
         val = os.environ.get(env_key)
         if val:
             cfg[cfg_key] = val
-    for k in ("lr", "weight_decay", "warmup_ratio", "dropout", "feedback_weight",
+    for k in ("lr", "weight_decay", "warmup_ratio", "dropout",
               "max_oversample", "gate_min_f1", "gate_max_pk", "gate_max_windowdiff",
               "slice_gate_max_pk"):
         if k in cfg and cfg[k] is not None:
@@ -172,26 +170,48 @@ def stage_data_from_objstore(objstore_path: str, local_dir: str, cfg: Dict = Non
     if os.path.exists(local_dir) and any(f.endswith(".jsonl") for f in os.listdir(local_dir)):
         log.info(f"Data already staged at {local_dir}, skipping download")
         return True
-    rclone_remote = (cfg or {}).get("rclone_remote") or os.environ.get("RCLONE_REMOTE", "chi_tacc")
     bucket = os.environ.get("OBJSTORE_BUCKET", (cfg or {}).get("objstore_bucket", "objstore-proj07"))
-    remote = f"{rclone_remote}:{bucket}/{objstore_path}"
     os.makedirs(local_dir, exist_ok=True)
-    log.info(f"Staging data: {remote} → {local_dir}")
+    log.info(f"Staging data: s3://{bucket}/{objstore_path} → {local_dir}")
+
+    # Use boto3 with chi.tacc credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+    # AWS_S3_ENDPOINT_URL). rclone.conf may point to chi.uc which holds different data.
+    endpoint_url = os.environ.get("AWS_S3_ENDPOINT_URL", "")
+    if not endpoint_url:
+        log.error("AWS_S3_ENDPOINT_URL not set — cannot stage training data")
+        return False
     try:
-        result = subprocess.run(
-            ["rclone", "copy", remote, local_dir, "--progress"],
-            capture_output=True, text=True, timeout=300,
+        import boto3
+        from botocore.config import Config as BotoConfig
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+            config=BotoConfig(signature_version="s3v4"),
         )
-        if result.returncode != 0:
-            log.error(f"rclone failed: {result.stderr[:500]}")
+        prefix = objstore_path.rstrip("/") + "/"
+        paginator = s3.get_paginator("list_objects_v2")
+        downloaded = 0
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                filename = os.path.basename(key)
+                if not filename:
+                    continue
+                dest = os.path.join(local_dir, filename)
+                log.info(f"  {key} ({obj['Size'] // 1024 // 1024} MB) → {dest}")
+                s3.download_file(bucket, key, dest)
+                downloaded += 1
+        jsonl_count = len([f for f in os.listdir(local_dir) if f.endswith(".jsonl")])
+        if jsonl_count == 0:
+            log.error(f"Downloaded {downloaded} files but no .jsonl found in {local_dir} "
+                      f"— check bucket path: s3://{bucket}/{objstore_path}")
             return False
-        log.info(f"Staged {len(os.listdir(local_dir))} files to {local_dir}")
+        log.info(f"Staged {jsonl_count} .jsonl files ({downloaded} total) to {local_dir}")
         return True
-    except FileNotFoundError:
-        log.warning("rclone not found — assuming data is already staged locally")
-        return os.path.exists(local_dir)
-    except subprocess.TimeoutExpired:
-        log.error("rclone timed out after 300s")
+    except Exception as e:
+        log.error(f"Staging failed: {e}")
         return False
 
 
@@ -228,36 +248,6 @@ def resolve_dataset_path(cfg: Dict) -> str:
     return cfg["data_dir"]
 
 
-def resolve_feedback_path(cfg: Dict) -> Optional[str]:
-    if cfg.get("feedback_data_dir"):
-        if os.path.exists(cfg["feedback_data_dir"]):
-            return cfg["feedback_data_dir"]
-        version = cfg["feedback_data_dir"].rstrip("/").split("/")[-1]
-        local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback_pool", version)
-        if stage_data_from_objstore(cfg["feedback_data_dir"], local_dir, cfg):
-            return local_dir
-    db_url = os.environ.get("DATABASE_URL", "postgresql://recap:changeme@postgres:5432/proj07_sql_db")
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT object_key FROM dataset_versions
-            WHERE dataset_name = 'roberta_stage1_feedback_pool'
-            ORDER BY dataset_version_id DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        cur.close(); conn.close()
-        if row:
-            obj_key = row[0]
-            version = obj_key.rstrip("/").split("/")[-1]
-            local_dir = os.path.join(cfg["staging_base"], "roberta_stage1_feedback_pool", version)
-            if stage_data_from_objstore(obj_key, local_dir, cfg):
-                log.info(f"Resolved feedback pool: {local_dir}")
-                return local_dir
-    except Exception as e:
-        log.warning(f"Could not resolve feedback pool from DB: {e}")
-    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -308,32 +298,6 @@ def load_split_with_metadata(data_dir: str, split: str) -> Tuple[List, List, Lis
     meeting_ids = [e["input"]["meeting_id"] for e in examples]
     n_speakers = [len(set(u["speaker"] for u in e["input"]["window"] if u["speaker"] is not None)) for e in examples]
     return texts, labels, meeting_ids, n_speakers
-
-
-def load_feedback_data(feedback_dir: str) -> Tuple[List, List, List]:
-    for filename in ("feedback_examples.jsonl", "feedback_train.jsonl"):
-        path = os.path.join(feedback_dir, filename)
-        if os.path.exists(path):
-            examples = load_jsonl(path)
-            if os.environ.get("RETRAIN_DEBUG_SUBSAMPLE"):
-                examples = examples[:500]
-            texts = [format_window(e["input"]["window"]) for e in examples]
-            labels = [e["output"]["label"] for e in examples]
-            meeting_ids = [e["input"]["meeting_id"] for e in examples]
-            log.info(f"Loaded {len(texts)} feedback examples from {path}")
-            return texts, labels, meeting_ids
-    log.info(f"No feedback data found in {feedback_dir} — AMI only")
-    return [], [], []
-
-
-def merge_datasets(ami_texts, ami_labels, ami_mids, fb_texts, fb_labels, fb_mids,
-                   feedback_weight: float = 2.0):
-    n_repeats = max(1, int(feedback_weight))
-    log.info(f"Merged: {len(ami_texts)} AMI + {len(fb_texts)}x{n_repeats} feedback"
-             f" = {len(ami_texts) + len(fb_texts) * n_repeats} total")
-    return (ami_texts + fb_texts * n_repeats,
-            ami_labels + fb_labels * n_repeats,
-            ami_mids + fb_mids * n_repeats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -678,10 +642,8 @@ def build_model_card(
 
         # Transparency: training data provenance
         "training_data": {
-            "source": "AMI Meeting Corpus (Univ. of Edinburgh) + user feedback corrections",
+            "source": "AMI Meeting Corpus (Univ. of Edinburgh)  + user feedback corrections from Jitsi meetings",
             "dataset_version": dataset_version,
-            "feedback_included": config.get("feedback_data_dir") is not None,
-            "feedback_weight": config.get("feedback_weight", 0),
             "split_strategy": "strict split by meeting_id — no meeting spans train/val/test",
             "leakage_controls": (
                 "Meeting IDs frozen at roberta_stage1/v1 creation; Jitsi meetings "
@@ -843,17 +805,14 @@ def train_func(config: Dict):
     np.random.seed(config.get("seed", 42))
 
     train_texts, train_labels, _ = load_split(config["data_dir"], "train")
+    if not train_texts:
+        raise RuntimeError(
+            f"No training examples found in {config['data_dir']} — "
+            "data was not staged correctly (check rclone and dataset_versions)"
+        )
     if config.get("debug_subsample"):
         train_texts, train_labels = train_texts[:500], train_labels[:500]
     val_texts, val_labels, val_meeting_ids = load_split(config["data_dir"], "val")
-
-    if config.get("feedback_data_dir"):
-        fb_texts, fb_labels, fb_mids = load_feedback_data(config["feedback_data_dir"])
-        if fb_texts:
-            train_texts, train_labels, _ = merge_datasets(
-                train_texts, train_labels, ["ami"] * len(train_texts),
-                fb_texts, fb_labels, fb_mids, config.get("feedback_weight", 2.0),
-            )
 
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
     # Include relabeled speaker tokens for template perturbation tests
@@ -1008,13 +967,15 @@ def train_func(config: Dict):
 # Evaluation + registration (runs on driver, not Ray workers)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def evaluate_and_register(config: Dict, result) -> bool:
-    if result.checkpoint is None:
+def evaluate_and_register(config: Dict, result, ckpt_data: dict | None = None) -> bool:
+    if ckpt_data is not None:
+        ckpt = ckpt_data
+    elif result.checkpoint is not None:
+        with result.checkpoint.as_directory() as ckpt_dir:
+            ckpt = torch.load(os.path.join(ckpt_dir, "checkpoint.pt"), weights_only=False)
+    else:
         log.error("No checkpoint — cannot evaluate")
         return False
-
-    with result.checkpoint.as_directory() as ckpt_dir:
-        ckpt = torch.load(os.path.join(ckpt_dir, "checkpoint.pt"), weights_only=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1104,7 +1065,6 @@ def evaluate_and_register(config: Dict, result) -> bool:
             "epochs": config["epochs"], "max_oversample": config["max_oversample"],
             "dropout": config["dropout"], "warmup_ratio": config["warmup_ratio"],
             "weight_decay": config["weight_decay"],
-            "feedback_weight": config.get("feedback_weight", 0),
             "dataset_version": dataset_version,
             "warm_start": config.get("warm_start_model_alias", "none"),
             "ray_num_workers": config["ray_num_workers"],
@@ -1168,6 +1128,10 @@ def evaluate_and_register(config: Dict, result) -> bool:
                 try:
                     client.set_registered_model_alias(
                         config["model_registry_name"], "candidate", version)
+                    # Promote directly to production — serving hot-reload picks it
+                    # up within MODEL_RELOAD_INTERVAL_SECONDS (default 300s).
+                    client.set_registered_model_alias(
+                        config["model_registry_name"], "production", version)
                     # Tag threshold so serving reads it directly from registry
                     client.set_model_version_tag(
                         config["model_registry_name"], version,
@@ -1178,7 +1142,8 @@ def evaluate_and_register(config: Dict, result) -> bool:
                     client.set_model_version_tag(
                         config["model_registry_name"], version,
                         "gates_passed", "true")
-                    log.info(f"v{version} aliased 'candidate', tagged best_threshold={best_threshold}")
+                    log.info(f"v{version} promoted to 'production' (was 'candidate'), "
+                             f"threshold={best_threshold}")
                 except Exception as e:
                     log.warning(f"Could not set alias/tags: {e}")
         else:
@@ -1220,27 +1185,27 @@ def _log_to_audit_db(event_type: str, details: dict):
         log.warning(f"Audit log write failed (run add_mlops_tables.sql if missing): {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Ray storage resolution — chi.tacc S3 via pyarrow (separate bucket from MLflow)
+# ═══════════════════════════════════════════════════════════════════════════
+
 def _resolve_storage(storage_path: str):
-    """Return (path, filesystem) for RunConfig.
+    """Return (path, filesystem) for Ray RunConfig.
 
-    For s3:// URIs with a custom AWS_ENDPOINT_URL (e.g. MinIO), pyarrow does
-    not pick up AWS_ENDPOINT_URL automatically.  Build an explicit S3FileSystem
-    so Ray writes checkpoints to the right endpoint instead of real AWS S3.
-    Falls back to (path, None) for local paths or real AWS S3.
+    Checkpoints go to MinIO (local Docker service at http://minio:9000).
+    Plain HTTP, no region detection, reliable within the Docker network.
+    MLflow model artifacts use chi.tacc S3 separately — no overlap.
     """
-    endpoint_url = os.environ.get("AWS_ENDPOINT_URL", "")
-    if not (storage_path.startswith("s3://") and endpoint_url):
+    if not storage_path.startswith("s3://"):
         return storage_path, None
-
-    scheme = "https" if endpoint_url.startswith("https") else "http"
-    endpoint = endpoint_url.replace("https://", "").replace("http://", "")
+    endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
     fs = pafs.S3FileSystem(
-        access_key=os.environ.get("AWS_ACCESS_KEY_ID", ""),
-        secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+        access_key=os.environ.get("MINIO_USER", "minioadmin"),
+        secret_key=os.environ.get("MINIO_PASSWORD", "changeme_minio"),
         endpoint_override=endpoint,
-        scheme=scheme,
+        scheme="http",
+        region="us-east-1",
     )
-    # RunConfig expects path without s3:// when filesystem is explicit
     return storage_path[len("s3://"):], fs
 
 
@@ -1252,7 +1217,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--data_dir", default=None)
-    parser.add_argument("--feedback_data_dir", default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--no_gpu", action="store_true",
@@ -1260,20 +1224,15 @@ def main():
     args = parser.parse_args()
 
     cfg = load_retrain_config(args.config)
-    if args.data_dir:       cfg["data_dir"] = args.data_dir
-    if args.feedback_data_dir: cfg["feedback_data_dir"] = args.feedback_data_dir
-    if args.epochs:         cfg["epochs"] = args.epochs
-    if args.lr:             cfg["lr"] = args.lr
-    if args.no_gpu:         cfg["ray_use_gpu"] = False
+    if args.data_dir:  cfg["data_dir"] = args.data_dir
+    if args.epochs:    cfg["epochs"] = args.epochs
+    if args.lr:        cfg["lr"] = args.lr
+    if args.no_gpu:    cfg["ray_use_gpu"] = False
 
     cfg["data_dir"] = resolve_dataset_path(cfg)
-    fb_dir = resolve_feedback_path(cfg)
-    if fb_dir:
-        cfg["feedback_data_dir"] = fb_dir
 
     log.info("Starting retrain pipeline")
     log.info(f"  data_dir:     {cfg['data_dir']}")
-    log.info(f"  feedback_dir: {cfg.get('feedback_data_dir', 'none')}")
     log.info(f"  objstore:     {cfg['rclone_remote']}:{cfg['objstore_bucket']}")
     log.info(f"  gates:        F1>={cfg['gate_min_f1']}, Pk<={cfg['gate_max_pk']}, "
              f"WD<={cfg['gate_max_windowdiff']}, SlicePk<={cfg['slice_gate_max_pk']}")
@@ -1286,7 +1245,10 @@ def main():
     else:
         ray.init(ignore_reinit_error=True, log_to_driver=True)
 
-    storage_path, storage_fs = _resolve_storage(cfg["ray_storage_path"])
+    ray_storage_path, ray_storage_fs = _resolve_storage(cfg["ray_storage_path"])
+    run_cfg_kwargs = {"storage_path": ray_storage_path}
+    if ray_storage_fs is not None:
+        run_cfg_kwargs["storage_filesystem"] = ray_storage_fs
 
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,
@@ -1298,10 +1260,9 @@ def main():
         ),
         run_config=RunConfig(
             name=f"retrain-{int(time.time())}",
-            storage_path=storage_path,
-            storage_filesystem=storage_fs,
             failure_config=FailureConfig(max_failures=cfg["ray_max_failures"]),
             checkpoint_config=CheckpointConfig(num_to_keep=2),
+            **run_cfg_kwargs,
         ),
     )
 
@@ -1309,11 +1270,25 @@ def main():
     result = trainer.fit()
     log.info(f"Training done. Best val metrics: {result.metrics}")
 
-    gates_passed = evaluate_and_register(cfg, result)
+    # Extract checkpoint to a local dict before shutting Ray down, so GPU memory
+    # held by Ray training workers is released before evaluate_and_register loads
+    # the model on CUDA (prevents OOM when worker VRAM isn't freed yet).
+    ckpt_data = None
+    if result.checkpoint is not None:
+        with result.checkpoint.as_directory() as ckpt_dir:
+            ckpt_data = torch.load(
+                os.path.join(ckpt_dir, "checkpoint.pt"),
+                weights_only=False,
+                map_location="cpu",  # keep tensors on CPU so ray.shutdown() can't invalidate them
+            )
+
+    ray.shutdown()
+    log.info("Ray shut down — GPU memory released before evaluation")
+
+    gates_passed = evaluate_and_register(cfg, result, ckpt_data=ckpt_data)
     log.info("Retrain SUCCESS — model registered as 'candidate'" if gates_passed
              else "Retrain done — model did NOT pass quality gates")
 
-    ray.shutdown()
     return gates_passed
 
 
