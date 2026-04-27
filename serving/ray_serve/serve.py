@@ -1555,15 +1555,19 @@ class RollbackDeployment:
             fallback_mv = client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "fallback")
             fallback_version = str(fallback_mv.version)
 
+            # so rollback is reversible
             client.set_registered_model_alias(MLFLOW_MODEL_NAME, "production", fallback_version)
+            client.set_registered_model_alias(MLFLOW_MODEL_NAME, "fallback", prod_version)
 
-            print(f"[rollback] @production: v{prod_version} → v{fallback_version} (was @fallback)")
+            print(f"[rollback] @production: v{prod_version} → v{fallback_version} | @fallback: v{fallback_version} → v{prod_version}")
             return JSONResponse({
-                "status":        "rolled_back",
-                "from_version":  prod_version,
-                "to_version":    fallback_version,
-                "triggered_by":  alert_names,
-                "note":          "Hot-reload will pick up new @production within MODEL_RELOAD_INTERVAL_SECONDS",
+                "status":             "rolled_back",
+                "production_was":     prod_version,
+                "production_now":     fallback_version,
+                "fallback_was":       fallback_version,
+                "fallback_now":       prod_version,
+                "triggered_by":       alert_names,
+                "note":               "Hot-reload will pick up new @production within MODEL_RELOAD_INTERVAL_SECONDS",
             })
 
         except Exception as e:
