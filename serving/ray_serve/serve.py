@@ -1500,6 +1500,77 @@ class HealthDeployment:
             "gpu_memory_gb": gpu_mem_gb
         })
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROLLBACK WEBHOOK
+# Receives Alertmanager POST (severity=critical, action=rollback
+# Promotes @fallback → @production in MLflow
+# The hot-reload thread in SegmenterDeployment picks up the alias change
+# within MODEL_RELOAD_INTERVAL_SECONDS (default 300s) — no container restart needed
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@serve.deployment(name="rollback", num_replicas=1)
+class RollbackDeployment:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._last_rollback_ts = 0.0
+        self._cooldown_s = 300  # ignore repeat fires within 5 min
+        print("[rollback] Ready at /rollback")
+
+    async def __call__(self, request: Request) -> JSONResponse:
+        if request.method != "POST":
+            return JSONResponse({"error": "POST only"}, status_code=405)
+
+        now = time.time()
+        with self._lock:
+            if now - self._last_rollback_ts < self._cooldown_s:
+                remaining = int(self._cooldown_s - (now - self._last_rollback_ts))
+                print(f"[rollback] Cooldown active — skipping ({remaining}s left)")
+                return JSONResponse({"status": "skipped", "reason": f"cooldown {remaining}s remaining"})
+            self._last_rollback_ts = now
+
+        # Log which alerts fired
+        try:
+            body = await request.json()
+            alert_names = [
+                a.get("labels", {}).get("alertname", "unknown")
+                for a in body.get("alerts", [])
+            ]
+        except Exception:
+            alert_names = ["unknown"]
+        print(f"[rollback] Triggered by: {alert_names}")
+
+        # Swap @production → @fallback version in MLflow
+        try:
+            import mlflow
+            mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+            client = mlflow.tracking.MlflowClient()
+
+            try:
+                prod_version = str(
+                    client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "production").version
+                )
+            except Exception:
+                prod_version = "unknown"
+
+            fallback_mv = client.get_model_version_by_alias(MLFLOW_MODEL_NAME, "fallback")
+            fallback_version = str(fallback_mv.version)
+
+            client.set_registered_model_alias(MLFLOW_MODEL_NAME, "production", fallback_version)
+
+            print(f"[rollback] @production: v{prod_version} → v{fallback_version} (was @fallback)")
+            return JSONResponse({
+                "status":        "rolled_back",
+                "from_version":  prod_version,
+                "to_version":    fallback_version,
+                "triggered_by":  alert_names,
+                "note":          "Hot-reload will pick up new @production within MODEL_RELOAD_INTERVAL_SECONDS",
+            })
+
+        except Exception as e:
+            print(f"[rollback] MLflow error: {e}")
+            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BIND & RUN
@@ -1517,6 +1588,7 @@ health     = HealthDeployment.bind()
 recap      = RecapPipelineDeployment.bind()
 recap_api  = RecapAPIDeployment.bind()
 recap_ui   = RecapUIDeployment.bind()
+rollback   = RollbackDeployment.bind()
 
 #serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 # HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.87.115:8000/recap'))
@@ -1545,10 +1617,11 @@ serve.run(summarizer, name="summarizer", route_prefix="/summarize")
 serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap_api,  name="recap_api",  route_prefix="/api")
 serve.run(recap_ui,   name="recap_ui",   route_prefix="/ui")
+serve.run(rollback,   name="rollback",   route_prefix="/rollback")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")
-print("Endpoints: /health, /segment, /summarize, /recap, /metrics")
+print("Endpoints: /health, /segment, /summarize, /recap, /metrics, /rollback")
 print("=" * 60)
 
 import signal
