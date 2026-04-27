@@ -594,8 +594,8 @@ services:
         condition: service_healthy
       serving-api:
         condition: service_healthy
-      # minio:
-      #   condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       RAY_STORAGE: s3://ray-checkpoints
