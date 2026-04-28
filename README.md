@@ -30,8 +30,8 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 │   Serving  (serving/)    │       │    Training  (train/)             │
 │                          │       │                                   │
 │  Ray Serve  :8000        │◄──────│  retrain_watcher  (always-on)     │
-│  RoBERTa segmenter (0.3 GPU)     │  retrain.py  (Ray Train, GPU)     │
-│  Mistral-7B summarizer (0.7 GPU) │  online_eval  (hourly)            │
+│  RoBERTa segmenter (0.25*2 GPU)     │  retrain.py  (Ray Train, GPU)     │
+│  Mistral-7B summarizer (0.5 GPU) │  online_eval  (hourly)            │
 │  MLflow hot-reload       │       │  offline_eval  (on demand)        │
 │  /recap · /segment       │       └──────────────┬────────────────────┘
 │  /summarize · /rollback  │               registers candidate
