@@ -207,7 +207,7 @@ docker compose --profile retrain run --rm retrain-job
 
 ```bash
 curl http://<FLOATING_IP>:8000/health
-# → {"status": "ok", "mode": "ray_serve", "device": "cuda"}
+# → {"status":"ok","mode":"ray_serve","device":"cuda","gpu":"Quadro RTX 6000","gpu_memory_gb":24.0}
 
 docker compose ps
 # All services should show "running" or "healthy"
@@ -384,7 +384,7 @@ curl -X POST http://<FLOATING_IP>:9090/-/reload
 
 ## Sub-system READMEs
 
-- [serving/README.md](serving/README.md) — Ray Serve architecture, API reference, monitoring, benchmarks
+- [serving/README.md](serving/README.md) — Ray Serve architecture, API reference, monitoring, benchmarks, quality gates
 - [train/README.md](train/README.md) — Training pipeline, quality gates, evaluation test suite, safeguarding
 - [data/README.md](data/README.md) — Data pipeline, ingest flow, dataset versioning, drift control
 - [data/proj07-runtime/README.md](data/proj07-runtime/README.md) — Runtime service bundle
