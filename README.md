@@ -384,7 +384,7 @@ curl -X POST http://<FLOATING_IP>:9090/-/reload
 
 ## Sub-system READMEs
 
-- [serving/README.md](serving/README.md) — Ray Serve architecture, API reference, monitoring, benchmarks, quality gates
+- [serving/README.md](serving/README.md) — Ray Serve architecture, API reference, monitoring, benchmarks, quality gates, safeguarding
 - [train/README.md](train/README.md) — Training pipeline, quality gates, evaluation test suite, safeguarding
 - [data/README.md](data/README.md) — Data pipeline, ingest flow, dataset versioning, drift control
 - [data/proj07-runtime/README.md](data/proj07-runtime/README.md) — Runtime service bundle
