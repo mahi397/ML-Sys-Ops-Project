@@ -50,17 +50,18 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
   Client / Jitsi  ───►  │  /recap ──► RecapPipelineDeployment         │
                         │               │                              │
                         │               ├──► SegmenterDeployment       │
-                        │               │    (RoBERTa, GPU 0.3)        │
+                        │               │    (RoBERTa, GPU 0.25*2)        │
                         │               │    @serve.batch (8 req/pass) │
                         │               │                              │
                         │               └──► SummarizerDeployment      │
-                        │                    (Mistral-7B, GPU 0.7)     │
+                        │                    (Mistral-7B, GPU 0.5)     │
                         │                                              │
                         │  /segment ──► SegmenterDeployment (raw)      │
                         │  /summarize ► SummarizerDeployment (raw)     │
                         │  /metrics  ► MetricsDeployment               │
                         │  /health   ► HealthDeployment                │
                         │  /ui       ► RecapUIDeployment               │
+                        │ /retrain, /rollback                          │
                         └──────────────────────┬──────────────────────┘
                                                │  save_recap()
                                                │  save_utterances()
@@ -98,8 +99,8 @@ End-to-end ML serving system for **topic segmentation + meeting summarization** 
 
 | Stage | Deployment | GPU Fraction | Concurrency |
 |---|---|---|---|
-| A — Boundary detection | SegmenterDeployment | 0.3 | up to 10 (batched 8/pass) |
-| B — Summarization | SummarizerDeployment | 0.7 | up to 3 |
+| A — Boundary detection | SegmenterDeployment | 0.25*2 | up to 10 (batched 8/pass) |
+| B — Summarization | SummarizerDeployment | 0.5 | up to 3 |
 | Total | — | 1.0 (exactly fills RTX 6000) | — |
 
 Stages A and B share the single Quadro RTX 6000 via Ray's fractional GPU allocation. Stage A windows run in parallel (fanned out via `predict_single.remote()`); Stage B segments run sequentially because Mistral holds 70% of VRAM and cannot safely batch multiple 7B inference calls simultaneously.
@@ -177,13 +178,12 @@ RoBERTa-based topic boundary detector.
 
 | Config | Value |
 |---|---|
-| GPU fraction | 0.3 |
-| Replicas | 1 |
-| Max concurrent requests | 10 |
+| GPU fraction | 0.25 |
+| Replicas | 2 |
 | Batching | `@serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)` |
 | Model | `RobertaForSequenceClassification` (2-class) |
 | Input format | 7-utterance sliding window, formatted as `[SPEAKER_X]: text` |
-| Threshold | `BOUNDARY_THRESHOLD` env var (default: 0.5) |
+| Threshold | `BOUNDARY_THRESHOLD` env var (default: 0.35) |
 
 **Model load order (startup):**
 1. `models:/jitsi-topic-segmenter@production` from MLflow registry
@@ -223,9 +223,8 @@ Mistral-7B-Instruct meeting summarizer via `llama-cpp-python` (CUDA build, `CMAK
 
 | Config | Value |
 |---|---|
-| GPU fraction | 0.7 |
+| GPU fraction | 0.50 |
 | Replicas | 1 |
-| Max concurrent requests | 3 |
 | Model | Mistral-7B-Instruct Q4_K_M GGUF |
 | Context window | 4096 tokens (`n_ctx`) |
 | GPU layers | All (`n_gpu_layers=-1`) |
@@ -339,7 +338,8 @@ Full pipeline orchestrator. Takes raw utterances, runs both stages, persists to 
 | `GET` | `/api/meetings` | RecapDeployment | List all processed meetings from DB |
 | `GET` | `/api/recap/{meeting_id}` | RecapDeployment | Get recap for a meeting from DB |
 | `POST` | `/api/feedback` | RecapDeployment | Submit boundary correction (written to DB) |
-
+| `POST` | `/retrain` |
+| `POST` | `/rollback` |
 ---
 
 ### Request Flow
