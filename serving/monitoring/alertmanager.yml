@@ -29,8 +29,8 @@ receivers:
   - name: 'rollback-handler'
     webhook_configs:
       - url: 'http://ray-serve:8000/rollback'
-      send_resolved: false
+        send_resolved: false
   - name: 'retrain-handler'
     webhook_configs:
       - url: 'http://ray-serve:8000/retrain'
-      send_resolved: false
+        send_resolved: false
