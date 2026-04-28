@@ -167,500 +167,520 @@ serving/
 
 ---
 
-## Ray Serve (Primary)
 
-### Deployments
 
-`serve.py` defines **4 active Ray Serve deployments** wired together via deployment handles:
+# Serving — Ray Serve (Shruti Pangare)
 
-#### 1. `SegmenterDeployment` — `/segment`
-RoBERTa-based topic boundary detector.
+Ray Serve deployment for the Jitsi Meeting Recap pipeline. Hosts the
+two-stage inference system (RoBERTa segmenter + Mistral-7B summarizer),
+exposes REST endpoints consumed by the data pipeline and the recap UI,
+and handles MLflow-driven hot-reload, automated rollback, and
+Prometheus/Grafana observability.
 
-| Config | Value |
-|---|---|
-| GPU fraction | 0.25 |
-| Replicas | 2 |
-| Batching | `@serve.batch(max_batch_size=8, batch_wait_timeout_s=0.05)` |
-| Model | `RobertaForSequenceClassification` (2-class) |
-| Input format | 7-utterance sliding window, formatted as `[SPEAKER_X]: text` |
-| Threshold | `BOUNDARY_THRESHOLD` env var (default: 0.35) |
+---
 
-**Model load order (startup):**
-1. `models:/jitsi-topic-segmenter@production` from MLflow registry
-2. `models:/jitsi-topic-segmenter@fallback` if production fails
-3. `MODEL_PATH` env var — local fine-tuned checkpoint (default: `roberta-base`)
-4. `roberta-base` pretrained weights as last resort
+## Contents
 
-**Hot-reload:** Polls MLflow every `MODEL_RELOAD_INTERVAL_SECONDS` (default 300s). Swaps model in-place under a threading lock without restarting the actor.
-
-**Single window input:**
-```json
-{
-  "meeting_id": "meeting_123",
-  "window": [
-    {"position": 0, "speaker": "A", "text": "...", "t_start": 0.0, "t_end": 5.0},
-    {"position": 1, "speaker": "B", "text": "...", "t_start": 5.0, "t_end": 10.0}
-  ],
-  "transition_index": 3,
-  "meeting_offset_seconds": 0.0
-}
+```
+serving/
+├── ray_serve/
+│   ├── serve.py              # All Ray Serve deployments (single entry point)
+│   ├── storage.py            # JSONL + Postgres recap/feedback stores
+│   ├── metrics_server.py     # Standalone Prometheus probe (sidecar)
+│   ├── Dockerfile.ray        # Container image for the ray-serve service
+│   └── requirements_ray.txt  # Python dependencies
+├── monitoring/
+│   ├── prometheus.yml        # Scrape config (ray-serve :9091, node-exporter :9100)
+│   ├── alerts.yml            # Alerting rules (SLA, error rate, rollback trigger)
+│   ├── alertmanager.yml      # Routes critical alerts → /rollback webhook
+│   └── dashboards/           # Grafana JSON dashboards
+├── benchmark/
+│   └── benchmark_ray.py      # Load-testing script (segment, summarize, full meeting)
+├── app/                      # FastAPI baseline (benchmarking only, not production)
+├── recap_ui/                 # Static browser recap viewer
+└── models/                   # Downloaded model weights (gitignored)
 ```
 
-**Output:**
-```json
-{
-  "meeting_id": "meeting_123",
-  "transition_after_position": 3,
-  "boundary_probability": 0.87,
-  "is_boundary": true,
-  "t_boundary": 30.0,
-  "segment_so_far": { "t_start": 0.0, "t_end": 30.0 }
-}
+---
+
+## Architecture
+
+### Two-stage pipeline
+
+```
+                        POST /segment
+Jitsi transcript ──────────────────────► SegmenterDeployment
+(800 windows/meeting)                     RoBERTa-base fine-tuned
+                                          0.25 GPU × up to 2 replicas
+                                          @serve.batch  (max 8, 50ms wait)
+                                          ~8 ms/window
+                                               │
+                                               │ boundary detected
+                                               ▼
+                        POST /summarize   SummarizerDeployment
+                        (8 segments)      Mistral-7B (4-bit GGUF or HF)
+                                          0.5 GPU × 1 replica
+                                          ~4 s/segment
+                                               │
+                                               ▼
+                        POST /recap       RecapPipelineDeployment
+                                          orchestrates A→B, writes recap
 ```
 
-#### 2. `SummarizerDeployment` — `/summarize`
-Mistral-7B-Instruct meeting summarizer via `llama-cpp-python` (CUDA build, `CMAKE_ARGS="-DLLAMA_CUBLAS=on"`).
+### Deployment map
 
-| Config | Value |
-|---|---|
-| GPU fraction | 0.50 |
-| Replicas | 1 |
-| Model | Mistral-7B-Instruct Q4_K_M GGUF |
-| Context window | 4096 tokens (`n_ctx`) |
-| GPU layers | All (`n_gpu_layers=-1`) |
-| Max tokens | 300 |
-| Temperature | 0.1 |
-| JSON extraction | Finds first `{…}` block in response; up to 10 retries |
+| Deployment | Route | GPU | Replicas | Notes |
+|---|---|---|---|---|
+| `SegmenterDeployment` | `/segment` | 0.25 (auto-scales to 0.5) | 1–2 | `@serve.batch` batching |
+| `SummarizerDeployment` | `/summarize` | 0.5 | 1 | Mistral-7B, falls back to stub |
+| `RecapPipelineDeployment` | `/recap` | — | 1 | Orchestrates A→B pipeline |
+| `RecapAPIDeployment` | `/api/*` | — | 1 | meetings, utterances, feedback |
+| `RecapUIDeployment` | `/ui` | — | 1 | Static recap browser |
+| `HealthDeployment` | `/health` | — | 1 | System status + GPU info |
+| `MetricsDeployment` | `/metrics` | — | 1 | Prometheus scrape endpoint |
+| `RollbackDeployment` | `/rollback` | — | 1 | Alertmanager webhook |
+| `RetrainDeployment` | `/retrain` | — | 1 | Alertmanager webhook (log only) |
 
-**Input:**
-```json
-{
-  "meeting_id": "meeting_123",
-  "segment_id": 1,
-  "t_start": 0.0,
-  "t_end": 30.0,
-  "utterances": [
-    {"speaker": "A", "text": "The quarterly results are looking very positive"},
-    {"speaker": "B", "text": "Revenue grew by twenty percent this quarter"}
-  ],
-  "meeting_context": {
-    "total_segments": 3,
-    "segment_index_in_meeting": 1
-  }
-}
-```
+Total GPU budget: 0.25×2 (segmenter) + 0.5 (summarizer) = 1.0 GPU (Quadro RTX 6000)
 
-**Output:**
-```json
-{
-  "meeting_id": "meeting_123",
-  "segment_id": 1,
-  "t_start": 0.0,
-  "t_end": 30.0,
-  "topic_label": "Q2 Sales Review",
-  "summary_bullets": [
-    "Revenue up 20% vs previous quarter",
-    "Customer acquisition costs declining",
-    "Cloud infrastructure driving cost increases"
-  ],
-  "status": "complete"
-}
-```
+### Why Ray Serve (not FastAPI + Triton)
 
-> `status: "draft"` is returned if Mistral is not loaded (`LLM_MODEL_PATH` missing or file absent). All other response fields will be empty strings/lists.
+The two-stage pipeline needs independent scaling: Stage A is ~500× faster
+than Stage B but handles ~100× more requests per meeting. A single FastAPI
+process cannot scale them independently, and Triton requires ONNX conversion
+plus a separate server. Ray Serve solves both:
 
-#### 3. `HealthDeployment` — `/health`
+- **Fractional GPU allocation** — `ray_actor_options={"num_gpus": 0.25/0.5}`
+  gives each model dedicated VRAM with no contention.
+- **`@serve.batch`** — groups concurrent `/segment` calls into a single GPU
+  forward pass (same benefit as Triton's dynamic batching, no ONNX required).
+- **Deployment handles** — `RecapPipelineDeployment` calls the segmenter and
+  summarizer via `serve.get_deployment_handle(...)` without extra HTTP hops.
+- **Built-in autoscaling** — segmenter scales 1→2 replicas when concurrent
+  requests exceed 4 (`target_ongoing_requests=4`).
+
+See [`RAY_SERVE_JUSTIFICATION.md`](ray_serve/RAY_SERVE_JUSTIFICATION.md) for
+the full comparison table against FastAPI and Triton.
+
+---
+
+## API Reference
+
+### `GET /health`
+
+Returns system status including GPU info and currently loaded model version.
 
 ```json
 {
   "status": "ok",
-  "mode": "ray_serve",
-  "device": "cuda"
+  "model_version": "mlflow@production_v7",
+  "threshold": 0.38,
+  "device": "cuda",
+  "gpu": "Quadro RTX 6000",
+  "gpu_memory_gb": 24.0
 }
 ```
 
-#### 4. `RecapPipelineDeployment` — `/recap`
-Full pipeline orchestrator. Takes raw utterances, runs both stages, persists to SQLite, returns consolidated recap.
+### `POST /segment`
 
-**Input validation rules:**
-- 0 utterances → 400 error
-- All utterances under 20 chars after cleaning → 400 error
-- Fewer than 2 valid utterances → 400 error
-- 2–6 utterances → allowed with `short_meeting_low_confidence` warning
-- 7+ utterances → fully valid
-- >2000 utterances → truncated to 2000 with warning
+Stage A — RoBERTa boundary detection.
 
-**Input:**
+**Request:**
 ```json
 {
-  "meeting_id": "meeting_123",
-  "utterances": [
-    {"speaker": "A", "text": "Good morning, let's start the quarterly review.", "t_start": 0.0, "t_end": 5.0},
-    {"speaker": "B", "text": "Sure, I have the latest numbers ready to share.", "t_start": 5.0, "t_end": 10.0}
+  "meeting_id": "ES2002a",
+  "window": [
+    {"position": 0, "speaker": "A", "t_start": 98.3, "t_end": 109.1, "text": "..."},
+    {"position": 3, "speaker": "B", "t_start": 135.1, "t_end": 147.9, "text": "..."}
+  ],
+  "transition_index": 3,
+  "meeting_offset_seconds": 98.3
+}
+```
+
+**Batch format** (send multiple windows in one call):
+```json
+{
+  "meeting_id": "ES2002a",
+  "requests": [
+    {"request_id": "t0", "window": [...], "transition_index": 3, "meeting_offset_seconds": 0.0},
+    {"request_id": "t1", "window": [...], "transition_index": 5, "meeting_offset_seconds": 45.2}
   ]
 }
 ```
 
-**Output:**
+**Response:**
 ```json
 {
-  "meeting_id": "meeting_123",
-  "generated_at": "2026-04-20T10:00:00Z",
+  "meeting_id": "ES2002a",
+  "is_boundary": true,
+  "boundary_probability": 0.812,
+  "transition_after_position": 3,
+  "t_boundary": 147.9,
+  "segment_so_far": {"t_start": 98.3, "t_end": 147.9}
+}
+```
+
+SLA: p95 < 2 000 ms. Target: ~8 ms per window under normal load.
+
+### `POST /summarize`
+
+Stage B — Mistral-7B summarization.
+
+**Request:**
+```json
+{
+  "meeting_id": "ES2002a",
+  "segment_id": 1,
+  "t_start": 98.3,
+  "t_end": 204.8,
+  "utterances": [
+    {"speaker": "A", "text": "we need to finalize the interface..."},
+    {"speaker": "B", "text": "agreed the api contract should be locked down first"}
+  ],
+  "total_utterances": 5,
+  "meeting_context": {"total_segments": 3, "segment_index_in_meeting": 1}
+}
+```
+
+**Response:**
+```json
+{
+  "meeting_id": "ES2002a",
+  "segment_id": 1,
+  "topic_label": "API Interface Finalization",
+  "summary_bullets": [
+    "Team agreed to lock down API contract before frontend work begins.",
+    "Draft interface to be ready by Thursday.",
+    "Frontend team to be looped in after contract is finalized."
+  ],
+  "model_version": "mlflow@production_v7"
+}
+```
+
+SLA: p95 < 30 s per segment.
+
+### `POST /recap`
+
+Full pipeline: segments all utterances, summarizes each segment, writes
+recap to store, returns full structured recap.
+
+**Request:**
+```json
+{
+  "meeting_id": "ES2002a",
+  "utterances": [
+    {"speaker": "A", "t_start": 0.0, "t_end": 10.0, "text": "..."},
+    ...
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "meeting_id": "ES2002a",
   "total_segments": 3,
-  "processing_time_seconds": 1.4,
-  "warnings": [],
+  "processing_time_seconds": 14.2,
   "recap": [
     {
-      "meeting_id": "meeting_123",
       "segment_id": 1,
+      "topic_label": "API Interface Finalization",
       "t_start": 0.0,
-      "t_end": 25.0,
-      "topic_label": "Q2 Sales Review",
-      "summary_bullets": ["Revenue up 20%", "Costs declining", "Cloud driving spend"],
-      "status": "complete"
+      "t_end": 147.9,
+      "summary_bullets": ["..."]
     }
   ]
 }
 ```
 
+SLA: full 800-utterance meeting < 300 s.
+
+### `GET  /api/meetings`
+### `GET  /api/recap/{meeting_id}`
+### `GET  /api/utterances/{meeting_id}`
+### `POST /api/feedback`
+
+Feedback payload:
+```json
+{
+  "meeting_id": "ES2002a",
+  "segment_summary_id": 42,
+  "action": "remove_boundary",
+  "before_payload": {"..."},
+  "after_payload": {"..."}
+}
+```
+
+Actions: `remove_boundary`, `add_boundary`, `overall_positive`, `overall_negative`.
+Each feedback event is written to `feedback_events` in Postgres and counted
+toward the retraining threshold watermark (see Training README).
+
+### `GET /metrics`
+
+Prometheus text format. Scraped by Prometheus at `:9091` (sidecar) and
+directly at `:8000/metrics` (Ray Serve deployment).
+
+### `POST /rollback`
+
+Alertmanager webhook. Swaps `@production` ↔ `@fallback` aliases in MLflow.
+Hot-reload thread picks up the new alias within `MODEL_RELOAD_INTERVAL_SECONDS`
+(default 300 s). 5-minute cooldown prevents repeat fires.
+
+### `POST /retrain`
+
+Alertmanager webhook. Logs the alert event and reports pending feedback count.
+Actual retraining is delegated to `retrain_watcher.py` (Training service).
+
 ---
 
-### API Endpoints
+## MLflow Hot-Reload
 
-| Method | Path | Handler | Description |
+`SegmenterDeployment` runs a background thread (`_reload_loop`) that polls
+the MLflow registry every `MODEL_RELOAD_INTERVAL_SECONDS` (default 300 s):
+
+```
+Poll MLflow @production alias
+    │
+    ├── Same version as current → skip
+    │
+    ├── New version detected
+    │       ├── Download via --serve-artifacts proxy
+    │       ├── Serving-side quality gate:
+    │       │     test_pk >= MIN_TEST_PK (default 0.10)
+    │       │     test_pk not worse than current by > 0.05
+    │       ├── PASS → swap model under _model_lock (zero downtime)
+    │       └── FAIL → skip version, log, wait for next poll
+    │
+    └── Download fails → mark version as _last_failed_version, skip next poll
+```
+
+Model load priority at startup:
+
+1. MLflow `@production` alias (via artifact proxy)
+2. MLflow `@fallback` alias (if production fails)
+3. Local fine-tuned weights at `MODEL_PATH`
+4. Base `roberta-base` weights (warning logged)
+
+The decision threshold (`best_threshold`) is read from the model version's
+MLflow tags on every load — it is never hardcoded in serving code.
+
+---
+
+## Data Stores
+
+Two stores co-exist depending on `DATABASE_URL`:
+
+| Store | When used | What it holds |
+|---|---|---|
+| `PostgresRecapStore` | `DATABASE_URL` is set | Meetings, utterances, segment summaries, feedback events |
+| `RecapStore` (JSONL) | No DB / standalone | Same data in `/data/*.jsonl` files — drop-in fallback |
+
+`storage.py` exposes the same method signatures for both. Swapping to
+Postgres is a one-line env change — no API surface changes.
+
+---
+
+## Monitoring
+
+### Prometheus metrics (collected in `MetricsDeployment`)
+
+| Metric | Type | Description |
+|---|---|---|
+| `jitsi_requests_total{endpoint,status}` | Counter | Request count by endpoint and status |
+| `jitsi_request_latency_seconds{endpoint}` | Histogram | Latency distribution per endpoint |
+| `jitsi_active_requests{endpoint}` | Gauge | In-flight requests |
+| `jitsi_boundary_confidence` | Histogram | RoBERTa output probability distribution |
+| `jitsi_segments_detected_total` | Counter | Topic boundaries detected |
+| `jitsi_summary_length_chars` | Histogram | Mistral output length |
+| `jitsi_gpu_memory_used_mb` | Gauge | VRAM used (pynvml → torch fallback) |
+| `jitsi_gpu_memory_total_mb` | Gauge | VRAM total |
+| `jitsi_gpu_utilization_percent` | Gauge | GPU utilization % |
+| `jitsi_cpu_utilization_percent` | Gauge | CPU utilization % |
+| `jitsi_ram_used_mb` | Gauge | RAM used |
+| `jitsi_model_loaded{model_name,model_version}` | Gauge | 1 when model is active |
+| `jitsi_sla_violations_total{endpoint,sla_type}` | Counter | SLA breaches |
+| `jitsi_recap_duration_seconds` | Histogram | Full /recap pipeline duration |
+| `jitsi_recap_segments_per_meeting` | Histogram | Segments per recap |
+| `jitsi_feedback_corrections_total{action}` | Counter | User corrections by type |
+| `jitsi_feedback_events_total` | Gauge | Total feedback rows in Postgres |
+| `jitsi_feedback_pending` | Gauge | Corrections above last retrain watermark |
+| `jitsi_retrain_triggered_total` | Gauge | Retrain trigger events |
+| `jitsi_retrain_completed_total` | Gauge | Completed retrain runs |
+| `jitsi_retrain_passed_total` | Gauge | Runs that passed quality gates |
+| `jitsi_retrain_last_f1` | Gauge | F1 from last completed retrain |
+| `jitsi_retrain_last_pk` | Gauge | Pk from last completed retrain |
+
+### Alerting rules → automated rollback
+
+Alertmanager routes **critical** alerts to `POST /rollback`:
+
+| Alert | Condition | Severity | Action |
 |---|---|---|---|
-| `GET` | `/health` | HealthDeployment | System health + device info |
-| `POST` | `/segment` | SegmenterDeployment | Raw boundary detection (single window) |
-| `POST` | `/summarize` | SummarizerDeployment | Raw segment summarization |
-| `POST` | `/recap` | RecapPipelineDeployment | Full pipeline: utterances → segmented recap + DB write |
-| `GET` | `/metrics` | MetricsDeployment | Prometheus metrics |
-| `GET` | `/ui` | RecapUIDeployment | Browser recap viewer (reads from DB) |
-| `GET` | `/api/meetings` | RecapDeployment | List all processed meetings from DB |
-| `GET` | `/api/recap/{meeting_id}` | RecapDeployment | Get recap for a meeting from DB |
-| `POST` | `/api/feedback` | RecapDeployment | Submit boundary correction (written to DB) |
-| `POST` | `/retrain` |
-| `POST` | `/rollback` |
----
+| `HighErrorRate` | Error rate > 10% for 5 min | critical | → `/rollback` |
+| `SegmentSLAViolation` | p95 latency > 2 s | warning | page only |
+| `SummarizeSLAViolation` | p95 latency > 30 s | warning | page only |
+| `RetrainingThresholdReached` | pending corrections ≥ threshold | info | → `/retrain` (log) |
+| `GPUMemoryHigh` | VRAM > 90% for 10 min | warning | page only |
+| `ModelNotLoaded` | `jitsi_model_loaded == 0` for 5 min | critical | → `/rollback` |
 
-### Request Flow
+### Grafana dashboards
 
-```
-POST /recap
-  │
-  ├─ _validate(utterances)
-  │    ├─ empty → 400
-  │    ├─ all < 20 chars → 400
-  │    └─ < 2 valid → 400
-  │
-  ├─ _build_windows(utterances, window_size=7)
-  │    └─ Sliding 7-utterance windows centred on each transition point
-  │       "[SPEAKER_X]: text ..." formatted string per window
-  │
-  ├─ [parallel] segmenter.predict_single.remote(window) × N-1 windows
-  │    └─ @serve.batch groups up to 8 simultaneous calls → 1 GPU forward pass
-  │       Returns: { is_boundary, boundary_probability, t_boundary }
-  │
-  ├─ _assemble_segments(utterances, decisions)
-  │    └─ Splits utterance list at every is_boundary=true position
-  │       Produces M segments with t_start, t_end, utterances[]
-  │
-  ├─ [sequential] summarizer.__call__.remote(segment) × M segments
-  │    └─ One Mistral call per segment (JSON extraction, up to 10 retries)
-  │       Returns: { topic_label, summary_bullets[], status }
-  │
-  ├─ store.save_recap(meeting_id, recap)    → SQLite recaps table
-  ├─ store.save_utterances(meeting_id, ..)  → SQLite utterances table
-  │
-  └─ JSONResponse: { meeting_id, generated_at, total_segments,
-                     processing_time_seconds, warnings[], recap[] }
-```
+- **Serving overview** — request rate, latency percentiles, error rate, active requests
+- **Model health** — boundary confidence distribution, segments detected, model version in use
+- **Infrastructure** — GPU VRAM, GPU utilization, CPU, RAM
+- **Retraining pipeline** — feedback accumulation, pending corrections, retrain pass/fail, last F1/Pk
+- **SLA tracker** — real-time SLA violation counters per endpoint
+
+Grafana: `http://<FLOATING_IP>:3000` (admin / admin)
 
 ---
 
-### MLflow Integration
+## Safeguarding (Serving Layer)
 
-**Registry:** `http://192.5.86.182:5000`
-**Model name:** `jitsi-topic-segmenter`
-**Aliases:** `@production` (V1, threshold 0.40), `@fallback` (V2, threshold 0.35)
+The serving layer implements the following safeguarding principles within
+its own scope. The full cross-team safeguarding plan is in the root README.
 
-**Environment variables:**
-```bash
-MLFLOW_TRACKING_URI=http://192.5.86.182:5000
-MLFLOW_MODEL_NAME=jitsi-topic-segmenter
-MODEL_ALIAS=production
-MODEL_RELOAD_INTERVAL_SECONDS=300
-```
+### Fairness
+- Confidence scores (`boundary_probability`) are returned on every `/segment`
+  response and stored in `utterance_transitions.pred_boundary_prob`.
+  The Grafana confidence histogram exposes model calibration drift over time.
+- Alerting is triggered if the confidence distribution shifts significantly
+  (high proportion of predictions near 0.5 indicates model uncertainty).
+- The decision threshold is read from the MLflow model version tag
+  (`best_threshold`) — it is set by the training pipeline using a
+  threshold-sweep on the validation set, ensuring fairness across meeting
+  sizes and speaker counts, not a fixed value tuned by feel.
 
-**Fallback chain on startup:**
-```
-MLflow @production → MLflow @fallback → /models/roberta-seg (local) → roberta-base (HuggingFace)
-```
+### Transparency
+- Every API response includes `model_version` (e.g. `mlflow@production_v7`),
+  so clients and logs always know which model produced a prediction.
+- `/health` exposes the currently loaded version and threshold.
+- Model load events (initial load, hot-reload, fallback activation) are
+  printed to container logs and reflected in `jitsi_model_loaded` Grafana panel.
+- The recap UI shows the model version alongside each recap.
 
-**Hot-reload:** Background thread wakes every 300s, checks MLflow version, swaps model under `_model_lock` without actor restart.
+### Explainability
+- `/segment` returns `boundary_probability` alongside the binary `is_boundary`
+  decision, giving downstream systems and human reviewers the raw model
+  confidence — not just a yes/no verdict.
+- The recap UI surfaces the confidence score on each segment boundary, making
+  low-confidence splits visible to users before they give feedback.
+
+### Accountability
+- All user feedback events are written to Postgres `feedback_events` with
+  `before_payload` and `after_payload`, creating an auditable correction trail.
+- Rollback events are logged: the `/rollback` endpoint records which alerts
+  fired, which model version was replaced, and which version it rolled back to.
+- `jitsi_retrain_triggered_total`, `jitsi_retrain_completed_total`,
+  `jitsi_retrain_passed_total`, and `jitsi_retrain_failed_total` make the
+  full retraining lifecycle visible in Grafana.
+
+### Robustness
+- **Three-layer model fallback at startup**: MLflow `@production` →
+  MLflow `@fallback` → local fine-tuned weights → base `roberta-base`.
+  The server never starts without a model.
+- **Serving-side quality gate on hot-reload**: a new model version is only
+  swapped in if `test_pk >= MIN_TEST_PK` AND `test_pk` is not more than
+  0.05 worse than the currently serving model. This prevents a regression
+  introduced by a bad retrain from reaching production even if it passed
+  training-side gates.
+- **Rollback cooldown**: 5-minute cooldown on `/rollback` prevents alert
+  storms from triggering repeated alias swaps.
+- **`_last_failed_version` tracking**: if a model version download fails,
+  serving skips that version on the next poll rather than retrying
+  indefinitely and blocking future promotions.
+- **Thread-safe model swap**: `_model_lock` ensures in-flight requests
+  complete against the old model while the new one loads — no torn reads.
+
+### Privacy
+- Speaker identity is abstracted to `[SPEAKER_A/B/C]` tokens by
+  `format_window_for_roberta()` before any text reaches the model.
+  Raw speaker names or participant IDs never appear in model inputs.
+- Feedback payloads stored in Postgres contain utterance indices and
+  boundary labels — not participant identity.
 
 ---
 
-### Metrics & Monitoring
+## Serving-Side Monitoring Responsibilities
 
-Prometheus scrapes `ray-serve:8000/metrics` every 5 seconds.
+As per the project guidelines, the serving role owns:
 
-**Grafana Dashboard panels:**
+1. **Model output monitoring** — `jitsi_boundary_confidence` histogram
+   tracks distribution drift; `jitsi_segments_detected_total` tracks
+   whether the model is predicting boundaries at a realistic rate.
 
-| Section | Panel | Metric |
-|---|---|---|
-| System Overview | Total Requests | `jitsi_requests_total` |
-| System Overview | Success Rate | success/total ratio |
-| System Overview | GPU Memory | `jitsi_gpu_memory_used_mb` |
-| System Overview | SLA Violations | `jitsi_sla_violations_total` |
-| Latency | Segmentation p50/p95/p99 | `jitsi_request_latency_seconds{endpoint="segment"}` |
-| Latency | Summarization p50/p95/p99 | `jitsi_request_latency_seconds{endpoint="summarize"}` |
-| Throughput | req/s by endpoint | `rate(jitsi_requests_total[1m])` |
-| Model Metrics | Confidence Distribution | `jitsi_boundary_confidence` |
-| Model Metrics | Avg Batch Size | `jitsi_batch_size` |
-| Recap Pipeline | Recap Duration | `jitsi_recap_duration_seconds` |
-| Recap Pipeline | Segments per Meeting | `jitsi_recap_segments_per_meeting` |
-| System Resources | GPU Memory Over Time | `jitsi_gpu_memory_used_mb` |
-| System Resources | CPU & RAM | `jitsi_cpu_utilization_percent`, `jitsi_ram_used_mb` |
+2. **Operational metrics** — latency histograms, error rate counters,
+   active request gauges, GPU/CPU/RAM gauges, SLA violation counters.
 
-**Alert rules:**
+3. **User feedback monitoring** — `jitsi_feedback_corrections_total`
+   by action type; `jitsi_feedback_pending` tracks how many corrections
+   are waiting above the last retrain watermark.
 
-| Alert | Condition | Severity |
-|---|---|---|
-| `SegmentationLatencyHigh` | Segmentation p95 > 2s for 2 min | critical + rollback |
-| `SummarizationLatencyHigh` | Summarization p95 > 30s for 2 min | warning |
-| `RecapLatencyHigh` | Full recap p95 > 5 min for 2 min | critical + rollback |
-| `HighErrorRate` | Error rate > 5% for 3 min | critical + rollback |
-| `ServiceDown` | `jitsi_requests_total` metric absent for 10 min | critical |
-| `GPUMemoryHigh` | GPU memory > 21504 MB (87.5% of 24 GB) for 5 min | warning |
-| `CPUHigh` | CPU > 85% for 5 min | warning |
-| `ModelNotLoaded` | `jitsi_model_loaded == 0` for 1 min | critical |
-| `LowConfidenceScores` | Median boundary confidence < 0.3 for 3 min | warning + investigate |
-| `RetrainingThresholdReached` | 500 corrections accumulated for 5 min | warning + retrain |
-| `HighBoundaryCorrections` | 10+ boundary removals in 1 hour | warning + investigate |
-| `FeedbackDriftSpiking` | >30% of recap segments manually corrected for 5 min | critical + investigate |
+4. **Rollback trigger** — Alertmanager fires `POST /rollback` on
+   `HighErrorRate` or `ModelNotLoaded`. The rollback swaps `@production`
+   ↔ `@fallback` in MLflow; hot-reload picks up the new alias within
+   5 minutes without a container restart.
+
+5. **Promotion trigger** — manual promotion from `candidate` → `production`
+   in MLflow UI causes hot-reload to pick up the new version automatically.
+   Automated promotion occurs when `retrain_watcher.py` (Training service)
+   registers a model that passes all quality gates and sets the `candidate`
+   alias; the serving hot-reload then validates it again with the
+   serving-side quality gate before swapping.
 
 ---
 
-## Database & Persistence
+## Running the Stack
 
-### Overview
-
-All meeting data is persisted in a **SQLite database** managed by `RecapStore` in `ray_serve/storage.py`. The database file lives inside the container at the path configured by `DB_PATH` (default: `recaps.db` in the working directory `/app`). To survive container restarts, mount it as a volume (see below).
-
-### Schema
-
-```
-recaps
-┌──────────────┬──────────────┬───────────────────────┐
-│ meeting_id   │ data         │ created_at             │
-│ TEXT (PK)    │ TEXT (JSON)  │ TEXT (ISO timestamp)   │
-└──────────────┴──────────────┴───────────────────────┘
-
-utterances
-┌──────────────┬─────────┬──────────────┬─────────┬───────┐
-│ meeting_id   │ speaker │ text         │ t_start │ t_end │
-│ TEXT         │ TEXT    │ TEXT         │ REAL    │ REAL  │
-└──────────────┴─────────┴──────────────┴─────────┴───────┘
-```
-
-### RecapStore operations
-
-| Method | Description |
-|---|---|
-| `save_recap(meeting_id, recap_json)` | Upserts full recap blob. Duplicate `meeting_id` overwrites. |
-| `save_utterances(meeting_id, utterances)` | Inserts all utterances for a meeting. |
-| `get_recap(meeting_id)` | Returns the recap JSON for a given meeting, or `None`. |
-| `list_meetings()` | Returns all `meeting_id` values with their `created_at` timestamps. |
-
-### Who reads and writes the DB
-
-```
-RecapPipelineDeployment (/recap)
-    └── WRITES → save_recap() + save_utterances()   on every successful recap
-
-RecapDeployment (/api/*)
-    └── READS  → get_recap(), list_meetings()
-    └── WRITES → feedback corrections via /api/feedback
-
-RecapUIDeployment (/ui)
-    └── serves recap_ui.html; browser JS fetches /api/recap/{id} to display data
-```
-
-### Persisting the database across container restarts
-
-By default `recaps.db` lives inside the container and is lost on restart. To persist it, add a bind-mount in `docker-compose.yml`:
-
-```yaml
-ray-serve:
-  volumes:
-    - ./models:/models
-    - ./recaps.db:/app/recaps.db    # add this line
-```
-
-Or point to a custom path via environment variable:
+### Start (via docker compose)
 
 ```bash
-DB_PATH=/data/recaps.db
-```
-
-### Connecting to the database directly
-
-```bash
-# Open an interactive SQLite shell inside the running container
-docker exec -it jitsi-ray-serve sqlite3 recaps.db
-
-# Useful queries
-.tables
-SELECT meeting_id, created_at FROM recaps ORDER BY created_at DESC LIMIT 10;
-SELECT COUNT(*) FROM utterances WHERE meeting_id = 'meeting_123';
-SELECT data FROM recaps WHERE meeting_id = 'meeting_123';
-```
-
----
-
-## What We Tried & Why We Use Ray Serve
-
-### Approach 1 — FastAPI (baseline)
-
-We started with a plain **FastAPI + PyTorch** server (`app/`). It handles `/segment` and `/summarize` as independent stateless HTTP endpoints. We also exported the RoBERTa model to **ONNX** and benchmarked all four variants: PyTorch CPU, PyTorch GPU, ONNX CPU, ONNX GPU. FastAPI is simple and easy to reason about, but every request runs serially — concurrent Jitsi meetings would queue up behind each other with no way to share a single GPU pass across requests.
-
-### Approach 2 — Triton Inference Server
-
-We configured **Triton** (`triton_models/roberta_segmenter/config.pbtxt`) with ONNX backend, dynamic batching (preferred sizes 64/128/256, 5ms queue delay), and a max batch of 256. Triton solved the batching problem well for RoBERTa, but it only handles the segmenter — Mistral-7B cannot run inside Triton (no GGUF/llama.cpp support). That meant we still needed a separate FastAPI process for summarization, leaving us with two independent services and no clean way to chain Stage A → Stage B in a single request without a wrapper orchestrator.
-
-### Why We Chose Ray Serve
-
-Ray Serve solves all of this in one framework:
-
-| Requirement | FastAPI | Triton | Ray Serve |
-|---|---|---|---|
-| GPU dynamic batching for RoBERTa | ❌ | ✅ | ✅ (`@serve.batch`) |
-| Mistral-7B summarization | ✅ | ❌ | ✅ |
-| Stage A → B pipeline in one request | ❌ | ❌ | ✅ (deployment handles) |
-| Fractional GPU sharing (0.3 + 0.7) | ❌ | ❌ | ✅ |
-| MLflow model registry + hot-reload | ❌ | ❌ | ✅ |
-| Built-in Prometheus metrics | ❌ | Partial | ✅ |
-| SQLite persistence | ❌ | ❌ | ✅ |
-| Single container, single port | ❌ | ❌ | ✅ |
-
----
-
-## FastAPI Baseline
-
-Located in `app/`. Stateless single-process serving kept for benchmarking comparison against Ray Serve.
-
-**Serving modes** (via `SERVING_MODE` env var):
-
-| Mode | Backend | Use Case |
-|---|---|---|
-| `pytorch` | Native PyTorch | GPU reference |
-| `onnx_cpu` | ONNX Runtime CPU | CPU-only deployment |
-| `onnx_gpu` | ONNX Runtime CUDA | GPU with ONNX optimization |
-
-Key difference from Ray Serve: no batching, no deployment-to-deployment calls, no MLflow integration, no persistence.
-
----
-
-## Docker Compose Services
-
-```bash
-# Start the full Ray Serve stack
-cd serving
 docker compose up -d ray-serve prometheus grafana alertmanager node-exporter
-
-# FastAPI baselines for comparison
-docker compose up -d api_pytorch_gpu          # Port 8000
-docker compose up -d api_onnx_cpu             # Port 8001
-docker compose up -d api_pytorch_cpu          # Port 8002
-docker compose up -d api_pytorch_multiworker  # Port 8004 (4 uvicorn workers)
-
-# With Triton (optional — requires --profile triton)
-docker compose --profile triton up -d
 ```
 
-**Port map:**
+The `ray-serve` container runs `serve.py` as entrypoint and
+`metrics_server.py` as a sidecar process.
 
-| Service | Port | Description |
-|---|---|---|
-| `ray-serve` | 8000 | Ray Serve (primary) |
-| `ray-dashboard` | 8265 | Ray cluster dashboard |
-| `prometheus` | 9090 | Metrics collector |
-| `grafana` | 3000 | Dashboard UI |
-| `alertmanager` | 9093 | Alert routing |
-| `node-exporter` | 9100 | Host system metrics |
-| `api_pytorch_gpu` | 8000 | FastAPI PyTorch GPU |
-| `api_pytorch_cpu` | 8002 | FastAPI PyTorch CPU (CUDA disabled) |
-| `api_onnx_cpu` | 8001 | FastAPI ONNX CPU |
-| `api_onnx_gpu` | 8003 | FastAPI ONNX GPU |
-| `api_pytorch_multiworker` | 8004 | FastAPI 4-worker GPU |
-| `triton` | 8100–8102 | Triton Inference Server |
-
-**Service notes:**
-- `api_pytorch_cpu` — forces `CUDA_VISIBLE_DEVICES=""` to disable GPU
-- `api_pytorch_multiworker` — runs `uvicorn --workers 4` for parallel GPU utilisation testing
-- `worker` — async background recap processor (`recap_worker.py`), depends on `api_pytorch`
-- `triton` — only starts with `--profile triton`; uses `nvcr.io/nvidia/tritonserver:23.10-py3`
-
----
-
-## Container Build
-
-The Ray Serve container is built from `ray_serve/Dockerfile.ray`:
-
-```
-Base image:  pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
-```
-
-**Build steps:**
-1. System packages: `curl`, `git`, `build-essential`, `cmake` (required to compile llama-cpp with CUDA)
-2. `pip install -r requirements_ray.txt`
-3. `llama-cpp-python==0.2.56` compiled with `CMAKE_ARGS="-DLLAMA_CUBLAS=on"` (enables full GPU offload)
-4. Copies `ray_serve/` into `/app/ray_serve/`
-5. Exposes port `8000`
-6. Entrypoint: `python3 ray_serve/serve.py`
-
-> `llama-cpp-python` compiles from source during build (~5 min). The `cmake` + `build-essential` packages are required for this step — do not remove them from the Dockerfile.
-
-**Rebuild after code changes:**
-```bash
-cd ML-Sys-Ops-Project
-git pull
-cd serving
-docker compose build ray-serve
-docker compose up -d --force-recreate ray-serve
-```
-
----
-
-## Setup & Deployment
-
-### First-time setup on Chameleon Cloud
+### Verify
 
 ```bash
-git clone <repo-url>
-cd ML-Sys-Ops-Project/serving
-bash setup.sh
+curl http://localhost:8000/health
+curl http://localhost:8000/metrics   # Prometheus text
 ```
 
-`setup.sh` installs Docker, NVIDIA Container Toolkit, downloads model weights, and starts all containers.
-
-**Chameleon-specific prerequisites (bare-metal only):**
-```bash
-# python3-pip is not pre-installed on Chameleon bare-metal images
-sudo apt install python3-pip -y
-
-# setup.sh step [5] (model download) uses pip — must be on PATH first
-# After install, re-run setup.sh or run the download step manually:
-pip3 install transformers torch --quiet
-python3 -c "from transformers import RobertaTokenizer; RobertaTokenizer.from_pretrained('roberta-base')"
-```
-
-### Verify deployment
+### Benchmark
 
 ```bash
-curl http://192.5.87.115:8000/health
-curl http://192.5.87.115:9090/api/v1/targets   # Prometheus targets
+# 200 /segment requests, sequential
+python3 benchmark/benchmark_ray.py --url http://localhost:8000 --n 200
+
+# 200 /segment requests, 5 concurrent
+python3 benchmark/benchmark_ray.py --url http://localhost:8000 --n 200 --concurrency 5
+
+# Also benchmark /summarize
+python3 benchmark/benchmark_ray.py --url http://localhost:8000 --n 50 --summarize
+
+# Full 800-window meeting simulation (SLA: < 300 s)
+python3 benchmark/benchmark_ray.py --url http://localhost:8000 --full-meeting
+
+# Full /recap pipeline (segment + summarize)
+python3 benchmark/benchmark_ray.py --url http://localhost:8000 --recap
 ```
+
+### Force a rollback manually
+
+```bash
+curl -X POST http://localhost:8000/rollback \
+  -H "Content-Type: application/json" \
+  -d '{"alerts": [{"labels": {"alertname": "manual"}}]}'
+```
+
+### Reload model from MLflow (without restart)
+
+Update the `@production` alias in MLflow UI → wait up to 5 minutes, or
+reduce `MODEL_RELOAD_INTERVAL_SECONDS` env var for faster polling during
+testing.
 
 ---
 
@@ -668,152 +688,23 @@ curl http://192.5.87.115:9090/api/v1/targets   # Prometheus targets
 
 | Variable | Default | Description |
 |---|---|---|
-| `MLFLOW_TRACKING_URI` | `http://192.5.86.182:5000` | MLflow server URL |
-| `MLFLOW_MODEL_NAME` | `jitsi-topic-segmenter` | Registered model name |
-| `MODEL_ALIAS` | `production` | MLflow alias to load (`production` or `fallback`) |
-| `MODEL_RELOAD_INTERVAL_SECONDS` | `300` | Hot-reload poll interval (seconds) |
-| `MODEL_PATH` | `roberta-base` | Local path to fine-tuned RoBERTa checkpoint |
-| `BOUNDARY_THRESHOLD` | `0.5` | RoBERTa boundary decision threshold |
-| `LLM_MODEL_PATH` | `/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf` | Mistral GGUF path |
-| `MAX_SEGMENT_UTTERANCES` | `200` | Max utterances per segment sent to LLM |
-| `DB_PATH` | `recaps.db` | SQLite database file path |
-| `SERVING_MODE` | `pytorch` | FastAPI only: `pytorch` / `onnx_cpu` / `onnx_gpu` |
-| `FLOATING_IP` | `` | Public IP of Chameleon serving node |
+| `MODEL_PATH` | `roberta-base` | Local model weights path (fallback) |
+| `LLM_MODEL_PATH` | `""` | Mistral weights path |
+| `BOUNDARY_THRESHOLD` | `0.35` | Default boundary threshold (overridden by MLflow tag) |
+| `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow server |
+| `MODEL_ALIAS` | `production` | MLflow alias to serve |
+| `MODEL_RELOAD_INTERVAL_SECONDS` | `300` | Hot-reload poll interval |
+| `MIN_TEST_PK` | `0.10` | Minimum Pk score for serving-side quality gate |
+| `DATABASE_URL` | `""` | Postgres connection string (uses JSONL fallback if unset) |
+| `DATA_DIR` | `/data` | JSONL store directory |
 
 ---
 
-## Benchmarking
+## SLA Summary
 
-```bash
-# Ray Serve load test (100 requests, 10 concurrent)
-docker exec jitsi-ray-serve python3 benchmark_ray.py \
-  --url http://localhost:8000/segment \
-  --n 100 --concurrency 10
-
-# FastAPI baseline
-python3 benchmark/benchmark.py \
-  --url http://localhost:8000/segment \
-  --label pytorch_gpu --n 200
-```
-
-**Observed performance — Quadro RTX 6000 (measured on Chameleon node `192.5.87.115`):**
-
-| Metric | Concurrency 1 | Concurrency 5 |
+| Endpoint | SLA | Alert threshold |
 |---|---|---|
-| Segmentation p50 | 96.4 ms | 157.8 ms |
-| Segmentation p95 | 100.3 ms | 173.2 ms |
-| Throughput | 10.34 req/s | 31.40 req/s |
-| Full `/recap` (12 utterances) | ~1.2 s | — |
-| GPU memory (total, nvidia-smi) | ~6.1 GB | — |
-| SLA (2s for segmentation) | Never breached | Never breached |
-
-> **Note:** `jitsi_gpu_memory_used_mb` currently reads 0 in Grafana. This is a known issue — `torch.cuda.memory_allocated()` returns 0 in MetricsDeployment because it runs in a separate Ray worker process. Actual GPU usage is visible via `nvidia-smi` (~6.1 GB). Fix requires switching to `pynvml` for system-wide GPU queries (not yet applied).
-
----
-
-## Edge Cases & Validation
-
-| Input | Behaviour |
-|---|---|
-| Empty utterances list | `400` — `"Empty transcript — no utterances provided"` |
-| All utterances < 20 chars | `400` — `"All utterances under 20 chars after cleaning"` |
-| Only 1 valid utterance | `400` — `"meeting too short for inference"` |
-| 2–6 utterances | `200` + `warnings: ["short_meeting_low_confidence"]` |
-| Single speaker | `200` + `warnings: ["single_speaker"]` |
-| Duration < 10s | `200` + `warnings: ["very_short_meeting"]` |
-| > 2000 utterances | Truncated to 2000 + warning |
-| Unicode / emoji | Cleaned before inference, no crash |
-| Duplicate `meeting_id` | Overwrites previous entry in SQLite |
-| Missing `text` field | Treated as empty string, filtered out |
-
----
-
-## Monitoring Stack
-
-```
-monitoring/
-├── prometheus.yml        # Scrapes: ray-serve:8000, node-exporter:9100
-├── alerts.yml            # 12 alert rules across 4 groups
-├── alertmanager.yml      # Alert routing config
-└── grafana/
-    └── provisioning/
-        ├── dashboards/
-        │   └── jitsi-serving.json    # Dashboard definition (auto-loaded)
-        └── datasources/
-            └── prometheus.yml        # Datasource: http://prometheus:9090
-```
-
-
-## Troubleshooting
-
-### Container restart loop
-```bash
-docker logs jitsi-ray-serve 2>&1 | tail -50
-```
-Common cause: `max_ongoing_requests` in serve.py — Ray 2.9.3 uses `max_concurrent_queries` instead.
-
-### MLflow model not loading
-```bash
-docker exec jitsi-ray-serve env | grep MLFLOW
-# Must show: MLFLOW_TRACKING_URI=http://192.5.86.182:5000
-docker exec jitsi-ray-serve curl -s http://192.5.86.182:5000/health
-docker logs jitsi-ray-serve 2>&1 | grep -E "MLflow|production|fallback|Ready on"
-```
-
-### GPU not used for inference
-```bash
-nvidia-smi
-# Look for: ray::ServeReplica:segmenter and ray::ServeReplica:summarizer with GPU memory
-docker logs jitsi-ray-serve 2>&1 | grep "Ready on"
-# Must show: [segmenter] Ready on cuda
-```
-
-### Grafana showing "No data"
-```bash
-# Verify Prometheus scrapes port 8000 (not 9091)
-curl -s http://192.5.87.115:9090/api/v1/targets | python3 -c "
-import json,sys; t=json.load(sys.stdin)
-[print(tg['scrapeUrl'], tg['health']) for tg in t['data']['activeTargets']]
-"
-# Fix if wrong:
-sed -i 's/ray-serve:9091/ray-serve:8000/' monitoring/prometheus.yml
-docker compose restart prometheus
-```
-
-### Database issues
-```bash
-# Inspect the SQLite database directly
-docker exec -it jitsi-ray-serve sqlite3 recaps.db ".tables"
-docker exec -it jitsi-ray-serve sqlite3 recaps.db \
-  "SELECT meeting_id, created_at FROM recaps ORDER BY created_at DESC LIMIT 5;"
-
-# Database lost after restart? Add a volume mount in docker-compose.yml:
-#   volumes:
-#     - ./models:/models
-#     - ./recaps.db:/app/recaps.db
-
-# Check which DB path the container is using
-docker exec jitsi-ray-serve env | grep DB_PATH
-```
-
-### UI showing "Failed to fetch" or wrong IP
-```bash
-grep "API_BASE" ray_serve/recap_ui.html
-# Must show: const API_BASE = '';  (relative URL, no hardcoded IP)
-```
-
-### LLM returning draft status
-```bash
-# Check model file exists
-docker exec jitsi-ray-serve ls -lh /models/*.gguf
-# If missing, re-download:
-bash setup.sh
-# Verify path matches env var
-docker exec jitsi-ray-serve env | grep LLM_MODEL_PATH
-```
-
-### Models directory empty after setup
-```bash
-ls -lh models/
-bash setup.sh   # Re-run bootstrap to re-download models
-```
+| `/segment` | p95 < 2 000 ms | warning at 2 s, critical rollback at 10% error rate |
+| `/summarize` | p95 < 30 s | warning at 30 s |
+| `/recap` (800 utterances) | < 300 s | checked in benchmark, not auto-alerted |
+| Model hot-reload | < 5 min after alias change | `ModelNotLoaded` alert at 5 min |
