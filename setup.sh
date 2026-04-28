@@ -644,10 +644,10 @@ try:
     mv1 = client.create_model_version('jitsi-topic-segmenter',
         source='s3://proj07-mlflow-artifacts/1/fdc4b6d0966b4aa9bbc6f95c01b5fcda/artifacts/model',
         description='Optuna trial #10, test_pk=0.213, test_f1=0.232')
-    client.set_registered_model_alias('jitsi-topic-segmenter', 'fallback', mv1.version)
-    print(f'fallback -> v{mv1.version}')
+    client.set_registered_model_alias('jitsi-topic-segmenter', 'backup', mv1.version)
+    print(f'backup -> v{mv1.version}')
 except Exception as e:
-    print(f'fallback: {e}')
+    print(f'backup: {e}')
 
 try:
     mv2 = client.create_model_version('jitsi-topic-segmenter',
@@ -657,6 +657,15 @@ try:
     print(f'production -> v{mv2.version}')
 except Exception as e:
     print(f'production: {e}')
+
+try:
+    mv3 = client.create_model_version('jitsi-topic-segmenter',
+        source='s3://proj07-mlflow-artifacts/1/f30f3587634d4ac49be2328827742a17/artifacts/model',
+        description='roberta-base frozen backbone (head-only fine-tune), test_pk=0.253, test_f1=0.127')
+    client.set_registered_model_alias('jitsi-topic-segmenter', 'fallback', mv3.version)
+    print(f'fallback -> v{mv3.version}')
+except Exception as e:
+    print(f'fallback: {e}')
 print('Registry restore complete')
 " && ok "Model registry restored — production aliases set"
     else
@@ -848,6 +857,7 @@ if is_truthy "${START_MLFLOW_SERVICES}"; then
     echo "  Registered models:"
     echo "    @production -> distilroberta full finetune (test_pk=0.286)"
     echo "    @fallback   -> Optuna best (test_pk=0.213)"
+    echo "    @backup     -> roberta-base frozen backbone (test_pk=0.253, peak_vram=1.28GB)"
     echo ""
 fi
 if is_truthy "${START_DATA_SERVICES}"; then
