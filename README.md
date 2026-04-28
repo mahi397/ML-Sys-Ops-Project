@@ -18,9 +18,10 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       Data Pipeline  (data/)                        │
-│  jitsi_transcript_receiver → stage1_payload → stage1_forward        │
-│                            → stage2_input   → stage2_forward        │
-│  user_summary_materialize · retraining_dataset_service              │
+│  jitsi_transcript_receiver → db_task_worker                         │
+│    → stage1_payload_service → stage1_forward_service                │
+│    → stage2_input_service   → stage2_forward_service                │
+│  user_summary_materialize_service · retraining_dataset_service      │
 │  production_drift_monitor                                           │
 └──────────────┬──────────────────────────────────┬───────────────────┘
                │  inference requests              │  feedback events
@@ -33,7 +34,7 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 │  Mistral-7B summarizer (0.7 GPU) │  online_eval  (hourly)            │
 │  MLflow hot-reload       │       │  offline_eval  (on demand)        │
 │  /recap · /segment       │       └──────────────┬────────────────────┘
-│  /summarize · /feedback  │                      │ registers candidate
+│  /summarize · /api/*     │                      │ registers candidate
 └──────────────────────────┘                      ▼
                                    ┌───────────────────────────────────┐
                                    │  MLflow Registry  :5000           │
@@ -53,16 +54,18 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 
 | Service | Port | Description |
 |---------|------|-------------|
-| Ray Serve API | `:8000` | `/health` `/recap` `/segment` `/summarize` `/feedback` |
+| Ray Serve API | `:8000` | `/health` `/segment` `/summarize` `/api/feedback` `/api/meetings` `/api/recap/{id}` `/metrics` |
 | Ray Dashboard | `:8265` | Ray cluster dashboard |
 | MLflow | `:5000` | Experiment tracking + model registry |
 | Grafana | `:3000` | Serving + infrastructure dashboards |
 | Prometheus | `:9090` | Metrics collector |
 | Alertmanager | `:9093` | Alert routing |
+| Node Exporter | `:9100` | Host-level system metrics (CPU, RAM, disk) |
 | Postgres | `:5432` | Application + MLflow database |
 | MinIO | `:9000` | Ray checkpoint object store |
 | MinIO Console | `:9001` | MinIO UI |
 | Adminer | `:5050` | Postgres admin UI |
+| Ingest API | `:9099` | `jitsi_transcript_receiver` HTTP endpoint |
 | Jitsi Meet | `:8443` | HTTPS meeting portal |
 | Jitsi HTTP | `:8088` | HTTP (redirects to HTTPS) |
 
@@ -76,27 +79,40 @@ ML-Sys-Ops-Project/
 ├── setup.sh                    # One-command bootstrap for a fresh Chameleon GPU node
 ├── .env.example                # Global environment template — copy to .env
 │
+├── contracts/                  # Input/output JSON schema samples
+│   ├── input_mistral.json      # Stage B summarizer request schema
+│   ├── output_mistral.json     # Stage B summarizer response schema
+│   ├── input_roberta.json      # Stage A segmenter request schema
+│   └── output_roberta.json     # Stage A segmenter response schema
+│
 ├── serving/                    # Ray Serve, RoBERTa + Mistral, Prometheus/Grafana
-│   ├── ray_serve/              # serve.py, storage.py, Dockerfile.ray
-│   ├── monitoring/             # prometheus.yml, alerts.yml, Grafana dashboards
+│   ├── ray_serve/              # serve.py, storage.py, metrics_server.py, Dockerfile.ray
+│   ├── monitoring/             # prometheus.yml, alerts.yml, alertmanager.yml, Grafana dashboards
+│   ├── app/                    # FastAPI baseline (benchmarking only)
+│   ├── benchmark/              # Load-testing scripts (Ray + Triton)
+│   ├── recap_ui/               # Static browser recap viewer
 │   └── models/                 # Downloaded model weights (gitignored)
 │
 ├── train/                      # PyTorch fine-tuning, Ray Train, MLflow
-│   ├── retrain.py              # Main training (fault-tolerant) + evaluation + MLflow registration
-│   ├── retrain_watcher.py      # Feedback watcher daemon
-│   ├── online_eval.py          # Hourly correction-rate monitoring
-│   ├── offline_eval.py         # On-demand test-set evaluation
-│   └── Dockerfile              # Training container image
+│   ├── retrain.py              # Main training (fault-tolerant, Ray Train) + evaluation + MLflow registration
+│   ├── retrain_watcher.py      # Feedback watcher daemon — triggers retrain on threshold
+│   ├── online_eval.py          # Hourly correction-rate monitoring (logs to MLflow)
+│   ├── offline_eval.py         # On-demand test-set evaluation with full quality-gate suite
+│   ├── hparam_sweep.py         # Optuna hyperparameter sweep (produced current production model)
+│   ├── configs/                # Training YAML configs (baseline, roberta variants)
+│   ├── tests/                  # Retraining integration tests
+│   └── Dockerfile              # Training container image (retrain-watcher + retrain-job)
 │
-├── data/                       # ingest, workflow workers, dataset pipeline
+├── data/                       # Ingest, workflow workers, dataset pipeline
 │   ├── proj07-runtime/         # Production service package and Docker image context
-│   ├── proj07-db/              # Postgres schema and migrations
-│   └── initial_implementation/ # Archived independent standalone scripts
+│   ├── proj07-db/              # Postgres schema and migrations (init_sql/)
+│   ├── emulate_production.py   # Traffic generator script (emulated-traffic profile)
+│   └── initial_implementation/ # Archived reference scripts (not active)
 │
+├── jitsi-deployment/           # Jitsi Meet + meeting portal + transcript uploader
+│   ├── install-jitsi-vm.sh     # Automated Jitsi installer
+│   └── compose/                # Custom service definitions (portal, uploader, vosk)
 │
-└── jitsi-deployment/           # Jitsi Meet + meeting portal + transcript uploader
-    ├── install-jitsi-vm.sh     # Automated Jitsi installer
-    └── compose/                # Custom service definitions (portal, uploader, vosk)
 ```
 
 ---
@@ -105,7 +121,7 @@ ML-Sys-Ops-Project/
 
 1. **Meeting** — A Jitsi session is transcribed live by Vosk (speech-to-text). The transcript-uploader POSTs the finished transcript to the ingest API at `:9099`.
 
-2. **Ingest** — `jitsi_transcript_receiver` saves the transcript, builds Stage 1 inference payloads (7-utterance sliding windows), and forwards each window to the serving API at `:8000/segment`.
+2. **Ingest** — `jitsi_transcript_receiver` saves the raw transcript and meeting record to Postgres. `db_task_worker` dispatches workflow tasks; `stage1_payload_service` builds Stage 1 inference payloads (7-utterance sliding windows) and `stage1_forward_service` forwards each window to the serving API at `:8000/segment`.
 
 3. **Serving** — `SegmenterDeployment` (RoBERTa, 0.3 GPU) predicts topic boundaries. Stage 2 payloads are assembled from boundary decisions and forwarded to `:8000/summarize`. `SummarizerDeployment` (Mistral-7B, 0.7 GPU) generates topic labels + bullet summaries per segment.
 
@@ -121,7 +137,7 @@ ML-Sys-Ops-Project/
 
 9. **Registration** — If all quality gates pass, the model is registered in MLflow with the `candidate` alias. A team member promotes it to `production` via the MLflow UI. The serving layer hot-reloads within 5 minutes.
 
-10. **Monitoring** — Prometheus scrapes Ray Serve metrics every 5s. `online_eval.py` logs correction rate, FPR, FNR to MLflow hourly. Grafana dashboards and Alertmanager alert rules watch for latency spikes, high error rates, and model degradation.
+10. **Monitoring** — Prometheus scrapes Ray Serve metrics every 5s. `online_eval.py` logs correction rate, FPR, FNR to MLflow hourly. Grafana dashboards and Alertmanager alert rules watch for latency spikes, high error rates, and model degradation. Critical alerts (segmentation p95 > 2s, summarization p95 > 60s, error rate > 5%) route to a rollback webhook at `ray-serve:8000/rollback`. A `RetrainingThresholdReached` alert fires when ≥ 5 pending feedback corrections are above the watermark.
 
 ---
 
@@ -165,13 +181,13 @@ For same-host Jitsi + data deployments, that target defaults to
 ```bash
 chmod +x setup.sh
 bash setup.sh
-# For Jitsi as well:
-DEPLOY_JITSI=true bash setup.sh
-# For data + Jitsi only:
-SETUP_MODE=data-jitsi DEPLOY_JITSI=true bash setup.sh
+# Skip Jitsi (serving/training/data only):
+DEPLOY_JITSI=false bash setup.sh
+# For data + Jitsi only (no local GPU serving):
+SETUP_MODE=data-jitsi bash setup.sh
 ```
 
-`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. The traffic generator and production drift monitor are manual profile services.
+`setup.sh` handles: Docker + NVIDIA toolkit install, block storage layout, rclone validation, Postgres schema init + migrations, and selected service startup from the single root `docker-compose.yml`. Full mode also downloads local RoBERTa + Mistral models and starts serving/training/monitoring. `data-jitsi` mode skips those heavy CUDA/model services. **`DEPLOY_JITSI` defaults to `true`** — pass `DEPLOY_JITSI=false` to skip the Jitsi installer. The traffic generator and production drift monitor are manual profile services.
 
 Manual compose profiles are available when needed:
 
@@ -182,6 +198,8 @@ docker compose --profile mlflow --profile serving --profile training up -d retra
 docker compose --profile serving --profile monitoring up -d prometheus grafana alertmanager node-exporter
 docker compose --profile emulated-traffic up -d traffic-generator
 docker compose --profile drift-monitor up -d production_drift_monitor
+# One-shot retrain job (does not stay running)
+docker compose --profile retrain run --rm retrain-job
 ```
 
 ### 3. Verify
@@ -252,6 +270,7 @@ Run these from the repository root:
 | `mlflow` | `docker compose --profile mlflow up -d mlflow` | `docker compose --profile mlflow logs -f --since 15m mlflow` | `docker compose --profile mlflow stop mlflow` |
 | `serving-api` | `docker compose --profile mlflow --profile serving up -d serving-api` | `docker compose --profile mlflow --profile serving logs -f --since 15m serving-api` | `docker compose --profile mlflow --profile serving stop serving-api` |
 | `retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training up -d retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training logs -f --since 15m retrain-watcher` | `docker compose --profile mlflow --profile serving --profile training stop retrain-watcher` |
+| `retrain-job` | `docker compose --profile retrain run --rm retrain-job` | `docker compose --profile retrain logs --since 15m retrain-job` | *(runs to completion)* |
 | `online-eval` | `docker compose --profile mlflow --profile training up -d online-eval` | `docker compose --profile mlflow --profile training logs -f --since 15m online-eval` | `docker compose --profile mlflow --profile training stop online-eval` |
 | `traffic-generator` | `docker compose --profile emulated-traffic up -d traffic-generator` | `docker compose --profile emulated-traffic logs -f --since 15m traffic-generator` | `docker compose --profile emulated-traffic stop traffic-generator` |
 | `prometheus` | `docker compose --profile serving --profile monitoring up -d prometheus` | `docker compose --profile serving --profile monitoring logs -f --since 15m prometheus` | `docker compose --profile serving --profile monitoring stop prometheus` |
@@ -343,6 +362,9 @@ curl -X POST http://<FLOATING_IP>:9090/-/reload
 - **MLflow `--serve-artifacts`**: The MLflow server proxies all artifact uploads/downloads. Training containers authenticate to chi.tacc S3 through the proxy — no S3 credentials needed in client code.
 - **Strict meeting-ID splits**: Train/val/test splits are fixed by `meeting_id` and never reassigned. Each retraining cycle preserves prior split boundaries and appends a fresh meeting-level `70/15/15` split of newly eligible production feedback meetings to train/val/test.
 - **Watermark-based retraining**: The watcher tracks the highest consumed `feedback_event_id`. Corrections are never double-counted across runs even if the watcher restarts.
+- **Three-alias model registry**: `production` (currently serving), `fallback` (rollback target, automatically loaded if `production` fails at startup), and `candidate` (set automatically after a passing retrain; promoted automatically to `production`).
+- **Dual-database serving**: Postgres holds all application data (meetings, utterance transitions, feedback events, audit logs). Ray Serve's recap store (`storage.py`) uses a local SQLite file (`recaps.db`) inside the container for fast read/write of the serving-layer recap cache, avoiding round-trips to Postgres during inference.
+- **db_task_worker orchestration**: A single long-running worker dispatches all workflow tasks (Stage 1 build, Stage 1 forward, Stage 2 build, Stage 2 forward, user-summary materialize) via a DB task queue, enabling retries with exponential backoff and heartbeat timeouts without requiring a separate message broker.
 
 ---
 
