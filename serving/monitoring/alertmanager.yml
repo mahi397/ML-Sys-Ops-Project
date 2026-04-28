@@ -33,4 +33,4 @@ receivers:
   - name: 'retrain-handler'
     webhook_configs:
       - url: 'http://ray-serve:8000/retrain'
-        send_resolved: false
+      send_resolved: false

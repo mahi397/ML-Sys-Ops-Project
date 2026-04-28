@@ -687,7 +687,7 @@ class SegmenterDeployment:
                 self.model = mlflow.pytorch.load_model(_local)
                 #self.model_version = f"mlflow@{MODEL_ALIAS}"
                 self.model_version = f"mlflow@{MODEL_ALIAS}_v{_alias_mv.version}"
-                self.model_version_label = f"v{_alias_mv.version}"
+                self.model_version_label = f"@{MODEL_ALIAS}_v{_alias_mv.version}"
                 self.current_mlflow_version = str(_alias_mv.version)
                 #  READ best_threshold AND test_pk FROM MODEL VERSION TAGS
                 tags = _alias_mv.tags or {}
@@ -713,7 +713,7 @@ class SegmenterDeployment:
                     self.model = mlflow.pytorch.load_model(_local_fb)
                     #self.model_version = "mlflow@fallback"
                     self.model_version = f"mlflow@fallback_v{_fb_mv.version}"
-                    self.model_version_label = f"v{_fb_mv.version}"
+                    self.model_version_label = f"@fallback_v{_fb_mv.version}"
                     fb_tags = _fb_mv.tags or {}
                     if "best_threshold" in fb_tags:
                         self.threshold = float(fb_tags["best_threshold"])
@@ -797,7 +797,7 @@ class SegmenterDeployment:
                     with self._model_lock:
                         self.model = new_model
                         self.model_version = f"mlflow@{MODEL_ALIAS}_v{new_version}"
-                        self.model_version_label = f"v{new_version}"
+                        self.model_version_label = f"@{MODEL_ALIAS}_v{new_version}"
                         self.current_mlflow_version = new_version
                         self.threshold = new_threshold
                         self.current_test_pk = new_test_pk

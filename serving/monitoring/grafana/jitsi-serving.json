@@ -546,7 +546,7 @@
       "datasource": "Prometheus",
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "background",
+        "colorMode": "value",
         "textMode": "auto",
         "orientation": "auto"
       },
@@ -570,7 +570,7 @@
       "datasource": "Prometheus",
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "background",
+        "colorMode": "value",
         "textMode": "auto",
         "orientation": "auto"
       },
@@ -594,7 +594,7 @@
       "datasource": "Prometheus",
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "background",
+        "colorMode": "value",
         "textMode": "auto",
         "orientation": "auto"
       },
@@ -620,7 +620,7 @@
       "datasource": "Prometheus",
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "background",
+        "colorMode": "value",
         "textMode": "auto",
         "orientation": "auto"
       },
@@ -647,7 +647,7 @@
       "datasource": "Prometheus",
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "background",
+        "colorMode": "value",
         "textMode": "auto",
         "orientation": "auto"
       },
@@ -673,7 +673,7 @@
       "datasource": "Prometheus",
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "background",
+        "colorMode": "value",
         "textMode": "auto",
         "orientation": "auto"
       },
