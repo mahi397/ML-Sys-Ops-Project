@@ -22,10 +22,10 @@ With FastAPI, both models share a single process. This creates problems:
 
 1. **Independent deployment scaling:**
    ```python
-   @serve.deployment(num_replicas=1, ray_actor_options={"num_gpus": 0.3})
+   @serve.deployment(num_replicas=1, ray_actor_options={"num_gpus": 0.25})
    class SegmenterDeployment: ...
 
-   @serve.deployment(num_replicas=1, ray_actor_options={"num_gpus": 0.7})
+   @serve.deployment(num_replicas=1, ray_actor_options={"num_gpus": 0.5})
    class SummarizerDeployment: ...
    ```
    Each model is a separate deployment with its own replica count and GPU allocation.

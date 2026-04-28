@@ -34,7 +34,8 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 │  Mistral-7B summarizer (0.7 GPU) │  online_eval  (hourly)            │
 │  MLflow hot-reload       │       │  offline_eval  (on demand)        │
 │  /recap · /segment       │       └──────────────┬────────────────────┘
-│  /summarize · /api/*     │                      │ registers candidate
+│  /summarize · /rollback  │               registers candidate
+│· /retrain · /api/*       │                      │ 
 └──────────────────────────┘                      ▼
                                    ┌───────────────────────────────────┐
                                    │  MLflow Registry  :5000           │
@@ -54,7 +55,7 @@ End-to-end ML system that automatically segments Jitsi meeting transcripts by to
 
 | Service | Port | Description |
 |---------|------|-------------|
-| Ray Serve API | `:8000` | `/health` `/segment` `/summarize` `/api/feedback` `/api/meetings` `/api/recap/{id}` `/metrics` |
+| Ray Serve API | `:8000` | `/health` `/segment` `/summarize` `/api/feedback` `/api/meetings` `/api/recap/{id}` `/metrics`, `/rollback`, `/retrain` |
 | Ray Dashboard | `:8265` | Ray cluster dashboard |
 | MLflow | `:5000` | Experiment tracking + model registry |
 | Grafana | `:3000` | Serving + infrastructure dashboards |
@@ -372,7 +373,7 @@ curl -X POST http://<FLOATING_IP>:9090/-/reload
 
 | Principle | Implementation |
 |-----------|---------------|
-| **Fairness** | Slice evaluation on 6 slices (meeting size × speaker count). Fairness gate blocks registration if any slice Pk > 0.40. |
+| **Fairness** | Slice evaluation on 6 slices (meeting size × speaker count). Fairness gate blocks registration if any slice Pk > 0.35 |
 | **Robustness** | Three failure-mode tests on every run: very short meetings, single-topic meetings, speaker relabeling invariance. |
 | **Transparency** | Model card JSON artifact logged to MLflow on every run — train data provenance, metrics, thresholds, fairness results, limitations. |
 | **Accountability** | `audit_log` + `retrain_log` tables. Promotion from `candidate` → `production` is a manual human step. |
