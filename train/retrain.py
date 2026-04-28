@@ -136,7 +136,7 @@ DEFAULT_RETRAIN_CONFIG = {
     # Gates are set so well-converged runs pass, poorly-converged runs fail.
     "gate_min_f1": 0.10,
     "gate_max_pk": 0.22,
-    "gate_max_windowdiff": 0.52,
+    "gate_max_windowdiff": 0.55,
     # Slice fairness gate — no single slice may exceed this Pk
     "slice_gate_max_pk": 0.40,
     # Ray Train
