@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -10,26 +11,51 @@ from core.config import build_rclone_object_uri, get_rclone_timeout_seconds, sta
 from core.db import get_conn
 
 
+def participant_view_condition(alias: str = "mp") -> str:
+    return ""
+
+
+def participant_edit_expression(alias: str = "mp") -> str:
+    return "TRUE"
+
+
+def participant_edit_group_by(alias: str = "mp") -> str:
+    return ""
+
+
+def env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
 def user_can_edit_summary(user_id: str, meeting_id: str) -> bool:
+    view_condition = participant_view_condition("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT can_view_summary
-            FROM meeting_participants
+            f"""
+            SELECT TRUE AS can_edit_summary
+            FROM meeting_participants mp
             WHERE user_id = %s
               AND meeting_id = %s
+              {view_condition}
             LIMIT 1
             """,
             (user_id, meeting_id),
         )
         row = cur.fetchone()
-    return bool(row and row.get("can_view_summary"))
+    return bool(row and row.get("can_edit_summary"))
 
 
 def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
+    view_condition = participant_view_condition("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH latest_summaries AS (
                 SELECT DISTINCT ON (s.meeting_id)
                     s.meeting_id,
@@ -78,7 +104,7 @@ def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
             LEFT JOIN meetings m
                 ON m.meeting_id = mp.meeting_id
             WHERE mp.user_id = %s
-              AND mp.can_view_summary
+              {view_condition}
               AND rollup.segment_count > 0
             ORDER BY COALESCE(m.started_at, m.ended_at, mp.joined_at, latest.created_at) DESC, mp.meeting_id
             """,
@@ -88,9 +114,12 @@ def fetch_recap_rows_for_user(user_id: str) -> list[dict[str, Any]]:
 
 
 def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[str, Any]]:
+    view_condition = participant_view_condition("mp")
+    can_edit_expr = participant_edit_expression("mp")
+    can_edit_group_by = participant_edit_group_by("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH summary_rollups AS (
                 SELECT
                     s.summary_id,
@@ -146,7 +175,7 @@ def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[
                 mp.meeting_id,
                 COALESCE(m.source_name, mp.meeting_id) AS meeting_title,
                 mp.role,
-                mp.can_view_summary AS can_edit_summary,
+                {can_edit_expr} AS can_edit_summary,
                 latest.summary_id,
                 latest.summary_type,
                 latest.summary_version,
@@ -169,12 +198,11 @@ def fetch_summary_variants_for_user(user_id: str, meeting_id: str) -> list[dict[
                 ON all_mp.meeting_id = mp.meeting_id
             WHERE mp.user_id = %s
               AND mp.meeting_id = %s
-              AND mp.can_view_summary
+              {view_condition}
             GROUP BY
                 mp.meeting_id,
                 m.source_name,
-                mp.role,
-                mp.can_view_summary,
+                mp.role{can_edit_group_by},
                 latest.summary_id,
                 latest.summary_type,
                 latest.summary_version,
@@ -512,14 +540,15 @@ def fetch_summary_variant_for_user_by_id(
 
 
 def user_can_access_recap(user_id: str, meeting_id: str) -> bool:
+    view_condition = participant_view_condition("mp")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT 1
             FROM meeting_participants mp
             WHERE mp.user_id = %s
               AND mp.meeting_id = %s
-              AND mp.can_view_summary
+              {view_condition}
               AND EXISTS (
                   SELECT 1
                   FROM summaries s
@@ -567,6 +596,194 @@ def insert_feedback_event(
                 json.dumps(before_payload),
                 json.dumps(after_payload),
                 user_id,
+            ),
+        )
+        conn.commit()
+
+
+def update_user_summary_text_edits(
+    meeting_id: str,
+    summary_id: int,
+    operations: list[tuple[int | None, str, dict[str, Any], dict[str, Any]]],
+) -> int:
+    updated_count = 0
+    with get_conn() as conn, conn.cursor() as cur:
+        for segment_summary_id, event_type, _before_payload, after_payload in operations:
+            if event_type not in {"edit_topic_label", "edit_summary_bullets"}:
+                continue
+
+            set_clauses = ["status = 'complete'", "created_at = NOW()"]
+            params: list[Any] = []
+            if event_type == "edit_topic_label":
+                set_clauses.append("topic_label = %s")
+                params.append(str(after_payload.get("topic_label") or "").strip())
+            elif event_type == "edit_summary_bullets":
+                set_clauses.append("summary_bullets = %s::jsonb")
+                params.append(json.dumps(after_payload.get("summary_bullets") or []))
+
+            if segment_summary_id is not None:
+                cur.execute(
+                    f"""
+                    UPDATE segment_summaries
+                    SET {", ".join(set_clauses)}
+                    WHERE meeting_id = %s
+                      AND summary_id = %s
+                      AND segment_summary_id = %s
+                    """,
+                    (
+                        *params,
+                        meeting_id,
+                        summary_id,
+                        segment_summary_id,
+                    ),
+                )
+                updated_count += cur.rowcount
+                if event_type == "edit_topic_label":
+                    cur.execute(
+                        """
+                        UPDATE topic_segments ts
+                        SET topic_label = %s
+                        FROM segment_summaries ss
+                        WHERE ss.topic_segment_id = ts.topic_segment_id
+                          AND ss.meeting_id = %s
+                          AND ss.summary_id = %s
+                          AND ss.segment_summary_id = %s
+                        """,
+                        (
+                            str(after_payload.get("topic_label") or "").strip(),
+                            meeting_id,
+                            summary_id,
+                            segment_summary_id,
+                        ),
+                    )
+                continue
+
+            segment_ref = after_payload.get("segment") or {}
+            try:
+                start_index = int(segment_ref.get("start_utterance_index"))
+                end_index = int(segment_ref.get("end_utterance_index"))
+            except (TypeError, ValueError):
+                continue
+
+            cur.execute(
+                f"""
+                UPDATE segment_summaries ss
+                SET {", ".join(set_clauses)}
+                FROM topic_segments ts
+                JOIN utterances u_start
+                  ON u_start.utterance_id = ts.start_utterance_id
+                JOIN utterances u_end
+                  ON u_end.utterance_id = ts.end_utterance_id
+                WHERE ss.topic_segment_id = ts.topic_segment_id
+                  AND ss.meeting_id = %s
+                  AND ss.summary_id = %s
+                  AND u_start.utterance_index = %s
+                  AND u_end.utterance_index = %s
+                """,
+                (
+                    *params,
+                    meeting_id,
+                    summary_id,
+                    start_index,
+                    end_index,
+                ),
+            )
+            updated_count += cur.rowcount
+            if event_type == "edit_topic_label":
+                cur.execute(
+                    """
+                    UPDATE topic_segments ts
+                    SET topic_label = %s
+                    FROM segment_summaries ss, utterances u_start, utterances u_end
+                    WHERE ss.topic_segment_id = ts.topic_segment_id
+                      AND u_start.utterance_id = ts.start_utterance_id
+                      AND u_end.utterance_id = ts.end_utterance_id
+                      AND ss.meeting_id = %s
+                      AND ss.summary_id = %s
+                      AND u_start.utterance_index = %s
+                      AND u_end.utterance_index = %s
+                    """,
+                    (
+                        str(after_payload.get("topic_label") or "").strip(),
+                        meeting_id,
+                        summary_id,
+                        start_index,
+                        end_index,
+                    ),
+                )
+
+        conn.commit()
+    return updated_count
+
+
+def enqueue_user_summary_materialize_task(meeting_id: str, *, edit_session_id: str | None = None) -> None:
+    artifact_version = env_int("STAGE1_ARTIFACT_VERSION", 1)
+    max_attempts = env_int("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS", 8)
+    payload_json = {
+        "task_name": "user_summary_materialize",
+        "meeting_id": meeting_id,
+        "artifact_version": artifact_version,
+        "phase": "user_summary_pending",
+    }
+    if edit_session_id:
+        payload_json["edit_session_id"] = edit_session_id
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO workflow_tasks (
+                task_type,
+                meeting_id,
+                artifact_version,
+                status,
+                payload_json,
+                max_attempts,
+                next_attempt_at
+            )
+            VALUES (
+                'user_summary_materialize',
+                %s,
+                %s,
+                'pending',
+                %s::jsonb,
+                %s,
+                NOW()
+            )
+            ON CONFLICT (task_type, meeting_id, artifact_version)
+            DO UPDATE
+            SET payload_json = EXCLUDED.payload_json,
+                max_attempts = EXCLUDED.max_attempts,
+                status = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.status
+                    ELSE 'pending'
+                END,
+                next_attempt_at = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.next_attempt_at
+                    ELSE NOW()
+                END,
+                locked_by = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.locked_by
+                    ELSE NULL
+                END,
+                locked_at = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.locked_at
+                    ELSE NULL
+                END,
+                heartbeat_at = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.heartbeat_at
+                    ELSE NULL
+                END,
+                last_error = CASE
+                    WHEN workflow_tasks.status = 'running' THEN workflow_tasks.last_error
+                    ELSE NULL
+                END,
+                updated_at = NOW()
+            """,
+            (
+                meeting_id,
+                artifact_version,
+                json.dumps(payload_json),
+                max_attempts,
             ),
         )
         conn.commit()

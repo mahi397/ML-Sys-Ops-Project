@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -15,11 +15,21 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 
+DATASET_VERSION_OBJECT_KEY_RE = re.compile(r"(?:^|/)v(?P<version>\d+)(?:/|$)")
+
+
 def env(name: str, default: str | None = None) -> str:
     value = os.getenv(name, default)
     if value is None:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def object_bucket() -> str:
+    bucket = os.getenv("OBJECT_BUCKET", "").strip() or os.getenv("BUCKET", "").strip()
+    if not bucket:
+        raise RuntimeError("Missing required environment variable: OBJECT_BUCKET or BUCKET")
+    return bucket
 
 
 def ensure_dir(path: Path) -> None:
@@ -79,7 +89,7 @@ def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
 
 
 def build_object_uri(object_key: str) -> str:
-    return f"{env('RCLONE_REMOTE')}:{env('BUCKET')}/{object_key}"
+    return f"{env('RCLONE_REMOTE')}:{object_bucket()}/{object_key}"
 
 
 def run_command(cmd: list[str], logger: logging.Logger, label: str) -> None:
@@ -101,6 +111,117 @@ def upload_file(local_path: Path, object_key: str, logger: logging.Logger) -> No
 def upload_dir(local_dir: Path, object_prefix: str, logger: logging.Logger) -> None:
     cmd = ["rclone", "copy", str(local_dir), build_object_uri(object_prefix), "-P"]
     run_command(cmd, logger, f"upload dir {local_dir}")
+
+
+def download_dir(object_prefix: str, local_dir: Path, logger: logging.Logger) -> None:
+    ensure_dir(local_dir)
+    cmd = ["rclone", "copy", build_object_uri(object_prefix), str(local_dir), "-P"]
+    run_command(cmd, logger, f"download dir {object_prefix}")
+
+
+def parse_dataset_version_from_manifest(manifest_json: dict[str, Any] | None) -> int | None:
+    if not isinstance(manifest_json, dict):
+        return None
+
+    ongoing = manifest_json.get("ongoing_version")
+    if isinstance(ongoing, dict):
+        for key in ("snapshot_version", "feedback_pool_version", "version"):
+            value = ongoing.get(key)
+            if value not in (None, ""):
+                return int(value)
+
+    for key in ("dataset_version", "snapshot_version", "feedback_pool_version", "version"):
+        value = manifest_json.get(key)
+        if value not in (None, ""):
+            return int(value)
+    return None
+
+
+def parse_dataset_version_from_object_key(object_key: str) -> int | None:
+    normalized = str(object_key or "").strip().rstrip("/")
+    if not normalized:
+        return None
+    match = DATASET_VERSION_OBJECT_KEY_RE.search(normalized)
+    if not match:
+        return None
+    return int(match.group("version"))
+
+
+def parse_dataset_version_value(object_key: str, manifest_json: dict[str, Any] | None = None) -> int | None:
+    version = parse_dataset_version_from_object_key(object_key)
+    if version is not None:
+        return version
+    return parse_dataset_version_from_manifest(manifest_json)
+
+
+def dataset_object_prefix_from_key(object_key: str) -> str:
+    normalized = str(object_key or "").strip().rstrip("/")
+    if not normalized:
+        raise RuntimeError("Dataset object_key cannot be empty")
+    tail = normalized.rsplit("/", 1)[-1]
+    if "." in tail:
+        return normalized.rsplit("/", 1)[0]
+    return normalized
+
+
+def list_dataset_version_records(
+    conn,
+    *,
+    dataset_name: str,
+    stage: str | None = None,
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT dataset_version_id, dataset_name, stage, source_type, object_key, manifest_json, created_at
+        FROM dataset_versions
+        WHERE dataset_name = %s
+    """
+    params: list[Any] = [dataset_name]
+    if stage is not None:
+        query += " AND stage = %s"
+        params.append(stage)
+    query += " ORDER BY dataset_version_id ASC"
+
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        version = parse_dataset_version_value(
+            str(row["object_key"] or ""),
+            row.get("manifest_json"),
+        )
+        if version is None:
+            raise RuntimeError(
+                "dataset_versions row is missing a parseable version "
+                f"(dataset_version_id={row['dataset_version_id']} object_key={row['object_key']!r})"
+            )
+        records.append({**row, "version": version})
+
+    records.sort(key=lambda row: (int(row["version"]), int(row["dataset_version_id"])))
+    return records
+
+
+def latest_dataset_version_record(
+    conn,
+    *,
+    dataset_name: str,
+    stage: str | None = None,
+) -> dict[str, Any] | None:
+    records = list_dataset_version_records(conn, dataset_name=dataset_name, stage=stage)
+    return records[-1] if records else None
+
+
+def next_dataset_version_number(
+    conn,
+    *,
+    dataset_name: str,
+    stage: str | None = None,
+) -> int:
+    latest_record = latest_dataset_version_record(conn, dataset_name=dataset_name, stage=stage)
+    if latest_record is None:
+        return 1
+    return int(latest_record["version"]) + 1
 
 
 def upsert_meeting_artifact(
@@ -129,19 +250,25 @@ def upsert_meeting_artifact(
 
 
 def stable_split_70_15_15(meeting_ids: list[str]) -> dict[str, list[str]]:
-    train: list[str] = []
-    val: list[str] = []
-    test: list[str] = []
+    """
+    Deterministically slice sorted meeting IDs into approximate 70/15/15
+    train/val/test partitions for the current batch.
 
-    for meeting_id in sorted(set(meeting_ids)):
-        bucket = int(hashlib.md5(meeting_id.encode()).hexdigest(), 16) % 20
-        if bucket < 14:
-            train.append(meeting_id)
-        elif bucket < 17:
-            val.append(meeting_id)
-        else:
-            test.append(meeting_id)
+    This uses batch-relative percentage cutoffs rather than hashing each
+    meeting independently, so small retraining batches are more likely to
+    contribute examples to validation and test.
+    """
+    ordered_meeting_ids = sorted(set(meeting_ids))
+    total = len(ordered_meeting_ids)
+    if total == 0:
+        return {"train": [], "val": [], "test": []}
 
+    train_cutoff = max(1, (total * 70) // 100)
+    val_cutoff = max(train_cutoff, (total * 85) // 100)
+
+    train = ordered_meeting_ids[:train_cutoff]
+    val = ordered_meeting_ids[train_cutoff:val_cutoff]
+    test = ordered_meeting_ids[val_cutoff:]
     return {"train": train, "val": val, "test": test}
 
 
@@ -153,29 +280,28 @@ def ensure_dataset_version_record(
     object_key: str,
     manifest_json: dict[str, Any],
 ) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT dataset_version_id
-            FROM dataset_versions
-            WHERE dataset_name = %s
-              AND stage = %s
-              AND object_key = %s
-            ORDER BY dataset_version_id DESC
-            LIMIT 1
-            """,
-            (dataset_name, stage, object_key),
+    target_version = parse_dataset_version_value(object_key, manifest_json)
+    if target_version is None:
+        raise RuntimeError(
+            "Cannot upsert dataset_versions row without a parseable version in object_key or manifest_json"
         )
-        row = cur.fetchone()
-        if row is not None:
+
+    matching_row_id: int | None = None
+    for row in list_dataset_version_records(conn, dataset_name=dataset_name, stage=stage):
+        if int(row["version"]) == target_version:
+            matching_row_id = int(row["dataset_version_id"])
+
+    with conn.cursor() as cur:
+        if matching_row_id is not None:
             cur.execute(
                 """
                 UPDATE dataset_versions
                 SET source_type = %s,
+                    object_key = %s,
                     manifest_json = %s
                 WHERE dataset_version_id = %s
                 """,
-                (source_type, Json(manifest_json), row["dataset_version_id"]),
+                (source_type, object_key, Json(manifest_json), matching_row_id),
             )
             conn.commit()
             return

@@ -22,8 +22,7 @@ Runs as a long-lived container. Periodically checks:
   2. How long since the last retrain
 
 If either threshold is met, triggers:
-  Aneesh's retraining_dataset_runtime (build_feedback_pool.py + build_retraining_snapshot.py)
-  → Mahima's retrain.py (Ray Train fault-tolerant training)
+  retrain.py (Ray Train fault-tolerant training on latest roberta_stage1/vN)
 """
 
 import json
@@ -38,11 +37,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ── Config from environment ──
-# [FIX 3] Default DB name corrected to proj07_sql_db (Aneesh's actual DB)
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://recap:changeme@postgres:5432/proj07_sql_db"
-)
+def _default_database_url() -> str:
+    user = os.environ.get("POSTGRES_USER", "proj07_user")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    database = os.environ.get("POSTGRES_DB", "proj07_sql_db")
+    auth = f"{user}:{password}@" if password else f"{user}@"
+    return f"postgresql://{auth}{host}:{port}/{database}"
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL") or _default_database_url()
 RETRAIN_THRESHOLD = int(os.environ.get("RETRAIN_THRESHOLD", "5"))     # 5 for demo, 500 for prod
 CHECK_INTERVAL = int(os.environ.get("RETRAIN_CHECK_INTERVAL_SECONDS", "300"))
 MAX_DAYS_BETWEEN_RETRAINS = int(os.environ.get("MAX_DAYS_BETWEEN_RETRAINS", "30"))
@@ -159,8 +164,10 @@ def get_current_max_feedback_id():
 
 def get_latest_dataset_version():
     """
-    Query Aneesh's dataset_versions table for the latest roberta_stage1 dataset.
-    Returns the object_key path (e.g. 'datasets/roberta_stage1/v3/') or None.
+    Query dataset_versions for the latest roberta_stage1 entry built from
+    production_feedback. AMI/synthetic versions are ignored — we only retrain
+    when the dataset service has published a feedback-based snapshot.
+    Returns (object_key, dataset_version_id) or (None, None).
     """
     try:
         conn = _get_conn()
@@ -169,6 +176,7 @@ def get_latest_dataset_version():
             SELECT object_key, dataset_version_id
             FROM dataset_versions
             WHERE dataset_name = 'roberta_stage1'
+              AND source_type  = 'production_feedback'
             ORDER BY dataset_version_id DESC
             LIMIT 1
         """)
@@ -181,6 +189,58 @@ def get_latest_dataset_version():
     except Exception as e:
         log.warning(f"Failed to query dataset_versions: {e}")
         return None, None
+
+
+def get_last_retrain_dataset_version_id():
+    """
+    Return the dataset_version_id used in the most recent successful retrain,
+    or None if no successful retrain has ever run.
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT dataset_version
+            FROM retrain_log
+            WHERE passed_gates = TRUE
+            ORDER BY retrain_id DESC
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0] and row[0].isdigit():
+            return int(row[0])
+        return None
+    except Exception as e:
+        log.warning(f"Could not read last retrain dataset version: {e}")
+        return None
+
+
+def get_last_attempted_dataset_version_id():
+    """
+    Return the dataset_version_id used in the most recent retrain attempt
+    regardless of whether gates passed, or None if never attempted.
+    Used to avoid retrying the same dataset version that already failed gates.
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT dataset_version
+            FROM retrain_log
+            ORDER BY retrain_id DESC
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0] and row[0].isdigit():
+            return int(row[0])
+        return None
+    except Exception as e:
+        log.warning(f"Could not read last attempted dataset version: {e}")
+        return None
 
 
 RETRAIN_LOCK_FILE = "/tmp/retrain.lock"
@@ -215,65 +275,13 @@ def trigger_retrain(correction_count, watermark):
         "trigger_time": datetime.now(timezone.utc).isoformat(),
     })
 
-    # ── Step 1: Build retraining dataset ──
-    # Aneesh's retraining_dataset_runtime produces:
-    #   - datasets/roberta_stage1_feedback_pool/vN/ (feedback examples)
-    #   - datasets/roberta_stage1/vN/ (merged AMI + feedback snapshot)
-    #   - Registers new version in dataset_versions table
-    log.info("Step 1: Running retraining dataset build...")
-    batch_scripts = [
-        ("build_feedback_pool.py", "Build feedback pool from corrected meetings"),
-        ("build_retraining_snapshot.py", "Build merged training snapshot"),
-    ]
-    for script_name, description in batch_scripts:
-        try:
-            log.info(f"  Running {description} ({script_name})...")
-            result = subprocess.run(
-                [sys.executable, script_name],
-                capture_output=True, text=True, timeout=600,
-                cwd="/app",
-            )
-            if result.returncode != 0:
-                log.error(f"  {script_name} failed: {result.stderr[:500]}")
-                _log_audit("retrain_batch_failed", {
-                    "script": script_name, "stderr": result.stderr[:500]
-                })
-                # Don't abort — the retrain can still run on existing dataset
-            else:
-                log.info(f"  {script_name} completed successfully")
-        except FileNotFoundError:
-            log.warning(f"  {script_name} not found — skipping (will use existing dataset)")
-        except subprocess.TimeoutExpired:
-            log.error(f"  {script_name} timed out after 600s")
-
-    # ── Resolve training data paths ──
     dataset_obj_key, dataset_version_id = get_latest_dataset_version()
-    feedback_pool_dir = None
-    try:
-        conn = _get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT object_key FROM dataset_versions
-            WHERE dataset_name = 'roberta_stage1_feedback_pool'
-            ORDER BY dataset_version_id DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row:
-            feedback_pool_dir = row[0]
-    except Exception:
-        pass
 
-    # ── Step 2: Retrain with Ray Train ──
-    log.info("Step 2: Launching retrain with Ray Train...")
+    log.info("Launching retrain with Ray Train...")
     retrain_env = os.environ.copy()
     if dataset_obj_key:
         retrain_env["DATASET_VERSION"] = str(dataset_version_id)
         log.info(f"  Using dataset: {dataset_obj_key} (version {dataset_version_id})")
-    if feedback_pool_dir:
-        retrain_env["FEEDBACK_DATA_DIR"] = feedback_pool_dir
-        log.info(f"  Using feedback pool: {feedback_pool_dir}")
     # Pass new_watermark so retrain.py can record it in audit_log
     retrain_env["MAX_FEEDBACK_EVENT_ID"] = str(new_watermark)
 
@@ -355,38 +363,39 @@ def _log_audit(event_type: str, details: dict):
 def main():
     log.info("Retrain watcher started")
     log.info(f"  Database:          {DATABASE_URL.split('@')[-1]}")   # log host/db, not password
-    log.info(f"  Correction threshold: {RETRAIN_THRESHOLD}")
     log.info(f"  Check interval:    {CHECK_INTERVAL}s")
-    log.info(f"  Max days between:  {MAX_DAYS_BETWEEN_RETRAINS}")
-    log.info(f"  Feedback types:    {BOUNDARY_FEEDBACK_TYPES}")
+    log.info(f"  Trigger:           new production_feedback dataset version in dataset_versions")
 
     while True:
         try:
             count, watermark = get_unconsumed_feedback_count()
-            last_retrain = get_last_retrain_time()
-            days_since = None
 
-            if last_retrain:
-                days_since = (datetime.now(timezone.utc) - last_retrain).days
+            _, latest_version_id = get_latest_dataset_version()
+            last_version_id = get_last_retrain_dataset_version_id()
+            last_attempted_id = get_last_attempted_dataset_version_id()
 
-            trigger_reason = None
-
-            if count >= RETRAIN_THRESHOLD:
-                trigger_reason = (f"correction count ({count}) >= "
-                                  f"threshold ({RETRAIN_THRESHOLD})")
-            elif days_since is not None and days_since >= MAX_DAYS_BETWEEN_RETRAINS:
-                trigger_reason = (f"days since last retrain ({days_since}) >= "
-                                  f"max ({MAX_DAYS_BETWEEN_RETRAINS})")
-            elif last_retrain is None and count > 0:
-                trigger_reason = (f"first retrain with {count} correction(s) available")
-
-            if trigger_reason:
-                log.info(f"Retrain trigger: {trigger_reason}")
-                trigger_retrain(count, watermark)
+            if latest_version_id is None:
+                log.info(
+                    f"No retrain: no roberta_stage1/production_feedback entry in "
+                    f"dataset_versions yet (corrections above watermark: {count})"
+                )
+            elif last_version_id is not None and latest_version_id <= last_version_id:
+                log.info(
+                    f"No retrain: dataset version {latest_version_id} already consumed "
+                    f"by last successful retrain (corrections above watermark: {count})"
+                )
+            elif last_attempted_id is not None and latest_version_id <= last_attempted_id:
+                log.info(
+                    f"No retrain: dataset version {latest_version_id} already attempted "
+                    f"and failed gates — waiting for dataset service to publish a newer version"
+                )
             else:
-                log.info(f"No retrain needed: {count}/{RETRAIN_THRESHOLD} corrections "
-                         f"above watermark {watermark}"
-                         f"{f', {days_since}d since last retrain' if days_since else ''}")
+                log.info(
+                    f"Retrain trigger: new dataset version {latest_version_id} "
+                    f"(last successful: {last_version_id}, last attempted: {last_attempted_id}, "
+                    f"corrections above watermark: {count})"
+                )
+                trigger_retrain(count, watermark)
 
         except Exception as e:
             log.error(f"Watcher loop error: {e}")

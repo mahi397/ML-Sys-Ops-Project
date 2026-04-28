@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
@@ -51,35 +52,43 @@ def authenticate_user(login_name: str, password: str) -> dict[str, Any] | None:
     return user
 
 
+def generate_internal_user_id(email: str) -> str:
+    normalized_email = email.strip().lower()
+    email_stem_source = normalized_email.replace("@", "_").replace(".", "_")
+    stem = normalize_user_id(email_stem_source)[:40].strip("_") or "user"
+    return f"user_{stem}_{secrets.token_hex(4)}"
+
+
 def register_user(
-    user_id: str,
     display_name: str,
     email: str,
     password: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    normalized_user_id = normalize_user_id(user_id)
     normalized_display_name = display_name.strip()
     normalized_email = email.strip().lower()
 
     if (
-        not normalized_user_id
-        or not normalized_display_name
+        not normalized_display_name
         or "@" not in normalized_email
         or len(password) < 8
     ):
-        return None, "Use a username, display name, valid email, and a password with at least 8 characters."
+        return None, "Use a display name, valid email, and a password with at least 8 characters."
 
-    created, error = repository.create_user(
-        user_id=normalized_user_id,
-        display_name=normalized_display_name,
-        email=normalized_email,
-        password=password,
-    )
-    if not created:
-        return None, error
+    for _ in range(5):
+        generated_user_id = generate_internal_user_id(normalized_email)
+        created, error = repository.create_user(
+            user_id=generated_user_id,
+            display_name=normalized_display_name,
+            email=normalized_email,
+            password=password,
+        )
+        if created:
+            user = repository.fetch_user_by_id(generated_user_id)
+            return user, None
+        if error != "Generated user ID collision.":
+            return None, error
 
-    user = repository.fetch_user_by_id(normalized_user_id)
-    return user, None
+    return None, "Could not generate a unique account ID. Please try again."
 
 
 def build_session_payload(

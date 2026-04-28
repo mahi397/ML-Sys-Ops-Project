@@ -18,3 +18,5 @@ serving/models/roberta-seg/
 serving/models/*.gguf
 serving/models/*.bin
 serving/models/*.safetensors
+
+tmp/

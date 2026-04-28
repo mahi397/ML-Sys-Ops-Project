@@ -184,6 +184,33 @@
     return bullets.slice(0, 3);
   }
 
+  function mergeTopicLabels(first, second) {
+    const firstLabel = (first || '').trim();
+    const secondLabel = (second || '').trim();
+    if (!firstLabel) {
+      return secondLabel;
+    }
+    if (!secondLabel || firstLabel.toLowerCase() === secondLabel.toLowerCase()) {
+      return firstLabel;
+    }
+    return `${firstLabel} / ${secondLabel}`;
+  }
+
+  function mergeSummaryBullets(first, second) {
+    const merged = [];
+    const seen = new Set();
+    [...(first || []), ...(second || [])].forEach((item) => {
+      const text = String(item || '').trim();
+      const key = text.toLowerCase();
+      if (!text || seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      merged.push(text);
+    });
+    return merged;
+  }
+
   function updateDraftIndexes(segments) {
     return segments.map((segment, index) => ({
       ...segment,
@@ -370,7 +397,7 @@
 
       if (segIdx < segments.length - 1) {
         const conf = (seg.boundary_confidence != null) ? Number(seg.boundary_confidence) : null;
-        const confDisplay = Number.isFinite(conf) ? conf.toFixed(2) : 'N/A';
+        const confDisplay = Number.isFinite(conf) ? conf.toFixed(4) : 'N/A';
         html += `
           <div class="boundary" id="boundary-${segIdx}">
             <div class="boundary-line"></div>
@@ -481,25 +508,19 @@
     firstPart.t_end = findUtterance(draftRecap.utterances, firstPart.end_utt)?.t_end ?? firstPart.t_end;
     secondPart.t_start = findUtterance(draftRecap.utterances, secondPart.start_utt)?.t_start ?? secondPart.t_start;
 
-    const firstUtterances = draftRecap.utterances.filter(
-      (utt) => utt.utterance_idx >= firstPart.start_utt && utt.utterance_idx <= firstPart.end_utt
-    );
-    const secondUtterances = draftRecap.utterances.filter(
-      (utt) => utt.utterance_idx >= secondPart.start_utt && utt.utterance_idx <= secondPart.end_utt
-    );
-    firstPart.topic_label = buildFallbackTopic(firstUtterances, firstPart.topic_label || 'Edited segment');
-    firstPart.summary_bullets = buildFallbackBullets(firstPart.topic_label, firstUtterances);
+    firstPart.topic_label = segment.topic_label || '';
+    firstPart.summary_bullets = [...(segment.summary_bullets || [])];
     firstPart.summary = firstPart.summary_bullets.join('. ');
     firstPart.segment_summary_id = null;
-    firstPart._topicTouched = false;
-    firstPart._summaryTouched = false;
+    firstPart._topicTouched = !!segment._topicTouched;
+    firstPart._summaryTouched = !!segment._summaryTouched;
 
-    secondPart.topic_label = buildFallbackTopic(secondUtterances, secondPart.topic_label || 'Edited segment');
-    secondPart.summary_bullets = buildFallbackBullets(secondPart.topic_label, secondUtterances);
+    secondPart.topic_label = segment.topic_label || '';
+    secondPart.summary_bullets = [...(segment.summary_bullets || [])];
     secondPart.summary = secondPart.summary_bullets.join('. ');
     secondPart.segment_summary_id = null;
-    secondPart._topicTouched = false;
-    secondPart._summaryTouched = false;
+    secondPart._topicTouched = !!segment._topicTouched;
+    secondPart._summaryTouched = !!segment._summaryTouched;
 
     const nextSegments = [...segments];
     nextSegments.splice(segmentIndex, 1, firstPart, secondPart);
@@ -522,18 +543,12 @@
       ...current,
       end_utt: next.end_utt,
       t_end: next.t_end,
-      topic_label: current.topic_label || next.topic_label || 'Edited segment',
-      summary_bullets: [],
+      topic_label: mergeTopicLabels(current.topic_label, next.topic_label),
+      summary_bullets: mergeSummaryBullets(current.summary_bullets, next.summary_bullets),
       segment_summary_id: null,
-      _topicTouched: false,
-      _summaryTouched: false
+      _topicTouched: !!current._topicTouched || !!next._topicTouched,
+      _summaryTouched: !!current._summaryTouched || !!next._summaryTouched
     };
-
-    const mergedUtterances = draftRecap.utterances.filter(
-      (utt) => utt.utterance_idx >= merged.start_utt && utt.utterance_idx <= merged.end_utt
-    );
-    merged.topic_label = buildFallbackTopic(mergedUtterances, merged.topic_label || 'Edited segment');
-    merged.summary_bullets = buildFallbackBullets(merged.topic_label, mergedUtterances);
     merged.summary = merged.summary_bullets.join('. ');
 
     const nextSegments = [...segments];
@@ -614,6 +629,7 @@
       meeting_id: draftRecap.meeting_id,
       source_summary_id: draftRecap.summary_id,
       source_summary_type: draftRecap.summary_type,
+      final_segments: currentSegments.map((segment) => buildSegmentSnapshot(segment)),
       edits
     };
   }
@@ -646,7 +662,10 @@
 
       draftRecap = null;
       showToast('Edits saved. Waiting for updated summary...');
-      const refreshed = await waitForUserEditedSummary(previousUserEditedId);
+      const refreshed = await waitForUserEditedSummary(
+        previousUserEditedId,
+        !!responsePayload.updated_in_place
+      );
       if (!refreshed) {
         showToast('Edits were saved. The updated user-edited summary will appear after the worker finishes.');
       }
@@ -658,7 +677,7 @@
     }
   }
 
-  async function waitForUserEditedSummary(previousUserEditedId) {
+  async function waitForUserEditedSummary(previousUserEditedId, allowSameId = false) {
     if (pollTimer) {
       clearTimeout(pollTimer);
       pollTimer = null;
@@ -684,7 +703,11 @@
         const nextRecap = payload.recap;
         if (
           nextRecap.summary_type === 'user_edited' &&
-          (previousUserEditedId === null || Number(nextRecap.summary_id) !== Number(previousUserEditedId))
+          (
+            allowSameId ||
+            previousUserEditedId === null ||
+            Number(nextRecap.summary_id) !== Number(previousUserEditedId)
+          )
         ) {
           recapData = nextRecap;
           selectedSource = nextRecap.summary_type;

@@ -243,17 +243,26 @@ def claim_next_workflow_task(
 
             cur.execute(
                 """
+                WITH attempt_state AS (
+                    SELECT COALESCE(MAX(attempt_number), 0) AS latest_attempt_number
+                    FROM workflow_task_attempts
+                    WHERE task_id = %s
+                )
                 UPDATE workflow_tasks
                 SET status = 'running',
-                    attempt_count = attempt_count + 1,
+                    attempt_count = GREATEST(
+                        workflow_tasks.attempt_count,
+                        attempt_state.latest_attempt_number
+                    ) + 1,
                     locked_by = %s,
                     locked_at = NOW(),
                     heartbeat_at = NOW(),
                     updated_at = NOW()
+                FROM attempt_state
                 WHERE task_id = %s
                 RETURNING *
                 """,
-                (worker_id, task_row["task_id"]),
+                (task_row["task_id"], worker_id, task_row["task_id"]),
             )
             claimed = cur.fetchone()
 

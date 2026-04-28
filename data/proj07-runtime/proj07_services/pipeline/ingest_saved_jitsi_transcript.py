@@ -44,6 +44,7 @@ SPOKEN_RE = re.compile(r"^(?P<speaker>[^:]+): (?P<text>.*)$")
 TRANSCRIPT_FILENAME_RE = re.compile(
     r"^transcript_(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z_(?P<uuid8>[0-9a-fA-F]{8})[0-9a-fA-F-]*\.txt$"
 )
+MOCK_EMAIL_SUFFIX = ".mock@example.com"
 
 
 @dataclass
@@ -59,7 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--original-filename", required=True)
     parser.add_argument("--host-external-key", required=True)
     parser.add_argument("--metadata-path", type=Path, default=None)
-    parser.add_argument("--timezone", default="America/New_York")
+    parser.add_argument(
+        "--timezone",
+        default=os.getenv("JITSI_TRANSCRIPT_TIMEZONE", "UTC"),
+        help="Timezone used by the Jitsi transcript text. Defaults to UTC/GMT.",
+    )
     parser.add_argument("--version", type=int, default=1)
     parser.add_argument(
         "--local-output-root",
@@ -154,6 +159,13 @@ def require_env(name: str) -> str:
     return value
 
 
+def require_object_bucket() -> str:
+    bucket = os.getenv("OBJECT_BUCKET", "").strip() or os.getenv("BUCKET", "").strip()
+    if not bucket:
+        raise RuntimeError("Missing required environment variable: OBJECT_BUCKET or BUCKET")
+    return bucket
+
+
 def get_db_conn():
     if project_get_conn is not None:
         return project_get_conn()
@@ -185,7 +197,7 @@ def upload_artifact(local_path: Path, object_key: str, logger: logging.Logger) -
         return
 
     remote = require_env("RCLONE_REMOTE")
-    bucket = require_env("BUCKET")
+    bucket = require_object_bucket()
     cmd = ["rclone", "copyto", str(local_path), f"{remote}:{bucket}/{object_key}", "-P"]
 
     logger.info("START | upload file %s", local_path.name)
@@ -433,25 +445,55 @@ def load_metadata_sidecar(
 def build_host_identity(
     metadata: dict[str, Any],
     host_external_key: str,
+    meeting_id: str,
+    uploaded_participants: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    host_user_id = str(metadata.get("host_user_id", "") or "").strip() or host_external_key
-    host_display_name = (
-        str(metadata.get("host_display_name", "") or "").strip() or host_user_id
-    )
-    host_email = str(metadata.get("host_email", "") or "").strip() or None
-    identity_source = (
-        str(metadata.get("identity_source", "") or "").strip()
-        or (
-            "host_external_key_fallback"
-            if host_user_id == host_external_key
-            else "transcript_upload_metadata"
-        )
-    )
+    uploaded_participants = uploaded_participants or load_uploaded_room_participants(metadata)
+    host_user_id = str(metadata.get("host_user_id", "") or "").strip() or None
+    host_display_name = str(metadata.get("host_display_name", "") or "").strip() or None
+    host_email = str(metadata.get("host_email", "") or "").strip().lower() or None
+    identity_source = str(metadata.get("identity_source", "") or "").strip()
+
+    resolved_user_id = host_user_id
+    resolved_display_name = host_display_name
+    resolved_email = host_email
+    resolved_identity_source = identity_source
+
+    if resolved_user_id is None and resolved_email:
+        email_matches = [
+            participant
+            for participant in uploaded_participants
+            if str(participant.get("email", "") or "").strip().lower() == resolved_email
+            and str(participant.get("user_id", "") or "").strip()
+        ]
+        matched_user_ids = {
+            str(participant["user_id"]).strip()
+            for participant in email_matches
+            if str(participant.get("user_id", "") or "").strip()
+        }
+        if len(matched_user_ids) == 1:
+            matched = email_matches[0]
+            resolved_user_id = str(matched["user_id"]).strip()
+            resolved_display_name = resolved_display_name or str(
+                matched.get("display_name") or resolved_user_id
+            ).strip()
+            resolved_email = resolved_email or str(matched.get("email") or "").strip().lower() or None
+            resolved_identity_source = resolved_identity_source or "room_participants_email_match"
+
+    if resolved_user_id is None:
+        resolved_user_id = f"host_fallback__{meeting_id}"
+        resolved_display_name = resolved_display_name or resolved_user_id
+        resolved_email = None
+        resolved_identity_source = resolved_identity_source or "meeting_scoped_host_fallback"
+
+    resolved_display_name = resolved_display_name or resolved_user_id
+    resolved_identity_source = resolved_identity_source or "transcript_upload_metadata"
+
     return {
-        "user_id": host_user_id,
-        "display_name": host_display_name,
-        "email": host_email,
-        "identity_source": identity_source,
+        "user_id": resolved_user_id,
+        "display_name": resolved_display_name,
+        "email": resolved_email,
+        "identity_source": resolved_identity_source,
         "host_external_key": host_external_key,
     }
 
@@ -607,6 +649,7 @@ def build_parsed_payload(
     original_filename: str,
     host_external_key: str,
     host_identity: dict[str, Any],
+    uploaded_participants: list[dict[str, Any]],
     metadata: dict[str, Any],
     parsed: dict[str, Any],
     raw_folder_prefix: str,
@@ -627,7 +670,6 @@ def build_parsed_payload(
         name: speaker_label_for_index(idx)
         for idx, name in enumerate(speaker_order)
     }
-    uploaded_participants = load_uploaded_room_participants(metadata)
     meeting_participants = build_meeting_participants(
         meeting_id=meeting_id,
         host_identity=host_identity,
@@ -742,6 +784,264 @@ def _row_value(row, key: str, index: int):
             return None
 
 
+def normalize_email(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return normalized or None
+
+
+def is_mock_identity(
+    *,
+    user_id: str | None = None,
+    email: str | None = None,
+    identity_source: str | None = None,
+) -> bool:
+    normalized_user_id = str(user_id or "").strip().lower()
+    normalized_email = normalize_email(email)
+    normalized_source = str(identity_source or "").strip().lower()
+
+    if normalized_email and normalized_email.endswith(MOCK_EMAIL_SUFFIX):
+        return True
+    if normalized_source in {"emulate_production", "emulated", "mock", "traffic_generator"}:
+        return True
+    return normalized_user_id.startswith("speaker_") or normalized_user_id.startswith("mock_")
+
+
+def fetch_existing_user_by_email(conn, email: str | None) -> dict[str, str | None] | None:
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id, display_name, email
+            FROM users
+            WHERE LOWER(COALESCE(email, '')) = %s
+            LIMIT 2
+            """,
+            (normalized_email,),
+        )
+        rows = cur.fetchall() or []
+
+    if len(rows) != 1:
+        return None
+
+    row = rows[0]
+    user_id = str(_row_value(row, "user_id", 0) or "").strip()
+    if not user_id:
+        return None
+
+    return {
+        "user_id": user_id,
+        "display_name": str(_row_value(row, "display_name", 1) or "").strip() or user_id,
+        "email": normalize_email(_row_value(row, "email", 2)) or normalized_email,
+    }
+
+
+def fetch_existing_user_by_user_id(conn, user_id: str | None) -> dict[str, str | None] | None:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id, display_name, email
+            FROM users
+            WHERE user_id = %s
+            LIMIT 1
+            """,
+            (normalized_user_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "user_id": str(_row_value(row, "user_id", 0) or "").strip() or normalized_user_id,
+        "display_name": str(_row_value(row, "display_name", 1) or "").strip() or normalized_user_id,
+        "email": normalize_email(_row_value(row, "email", 2)),
+    }
+
+
+def allocate_unique_user_id(
+    conn,
+    base_user_id: str | None,
+    meeting_id: str,
+    assigned_user_ids: dict[str, str],
+) -> str:
+    normalized_base = str(base_user_id or "").strip() or "user"
+    stem = f"{normalized_base}__{meeting_id}"
+    candidate = stem
+    suffix = 2
+
+    while True:
+        if (
+            candidate.casefold() not in assigned_user_ids
+            and fetch_existing_user_by_user_id(conn, candidate) is None
+        ):
+            return candidate
+        candidate = f"{stem}_{suffix}"
+        suffix += 1
+
+
+def canonicalize_identity_against_existing_users(
+    conn,
+    identity: dict[str, Any],
+    *,
+    meeting_id: str,
+    logger: logging.Logger,
+    context_label: str,
+    assigned_user_ids: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if assigned_user_ids is None:
+        assigned_user_ids = {}
+    normalized_identity = dict(identity)
+
+    proposed_user_id = str(normalized_identity.get("user_id", "") or "").strip()
+    proposed_display_name = (
+        str(normalized_identity.get("display_name", "") or "").strip() or proposed_user_id
+    )
+    proposed_email = normalize_email(normalized_identity.get("email"))
+    identity_source = str(normalized_identity.get("identity_source", "") or "").strip()
+
+    email_owner = fetch_existing_user_by_email(conn, proposed_email)
+    if email_owner is not None:
+        if proposed_user_id and email_owner["user_id"] != proposed_user_id:
+            logger.info(
+                "Canonicalized %s by email | email=%s previous_user_id=%s canonical_user_id=%s",
+                context_label,
+                proposed_email,
+                proposed_user_id,
+                email_owner["user_id"],
+            )
+        normalized_identity["user_id"] = email_owner["user_id"]
+        normalized_identity["display_name"] = email_owner["display_name"]
+        normalized_identity["display_names"] = normalize_display_names(
+            list(normalized_identity.get("display_names") or [])
+            + [proposed_display_name, str(email_owner["display_name"] or "")],
+            str(email_owner["display_name"] or ""),
+        )
+        normalized_identity["email"] = email_owner["email"]
+        assigned_user_ids[str(email_owner["user_id"]).casefold()] = str(
+            email_owner["email"] or ""
+        )
+        return normalized_identity
+
+    if not proposed_user_id:
+        normalized_identity["display_name"] = proposed_display_name
+        normalized_identity["email"] = proposed_email
+        return normalized_identity
+
+    assigned_email = normalize_email(assigned_user_ids.get(proposed_user_id.casefold()))
+    if proposed_user_id.casefold() in assigned_user_ids and assigned_email != proposed_email:
+        renamed_user_id = allocate_unique_user_id(
+            conn,
+            proposed_user_id,
+            meeting_id,
+            assigned_user_ids,
+        )
+        logger.info(
+            "Renamed %s user_id to avoid same-batch collision | previous_user_id=%s new_user_id=%s email=%s",
+            context_label,
+            proposed_user_id,
+            renamed_user_id,
+            proposed_email,
+        )
+        normalized_identity["user_id"] = renamed_user_id
+        normalized_identity["display_name"] = proposed_display_name
+        normalized_identity["email"] = proposed_email
+        assigned_user_ids[renamed_user_id.casefold()] = proposed_email or ""
+        return normalized_identity
+
+    existing_user = fetch_existing_user_by_user_id(conn, proposed_user_id)
+    if existing_user is None:
+        normalized_identity["user_id"] = proposed_user_id
+        normalized_identity["display_name"] = proposed_display_name
+        normalized_identity["email"] = proposed_email
+        assigned_user_ids[proposed_user_id.casefold()] = proposed_email or ""
+        return normalized_identity
+
+    existing_email = normalize_email(existing_user.get("email"))
+    if proposed_email and existing_email == proposed_email:
+        normalized_identity["user_id"] = existing_user["user_id"]
+        normalized_identity["display_name"] = existing_user["display_name"]
+        normalized_identity["display_names"] = normalize_display_names(
+            list(normalized_identity.get("display_names") or [])
+            + [proposed_display_name, str(existing_user["display_name"] or "")],
+            str(existing_user["display_name"] or ""),
+        )
+        normalized_identity["email"] = existing_email
+        assigned_user_ids[str(existing_user["user_id"]).casefold()] = existing_email or ""
+        return normalized_identity
+
+    if proposed_email and existing_email is None and not is_mock_identity(
+        user_id=proposed_user_id,
+        email=proposed_email,
+        identity_source=identity_source,
+    ):
+        normalized_identity["user_id"] = proposed_user_id
+        normalized_identity["display_name"] = (
+            str(existing_user.get("display_name") or "").strip() or proposed_display_name
+        )
+        normalized_identity["email"] = proposed_email
+        assigned_user_ids[proposed_user_id.casefold()] = proposed_email or ""
+        return normalized_identity
+
+    if proposed_email != existing_email:
+        renamed_user_id = allocate_unique_user_id(
+            conn,
+            proposed_user_id,
+            meeting_id,
+            assigned_user_ids,
+        )
+        logger.info(
+            "Renamed %s user_id to avoid existing-user collision | previous_user_id=%s new_user_id=%s incoming_email=%s existing_email=%s",
+            context_label,
+            proposed_user_id,
+            renamed_user_id,
+            proposed_email,
+            existing_email,
+        )
+        normalized_identity["user_id"] = renamed_user_id
+        normalized_identity["display_name"] = proposed_display_name
+        normalized_identity["email"] = proposed_email
+        assigned_user_ids[renamed_user_id.casefold()] = proposed_email or ""
+        return normalized_identity
+
+    normalized_identity["user_id"] = existing_user["user_id"]
+    normalized_identity["display_name"] = existing_user["display_name"]
+    normalized_identity["email"] = existing_email
+    assigned_user_ids[str(existing_user["user_id"]).casefold()] = existing_email or ""
+    return normalized_identity
+
+
+def canonicalize_uploaded_participants(
+    conn,
+    participants: list[dict[str, Any]],
+    *,
+    meeting_id: str,
+    logger: logging.Logger,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    canonicalized: list[dict[str, Any]] = []
+    assigned_user_ids: dict[str, str] = {}
+
+    for idx, participant in enumerate(participants, start=1):
+        canonicalized.append(
+            canonicalize_identity_against_existing_users(
+                conn,
+                participant,
+                meeting_id=meeting_id,
+                logger=logger,
+                context_label=f"participant[{idx}]",
+                assigned_user_ids=assigned_user_ids,
+            )
+        )
+
+    return canonicalized, assigned_user_ids
+
+
 def upsert_host_user(
     cur,
     *,
@@ -765,7 +1065,30 @@ def upsert_host_user(
     )
     existing = cur.fetchone()
 
+    email_owner = None
+    if normalized_email:
+        cur.execute(
+            """
+            SELECT user_id
+            FROM users
+            WHERE LOWER(COALESCE(email, '')) = %s
+            LIMIT 2
+            """,
+            (normalized_email,),
+        )
+        email_rows = cur.fetchall() or []
+        if email_rows:
+            email_owner = str(_row_value(email_rows[0], "user_id", 0) or "").strip() or None
+        if len(email_rows) > 1:
+            raise ValueError(
+                f"Refusing to ingest ambiguous email owner for email={normalized_email}"
+            )
+
     if existing is None:
+        if email_owner and email_owner != normalized_user_id:
+            raise ValueError(
+                f"Refusing to reuse existing email={normalized_email} for new user_id={normalized_user_id}"
+            )
         cur.execute(
             """
             INSERT INTO users (user_id, display_name, email)
@@ -776,22 +1099,27 @@ def upsert_host_user(
         return
 
     existing_email = _row_value(existing, "email", 2)
-    existing_email = str(existing_email).strip().lower() if existing_email else None
+    existing_email = normalize_email(existing_email)
 
     if normalized_email and existing_email and normalized_email != existing_email:
         raise ValueError(
             f"Refusing to remap existing user_id={normalized_user_id} from email={existing_email} to email={normalized_email}"
         )
 
-    cur.execute(
-        """
-        UPDATE users
-        SET display_name = %s,
-            email = COALESCE(users.email, %s)
-        WHERE user_id = %s
-        """,
-        (normalized_display_name, normalized_email, normalized_user_id),
-    )
+    if email_owner and email_owner != normalized_user_id:
+        raise ValueError(
+            f"Refusing to remap email={normalized_email} from user_id={email_owner} to user_id={normalized_user_id}"
+        )
+
+    if existing_email is None and normalized_email:
+        cur.execute(
+            """
+            UPDATE users
+            SET email = %s
+            WHERE user_id = %s
+            """,
+            (normalized_email, normalized_user_id),
+        )
 
 def fetch_returning_id(cur, key: str) -> int:
     row = cur.fetchone()
@@ -1127,8 +1455,33 @@ def main() -> None:
     )
 
     metadata_payload = load_metadata_sidecar(args.metadata_path, logger)
-    host_identity = build_host_identity(metadata_payload, host_external_key)
-    # parsed = parse_transcript(transcript_path, args.timezone)
+    uploaded_participants = load_uploaded_room_participants(metadata_payload)
+    identity_conn = get_db_conn()
+    try:
+        uploaded_participants, assigned_user_ids = canonicalize_uploaded_participants(
+            identity_conn,
+            uploaded_participants,
+            meeting_id=meeting_id,
+            logger=logger,
+        )
+        host_identity = canonicalize_identity_against_existing_users(
+            identity_conn,
+            build_host_identity(
+                metadata_payload,
+                host_external_key,
+                meeting_id,
+                uploaded_participants,
+            ),
+            meeting_id=meeting_id,
+            logger=logger,
+            context_label="host",
+            assigned_user_ids=assigned_user_ids,
+        )
+    finally:
+        try:
+            identity_conn.close()
+        except Exception:
+            pass
 
 
     try:
@@ -1178,6 +1531,7 @@ def main() -> None:
         original_filename=original_filename,
         host_external_key=host_external_key,
         host_identity=host_identity,
+        uploaded_participants=uploaded_participants,
         metadata=metadata_payload,
         parsed=parsed,
         raw_folder_prefix=raw_folder_prefix,
@@ -1193,7 +1547,7 @@ def main() -> None:
     write_json(parsed_path, payload)
 
     require_env("RCLONE_REMOTE")
-    require_env("BUCKET")
+    require_object_bucket()
 
     upload_artifact(transcript_path, raw_object_key, logger)
     upload_artifact(parsed_path, parsed_object_key, logger)

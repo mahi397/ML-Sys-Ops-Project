@@ -49,6 +49,14 @@ class DispatcherConfig:
     stage2_forward_max_attempts: int = env_int("STAGE2_FORWARD_MAX_ATTEMPTS", 8)
     user_summary_max_attempts: int = env_int("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS", 8)
     stale_after_seconds: int = env_int("WORKFLOW_TASK_STALE_AFTER_SECONDS", 600)
+    retraining_validity_min_utterances: int = env_int(
+        "RETRAINING_DATASET_WINDOW_SIZE",
+        env_int("STAGE1_WINDOW_SIZE", 7),
+    )
+    retraining_validity_min_utterance_chars: int = env_int(
+        "RETRAINING_DATASET_MIN_UTTERANCE_CHARS",
+        env_int("STAGE1_MIN_UTTERANCE_CHARS", 20),
+    )
     stage1_build_dispatch_enabled: bool = env_flag(
         "DB_TASK_STAGE1_BUILD_ENABLED",
         env_flag("DB_TASK_STAGE1_ENABLED", True),
@@ -131,26 +139,27 @@ class MeetingValidityRefreshTask:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                WITH validity AS (
+                WITH meeting_quality AS (
                     SELECT
                         m.meeting_id,
-                        (
-                            COUNT(u.utterance_id) >= 1
-                            AND raw_artifact.artifact_id IS NOT NULL
-                            AND parsed_artifact.artifact_id IS NOT NULL
-                            AND stage1_jsonl.artifact_id IS NOT NULL
-                            AND stage1_json.artifact_id IS NOT NULL
-                            AND stage1_model.artifact_id IS NOT NULL
-                            AND stage1_manifest.artifact_id IS NOT NULL
-                            AND stage1_resp_jsonl.artifact_id IS NOT NULL
-                            AND stage1_resp_json.artifact_id IS NOT NULL
-                            AND stage2_jsonl.artifact_id IS NOT NULL
-                            AND stage2_json.artifact_id IS NOT NULL
-                            AND reconstructed_segments.artifact_id IS NOT NULL
-                            AND stage2_resp_jsonl.artifact_id IS NOT NULL
-                            AND stage2_resp_json.artifact_id IS NOT NULL
-                            AND summary_json.artifact_id IS NOT NULL
-                        ) AS computed_is_valid
+                        COUNT(u.utterance_id) FILTER (
+                            WHERE BTRIM(COALESCE(u.clean_text, '')) <> ''
+                              AND CHAR_LENGTH(BTRIM(COALESCE(u.clean_text, ''))) >= %s
+                        ) AS eligible_source_utterance_count,
+                        raw_artifact.artifact_id AS raw_artifact_id,
+                        parsed_artifact.artifact_id AS parsed_artifact_id,
+                        stage1_jsonl.artifact_id AS stage1_jsonl_artifact_id,
+                        stage1_json.artifact_id AS stage1_json_artifact_id,
+                        stage1_model.artifact_id AS stage1_model_artifact_id,
+                        stage1_manifest.artifact_id AS stage1_manifest_artifact_id,
+                        stage1_resp_jsonl.artifact_id AS stage1_resp_jsonl_artifact_id,
+                        stage1_resp_json.artifact_id AS stage1_resp_json_artifact_id,
+                        stage2_jsonl.artifact_id AS stage2_jsonl_artifact_id,
+                        stage2_json.artifact_id AS stage2_json_artifact_id,
+                        reconstructed_segments.artifact_id AS reconstructed_segments_artifact_id,
+                        stage2_resp_jsonl.artifact_id AS stage2_resp_jsonl_artifact_id,
+                        stage2_resp_json.artifact_id AS stage2_resp_json_artifact_id,
+                        summary_json.artifact_id AS summary_json_artifact_id
                     FROM meetings m
                     LEFT JOIN utterances u
                       ON u.meeting_id = m.meeting_id
@@ -227,6 +236,28 @@ class MeetingValidityRefreshTask:
                         stage2_resp_jsonl.artifact_id,
                         stage2_resp_json.artifact_id,
                         summary_json.artifact_id
+                ),
+                validity AS (
+                    SELECT
+                        meeting_id,
+                        (
+                            eligible_source_utterance_count >= %s
+                            AND raw_artifact_id IS NOT NULL
+                            AND parsed_artifact_id IS NOT NULL
+                            AND stage1_jsonl_artifact_id IS NOT NULL
+                            AND stage1_json_artifact_id IS NOT NULL
+                            AND stage1_model_artifact_id IS NOT NULL
+                            AND stage1_manifest_artifact_id IS NOT NULL
+                            AND stage1_resp_jsonl_artifact_id IS NOT NULL
+                            AND stage1_resp_json_artifact_id IS NOT NULL
+                            AND stage2_jsonl_artifact_id IS NOT NULL
+                            AND stage2_json_artifact_id IS NOT NULL
+                            AND reconstructed_segments_artifact_id IS NOT NULL
+                            AND stage2_resp_jsonl_artifact_id IS NOT NULL
+                            AND stage2_resp_json_artifact_id IS NOT NULL
+                            AND summary_json_artifact_id IS NOT NULL
+                        ) AS computed_is_valid
+                    FROM meeting_quality
                 )
                 UPDATE meetings m
                 SET is_valid = validity.computed_is_valid
@@ -235,7 +266,11 @@ class MeetingValidityRefreshTask:
                   AND m.is_valid IS DISTINCT FROM validity.computed_is_valid
                 RETURNING m.meeting_id
                 """,
-                [self.config.stage1_version] * 14,
+                [
+                    self.config.retraining_validity_min_utterance_chars,
+                    *([self.config.stage1_version] * 14),
+                    self.config.retraining_validity_min_utterances,
+                ],
             )
             rows = cur.fetchall()
 
@@ -586,18 +621,12 @@ class UserSummaryDispatchTask:
 
     def fetch_candidate_meeting_ids(self, conn, *, full_scan: bool) -> list[str]:
         sql = """
-            WITH latest_user_summary AS (
+            WITH edit_sessions AS (
                 SELECT
                     meeting_id,
-                    MAX(created_at) AS latest_user_summary_created_at
-                FROM summaries
-                WHERE summary_type = 'user_edited'
-                GROUP BY meeting_id
-            ),
-            latest_edit_feedback AS (
-                SELECT
-                    meeting_id,
-                    MAX(created_at) AS latest_feedback_created_at
+                    after_payload ->> 'edit_session_id' AS edit_session_id,
+                    MAX(feedback_event_id) AS latest_feedback_event_id,
+                    BOOL_OR(after_payload ? 'materialized_summary_id') AS is_materialized
                 FROM feedback_events
                 WHERE event_type IN (
                     'merge_segments',
@@ -606,20 +635,16 @@ class UserSummaryDispatchTask:
                     'edit_summary_bullets'
                 )
                   AND after_payload ? 'edit_session_id'
-                GROUP BY meeting_id
+                GROUP BY meeting_id, after_payload ->> 'edit_session_id'
             )
-            SELECT feedback.meeting_id
-            FROM latest_edit_feedback feedback
+            SELECT edit_sessions.meeting_id
+            FROM edit_sessions
             JOIN meetings m
-              ON m.meeting_id = feedback.meeting_id
-            LEFT JOIN latest_user_summary user_summary
-              ON user_summary.meeting_id = feedback.meeting_id
+              ON m.meeting_id = edit_sessions.meeting_id
             WHERE m.source_type = 'jitsi'
-              AND (
-                    user_summary.latest_user_summary_created_at IS NULL
-                    OR feedback.latest_feedback_created_at > user_summary.latest_user_summary_created_at
-               )
-            ORDER BY feedback.latest_feedback_created_at DESC, feedback.meeting_id DESC
+              AND NOT edit_sessions.is_materialized
+            GROUP BY edit_sessions.meeting_id
+            ORDER BY MAX(edit_sessions.latest_feedback_event_id) DESC, edit_sessions.meeting_id DESC
         """
         params: list[object] = []
         if full_scan and self.config.full_scan_limit > 0:
@@ -671,6 +696,10 @@ def validate_config(config: DispatcherConfig) -> None:
         raise ValueError("USER_SUMMARY_MATERIALIZE_MAX_ATTEMPTS must be > 0")
     if config.stale_after_seconds <= 0:
         raise ValueError("WORKFLOW_TASK_STALE_AFTER_SECONDS must be > 0")
+    if config.retraining_validity_min_utterances <= 0:
+        raise ValueError("RETRAINING_DATASET_WINDOW_SIZE must be > 0")
+    if config.retraining_validity_min_utterance_chars <= 0:
+        raise ValueError("RETRAINING_DATASET_MIN_UTTERANCE_CHARS must be > 0")
 
 
 def main() -> None:
@@ -690,13 +719,15 @@ def main() -> None:
 
     logger.info("Starting %s", APP_NAME)
     logger.info(
-        "Dispatcher config | poll_interval=%ss full_scan_interval=%ss batch_size=%s full_scan_limit=%s version=%s stale_after=%ss",
+        "Dispatcher config | poll_interval=%ss full_scan_interval=%ss batch_size=%s full_scan_limit=%s version=%s stale_after=%ss validity_min_utterances=%s validity_min_chars=%s",
         config.poll_interval_seconds,
         config.full_scan_interval_seconds,
         config.batch_size,
         config.full_scan_limit,
         config.stage1_version,
         config.stale_after_seconds,
+        config.retraining_validity_min_utterances,
+        config.retraining_validity_min_utterance_chars,
     )
     logger.info(
         "Dispatch tasks | stage1_build=%s stage1_forward=%s",

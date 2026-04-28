@@ -1,0 +1,29 @@
+Transcript of conference held at Apr 21, 2026 in room runtimepipeline@muc.meet.jitsi
+Initial people present at 2:05:12 PM:
+	Aneesh
+	Shruti
+	Mahima
+
+Transcript, started at 2:05:12 PM:
+________________________________________________________________________________
+<2:05:12 PM> Aneesh joined the conference
+<2:05:14 PM> Shruti joined the conference
+<2:05:16 PM> Mahima joined the conference
+<2:05:30 PM> Aneesh: let's check the ingest path first and make sure the
+                      transcript receiver writes the parsed meeting rows
+<2:05:41 PM> Shruti: the portal can read the meeting list once Postgres has
+                      participants speakers utterances and summaries
+<2:05:53 PM> Mahima: after that the dataset service should only use valid
+                      meetings with complete stage artifacts
+<2:06:09 PM> Aneesh: good then the next topic is the single compose path so
+                      runtime services always start from the same env file
+<2:06:22 PM> Shruti: I will verify the UI still formats meeting time in the
+                      browser timezone while uploads stay in UTC
+<2:06:36 PM> Mahima: I will watch the feedback counters and confirm retraining
+                      does not start until the thresholds are actually reached
+<2:06:55 PM> Aneesh: final action items are compose cleanup timezone check and
+                      one traffic generator smoke run
+________________________________________________________________________________
+
+
+End of transcript at Apr 21, 2026, 2:07:10 PM

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -11,7 +12,6 @@ from typing import Any
 from psycopg.types.json import Json
 
 from proj07_services.common.feedback_common import (
-    build_emulated_summary_bullets,
     fetch_meeting_utterance_lookup,
     get_conn,
     upload_file,
@@ -143,13 +143,11 @@ def build_auto_segment_state(
     segment: dict[str, Any],
     utterance_lookup: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    topic_label = build_default_topic_label(segment, utterance_lookup)
-    utterances = utterance_rows_for_segment(segment, utterance_lookup)
     return {
         **segment,
-        "topic_label": topic_label,
-        "summary_bullets": build_emulated_summary_bullets(topic_label, utterances),
-        "status": "draft",
+        "topic_label": str(segment.get("topic_label") or "").strip(),
+        "summary_bullets": normalize_summary_bullets(segment.get("summary_bullets")),
+        "status": str(segment.get("status") or "draft"),
     }
 
 
@@ -241,7 +239,21 @@ class UserSummaryMaterializeService:
                 )
                 return True
 
-            latest_session = self.fetch_latest_pending_edit_session(conn, lease.meeting_id)
+            requested_edit_session_id = ""
+            if isinstance(lease.payload_json, dict):
+                requested_edit_session_id = str(
+                    lease.payload_json.get("edit_session_id") or ""
+                ).strip()
+
+            latest_session = (
+                self.fetch_pending_edit_session_by_id(
+                    conn,
+                    lease.meeting_id,
+                    requested_edit_session_id,
+                )
+                if requested_edit_session_id
+                else self.fetch_latest_pending_edit_session(conn, lease.meeting_id)
+            )
             if latest_session is None:
                 self.logger.info(
                     "No pending user-summary edit session found; marking task succeeded | meeting_id=%s",
@@ -329,27 +341,60 @@ class UserSummaryMaterializeService:
             row = cur.fetchone()
         return None if row is None else row["created_at"]
 
-    def fetch_latest_pending_edit_session(self, conn, meeting_id: str) -> dict[str, Any] | None:
-        latest_user_summary_at = self.fetch_latest_user_summary_created_at(conn, meeting_id)
+    def fetch_pending_edit_session_by_id(
+        self,
+        conn,
+        meeting_id: str,
+        edit_session_id: str,
+    ) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT
                     after_payload ->> 'edit_session_id' AS edit_session_id,
-                    MAX(feedback_event_id) AS latest_feedback_event_id
+                    MAX(feedback_event_id) AS latest_feedback_event_id,
+                    BOOL_OR(after_payload ? 'materialized_summary_id') AS is_materialized
                 FROM feedback_events
                 WHERE meeting_id = %s
                   AND event_type = ANY(%s)
-                  AND after_payload ? 'edit_session_id'
-                  AND created_at > COALESCE(%s::timestamptz, '-infinity'::timestamptz)
+                  AND after_payload ->> 'edit_session_id' = %s
                 GROUP BY after_payload ->> 'edit_session_id'
+                HAVING NOT BOOL_OR(after_payload ? 'materialized_summary_id')
+                """,
+                (
+                    meeting_id,
+                    list(MATERIALIZABLE_EVENT_TYPES),
+                    edit_session_id,
+                ),
+            )
+            return cur.fetchone()
+
+    def fetch_latest_pending_edit_session(self, conn, meeting_id: str) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH edit_sessions AS (
+                    SELECT
+                        after_payload ->> 'edit_session_id' AS edit_session_id,
+                        MAX(feedback_event_id) AS latest_feedback_event_id,
+                        BOOL_OR(after_payload ? 'materialized_summary_id') AS is_materialized
+                    FROM feedback_events
+                    WHERE meeting_id = %s
+                      AND event_type = ANY(%s)
+                      AND after_payload ? 'edit_session_id'
+                    GROUP BY after_payload ->> 'edit_session_id'
+                )
+                SELECT
+                    edit_sessions.edit_session_id,
+                    edit_sessions.latest_feedback_event_id
+                FROM edit_sessions
+                WHERE NOT edit_sessions.is_materialized
                 ORDER BY latest_feedback_event_id DESC
                 LIMIT 1
                 """,
                 (
                     meeting_id,
                     list(MATERIALIZABLE_EVENT_TYPES),
-                    latest_user_summary_at,
                 ),
             )
             return cur.fetchone()
@@ -508,13 +553,56 @@ class UserSummaryMaterializeService:
                     "segment_summary_id": None,
                     "start_utterance_index": int(current["start_utterance_index"]),
                     "end_utterance_index": int(following["end_utterance_index"]),
-                    "topic_label": current.get("topic_label") or following.get("topic_label") or "",
+                    "topic_label": self.merge_topic_labels(current, following),
+                    "summary_bullets": self.merge_summary_bullets(current, following),
+                    "status": self.merge_status(current, following),
                 },
                 utterance_lookup,
             )
             next_segments = segments[:index] + [merged_segment] + segments[index + 2 :]
             return normalize_segments(next_segments, utterance_lookup)
         return segments
+
+    def merge_topic_labels(
+        self,
+        current: dict[str, Any],
+        following: dict[str, Any],
+    ) -> str:
+        current_label = str(current.get("topic_label") or "").strip()
+        following_label = str(following.get("topic_label") or "").strip()
+        if not current_label:
+            return following_label
+        if not following_label or following_label.casefold() == current_label.casefold():
+            return current_label
+        return f"{current_label} / {following_label}"
+
+    def merge_summary_bullets(
+        self,
+        current: dict[str, Any],
+        following: dict[str, Any],
+    ) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for bullet in normalize_summary_bullets(current.get("summary_bullets")) + normalize_summary_bullets(
+            following.get("summary_bullets")
+        ):
+            key = bullet.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(bullet)
+        return merged
+
+    def merge_status(
+        self,
+        current: dict[str, Any],
+        following: dict[str, Any],
+    ) -> str:
+        statuses = {
+            str(current.get("status") or "draft").strip(),
+            str(following.get("status") or "draft").strip(),
+        }
+        return "complete" if statuses == {"complete"} else "draft"
 
     def apply_segment_text_edit(
         self,
@@ -525,17 +613,32 @@ class UserSummaryMaterializeService:
     ) -> list[dict[str, Any]]:
         after_payload = event_row.get("after_payload") or {}
         segment_ref = after_payload.get("segment") or {}
+        segment_summary_id = event_row.get("segment_summary_id")
+        start_index: int | None = None
+        end_index: int | None = None
         try:
             start_index = int(segment_ref.get("start_utterance_index"))
             end_index = int(segment_ref.get("end_utterance_index"))
         except (TypeError, ValueError):
-            return segments
+            pass
 
         for segment in segments:
-            if (
-                int(segment["start_utterance_index"]) == start_index
+            matches_range = (
+                start_index is not None
+                and end_index is not None
+                and int(segment["start_utterance_index"]) == start_index
                 and int(segment["end_utterance_index"]) == end_index
-            ):
+            )
+            try:
+                matches_segment_id = (
+                    segment_summary_id is not None
+                    and segment.get("segment_summary_id") is not None
+                    and int(segment["segment_summary_id"]) == int(segment_summary_id)
+                )
+            except (TypeError, ValueError):
+                matches_segment_id = False
+
+            if matches_range or matches_segment_id:
                 if field_name == "topic_label":
                     segment["topic_label"] = str(after_payload.get("topic_label") or "").strip()
                 elif field_name == "summary_bullets":
@@ -545,6 +648,68 @@ class UserSummaryMaterializeService:
                 segment["status"] = "complete"
                 break
         return segments
+
+    def extract_final_segment_snapshot(self, event_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for event_row in reversed(event_rows):
+            after_payload = event_row.get("after_payload") or {}
+            final_segments = after_payload.get("final_segments")
+            if isinstance(final_segments, list) and final_segments:
+                return [row for row in final_segments if isinstance(row, dict)]
+        return []
+
+    def apply_final_segment_snapshot(
+        self,
+        segments: list[dict[str, Any]],
+        snapshot_rows: list[dict[str, Any]],
+        utterance_lookup: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not snapshot_rows:
+            return segments
+
+        existing_by_range = {
+            (
+                int(segment["start_utterance_index"]),
+                int(segment["end_utterance_index"]),
+            ): segment
+            for segment in segments
+        }
+        final_segments: list[dict[str, Any]] = []
+        for display_index, snapshot in enumerate(snapshot_rows, start=1):
+            try:
+                start_index = int(snapshot.get("start_utterance_index"))
+                end_index = int(snapshot.get("end_utterance_index"))
+                start_row = utterance_lookup[start_index]
+                end_row = utterance_lookup[end_index]
+            except (KeyError, TypeError, ValueError):
+                return segments
+
+            if end_index < start_index:
+                return segments
+
+            existing = existing_by_range.get((start_index, end_index), {})
+            final_segments.append(
+                {
+                    **existing,
+                    "segment_index": display_index,
+                    "start_utterance_index": start_index,
+                    "end_utterance_index": end_index,
+                    "t_start": float(start_row["start_time_sec"]),
+                    "t_end": float(end_row["end_time_sec"]),
+                    "topic_label": str(
+                        snapshot.get("topic_label")
+                        or existing.get("topic_label")
+                        or ""
+                    ).strip(),
+                    "summary_bullets": normalize_summary_bullets(
+                        snapshot.get("summary_bullets")
+                        if "summary_bullets" in snapshot
+                        else existing.get("summary_bullets")
+                    ),
+                    "status": str(snapshot.get("status") or existing.get("status") or "complete"),
+                }
+            )
+
+        return normalize_segments(final_segments, utterance_lookup)
 
     def materialize_user_summary(
         self,
@@ -556,6 +721,8 @@ class UserSummaryMaterializeService:
         event_rows = self.fetch_edit_events(conn, meeting_id, edit_session_id)
         if not event_rows:
             return
+
+        latest_feedback_event_id = max(int(row["feedback_event_id"]) for row in event_rows)
 
         first_after_payload = event_rows[0].get("after_payload") or {}
         base_summary_type = str(first_after_payload.get("base_summary_type") or "").strip()
@@ -618,6 +785,13 @@ class UserSummaryMaterializeService:
                     field_name="summary_bullets",
                 )
 
+        final_snapshot_rows = self.extract_final_segment_snapshot(event_rows)
+        working_segments = self.apply_final_segment_snapshot(
+            working_segments,
+            final_snapshot_rows,
+            utterance_lookup,
+        )
+
         final_segments: list[dict[str, Any]] = []
         for segment in normalize_segments(working_segments, utterance_lookup):
             complete_segment = {
@@ -626,21 +800,30 @@ class UserSummaryMaterializeService:
                 "summary_bullets": normalize_summary_bullets(segment.get("summary_bullets")),
                 "status": str(segment.get("status") or "draft"),
             }
-            if not complete_segment["topic_label"]:
-                complete_segment["topic_label"] = build_default_topic_label(
-                    complete_segment,
-                    utterance_lookup,
-                )
-            if not complete_segment["summary_bullets"]:
-                utterances = utterance_rows_for_segment(complete_segment, utterance_lookup)
-                complete_segment["summary_bullets"] = build_emulated_summary_bullets(
-                    complete_segment["topic_label"],
-                    utterances,
-                )
-                complete_segment["status"] = "draft"
             final_segments.append(complete_segment)
 
-        next_version = self.fetch_next_user_summary_version(conn, meeting_id)
+        next_version = 1
+        segment_log = [
+            {
+                "segment_index": int(segment["segment_index"]),
+                "start_utterance_index": int(segment["start_utterance_index"]),
+                "end_utterance_index": int(segment["end_utterance_index"]),
+                "topic_label": segment["topic_label"],
+                "summary_bullets": segment["summary_bullets"],
+            }
+            for segment in final_segments
+        ]
+        self.logger.info(
+            "Prepared user-edited summary content | meeting_id=%s | edit_session_id=%s | version=%s | source_summary_id=%s | source_summary_type=%s | final_snapshot_count=%s | segments=%s",
+            meeting_id,
+            edit_session_id,
+            next_version,
+            base_summary_id,
+            base_summary_type,
+            len(final_snapshot_rows),
+            json.dumps(segment_log, sort_keys=True),
+        )
+
         summary_output_path = user_summary_output_path(self.config.output_root, meeting_id, next_version)
         summary_object_key = f"{self.config.object_prefix.strip('/')}/{meeting_id}/v{next_version}/summary.json"
 
@@ -762,11 +945,45 @@ class UserSummaryMaterializeService:
                         segment["status"],
                         "user_editor",
                         f"session:{edit_session_id[:8]}",
-                        base_summary_type,
+                        edit_session_id,
                         created_at,
                     ),
                 )
+
+            cur.execute(
+                """
+                UPDATE feedback_events
+                SET after_payload = after_payload || jsonb_build_object(
+                    'materialized_summary_id', %s::bigint,
+                    'materialized_user_summary_version', %s::integer,
+                    'materialized_at', %s::text,
+                    'materialized_edit_session_id', %s::text
+                )
+                WHERE meeting_id = %s
+                  AND event_type = ANY(%s)
+                  AND after_payload ? 'edit_session_id'
+                  AND feedback_event_id <= %s
+                """,
+                (
+                    summary_id,
+                    next_version,
+                    created_at.isoformat(),
+                    edit_session_id,
+                    meeting_id,
+                    list(MATERIALIZABLE_EVENT_TYPES),
+                    latest_feedback_event_id,
+                ),
+            )
         conn.commit()
+        self.logger.info(
+            "Committed user-edited summary to DB | meeting_id=%s | edit_session_id=%s | summary_id=%s | version=%s | segment_count=%s | marked_feedback_through=%s",
+            meeting_id,
+            edit_session_id,
+            summary_id,
+            next_version,
+            len(final_segments),
+            latest_feedback_event_id,
+        )
 
 
 def validate_config(config: UserSummaryMaterializeConfig) -> None:

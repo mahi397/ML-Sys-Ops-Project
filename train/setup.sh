@@ -15,7 +15,7 @@ BLOCK_ROOT="${BLOCK_ROOT:-/mnt/block}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-chi_tacc}"
 OBJSTORE_BUCKET="${OBJSTORE_BUCKET:-objstore-proj07}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
-FEEDBACK_VERSION="${FEEDBACK_VERSION:-v1}"
+FEEDBACK_DATASET_VERSION="${FEEDBACK_DATASET_VERSION:-v3}"
 
 echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  NeuralOps Training — Setup Script${NC}"
@@ -41,7 +41,9 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 echo -e "${GREEN}Docker Compose OK: $(docker compose version)${NC}"
 
-# ── 2. Install rclone if not present ────────────────────────────
+# ── 2. rclone ────────────────────────────────────────────────────
+# GPU node is on CHI@UC; object storage lives on CHI@TACC (different endpoint).
+# Always write the chi_tacc remote from env credentials to prevent stale configs.
 echo -e "\n${YELLOW}[2/8] rclone...${NC}"
 if ! command -v rclone &>/dev/null; then
     echo "rclone not found — installing..."
@@ -51,27 +53,30 @@ else
     echo "rclone already installed: $(rclone --version | head -1)"
 fi
 
-# Check rclone config exists
-if [ ! -f "${HOME}/.config/rclone/rclone.conf" ]; then
-    echo -e "${RED}rclone config not found at ~/.config/rclone/rclone.conf${NC}"
-    echo -e "${YELLOW}Configure the chi_tacc remote before continuing:${NC}"
-    echo "  rclone config"
-    echo "  name:     chi_tacc"
-    echo "  type:     s3"
-    echo "  provider: Ceph"
-    echo "  endpoint: https://chi.tacc.chameleoncloud.org:7480"
-    echo "  access_key_id + secret_access_key from CHI@TACC openrc"
+if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    echo -e "${RED}AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set — needed for CHI@TACC${NC}"
     exit 1
 fi
 
-# Verify remote access
+mkdir -p "${HOME}/.config/rclone"
+echo "Writing rclone remote '${RCLONE_REMOTE}' → chi.tacc.chameleoncloud.org:7480 ..."
+rclone config create "${RCLONE_REMOTE}" s3 \
+    provider=Ceph \
+    endpoint=https://chi.tacc.chameleoncloud.org:7480 \
+    access_key_id="${AWS_ACCESS_KEY_ID}" \
+    secret_access_key="${AWS_SECRET_ACCESS_KEY}" \
+    >/dev/null
+echo -e "${GREEN}rclone remote '${RCLONE_REMOTE}' written (chi.tacc endpoint)${NC}"
+
 echo "Verifying ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ access..."
 rclone lsd ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ >/dev/null 2>&1 || {
-    echo -e "${RED}Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/${NC}"
-    echo "Check rclone config and credentials"
+    echo -e "${RED}Cannot access ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/ — check AWS credentials in .env${NC}"
     exit 1
 }
 echo -e "${GREEN}rclone remote OK${NC}"
+
+# Ray checkpoint bucket (ray-checkpoints) is created by minio-create-buckets
+# container at compose-up time — no rclone step needed here.
 
 # ── 3. NVIDIA Container Toolkit ──────────────────────────────────
 echo -e "\n${YELLOW}[3/8] NVIDIA Container Toolkit...${NC}"
@@ -100,9 +105,8 @@ echo -e "\n${YELLOW}[4/8] Creating block storage layout...${NC}"
 sudo mkdir -p \
     ${BLOCK_ROOT}/postgres_data \
     ${BLOCK_ROOT}/minio_data \
-    ${BLOCK_ROOT}/ray-checkpoints \
     ${BLOCK_ROOT}/roberta_stage1/${DATASET_VERSION} \
-    ${BLOCK_ROOT}/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}
+    ${BLOCK_ROOT}/roberta_stage1_feedback/${FEEDBACK_DATASET_VERSION}
 sudo chown -R ${USER}:${USER} ${BLOCK_ROOT}
 echo -e "${GREEN}Block storage ready at ${BLOCK_ROOT}${NC}"
 
@@ -110,7 +114,7 @@ echo -e "${GREEN}Block storage ready at ${BLOCK_ROOT}${NC}"
 echo -e "\n${YELLOW}[5/8] Staging training data from object storage...${NC}"
 
 DATASET_LOCAL="${BLOCK_ROOT}/roberta_stage1/${DATASET_VERSION}"
-FEEDBACK_LOCAL="${BLOCK_ROOT}/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
+FEEDBACK_LOCAL="${BLOCK_ROOT}/roberta_stage1_feedback/${FEEDBACK_DATASET_VERSION}"
 
 if ls ${DATASET_LOCAL}/*.jsonl >/dev/null 2>&1; then
     echo "Training data already staged at ${DATASET_LOCAL}"
@@ -123,11 +127,11 @@ else
 fi
 
 if ls ${FEEDBACK_LOCAL}/*.jsonl >/dev/null 2>&1; then
-    echo "Feedback pool already staged at ${FEEDBACK_LOCAL}"
+    echo "Feedback data already staged at ${FEEDBACK_LOCAL}"
 else
-    echo "Downloading roberta_stage1_feedback_pool/${FEEDBACK_VERSION}..."
+    echo "Downloading roberta_stage1/${FEEDBACK_DATASET_VERSION} for feedback..."
     rclone copy \
-        ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/ \
+        ${RCLONE_REMOTE}:${OBJSTORE_BUCKET}/datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/ \
         ${FEEDBACK_LOCAL}/ \
         --progress
 fi
@@ -173,13 +177,17 @@ INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
 SELECT 'roberta_stage1', 'stage1', 'ami',
        'datasets/roberta_stage1/${DATASET_VERSION}/'
 WHERE NOT EXISTS (
-    SELECT 1 FROM dataset_versions WHERE dataset_name = 'roberta_stage1'
+    SELECT 1 FROM dataset_versions
+    WHERE dataset_name = 'roberta_stage1'
+    AND object_key = 'datasets/roberta_stage1/${DATASET_VERSION}/'
 );
 INSERT INTO dataset_versions (dataset_name, stage, source_type, object_key)
-SELECT 'roberta_stage1_feedback_pool', 'stage1', 'production_feedback',
-       'datasets/roberta_stage1_feedback_pool/${FEEDBACK_VERSION}/'
+SELECT 'roberta_stage1', 'stage1', 'ami',
+       'datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/'
 WHERE NOT EXISTS (
-    SELECT 1 FROM dataset_versions WHERE dataset_name = 'roberta_stage1_feedback_pool'
+    SELECT 1 FROM dataset_versions
+    WHERE dataset_name = 'roberta_stage1'
+    AND object_key = 'datasets/roberta_stage1/${FEEDBACK_DATASET_VERSION}/'
 );
 "
 echo -e "${GREEN}dataset_versions seeded${NC}"
@@ -199,15 +207,25 @@ for i in {1..30}; do
     sleep 5
 done
 
-# Restore MLflow model registry
-echo "Restoring MLflow model registry..."
+# Restore MLflow model registry (skip if already restored)
+echo "Checking if MLflow registry already restored..."
 MLFLOW_CONTAINER=$(docker ps --format '{{.Names}}' | grep mlflow | grep -v minio | head -1)
 
-if [ -f "${HOME}/restore_mlflow.py" ]; then
-    docker cp ${HOME}/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py
-    docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py
+_mlflow_already_restored() {
+    # Returns 0 (true) if jitsi-topic-segmenter exists AND has a 'production' alias
+    curl -sf "http://localhost:5000/api/2.0/mlflow/registered-models/alias?name=jitsi-topic-segmenter&alias=production" \
+        >/dev/null 2>&1
+}
 
-    docker exec ${MLFLOW_CONTAINER} python -c "
+if _mlflow_already_restored; then
+    echo -e "${GREEN}MLflow registry already has jitsi-topic-segmenter@production — skipping restore${NC}"
+else
+    echo "Restoring MLflow model registry..."
+    if [ -f "${HOME}/restore_mlflow.py" ]; then
+        docker cp ${HOME}/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py
+        docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py
+
+        docker exec ${MLFLOW_CONTAINER} python -c "
 import mlflow
 mlflow.set_tracking_uri('http://localhost:5000')
 client = mlflow.tracking.MlflowClient()
@@ -239,11 +257,12 @@ except Exception as e:
 
 print('Registry restore complete')
 " && echo -e "${GREEN}Model registry restored — production + fallback aliases set${NC}"
-else
-    echo -e "${YELLOW}restore_mlflow.py not found at ${HOME}/${NC}"
-    echo "Copy it there and run manually:"
-    echo "  docker cp ~/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py"
-    echo "  docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py"
+    else
+        echo -e "${YELLOW}restore_mlflow.py not found at ${HOME}/${NC}"
+        echo "Copy it there and run manually:"
+        echo "  docker cp ~/restore_mlflow.py ${MLFLOW_CONTAINER}:/restore_mlflow.py"
+        echo "  docker exec ${MLFLOW_CONTAINER} python /restore_mlflow.py"
+    fi
 fi
 
 # Start retrain-watcher last
@@ -269,8 +288,8 @@ echo "  Registered models:"
 echo "    production -> Optuna best (test_pk=0.213)"
 echo "    fallback   -> roberta-base full finetune (test_pk=0.228)"
 echo ""
-echo "  Dataset in use: roberta_stage1/${DATASET_VERSION} (AMI + synthetic)"
-echo "  Feedback pool:  roberta_stage1_feedback_pool/${FEEDBACK_VERSION}"
+echo "  Dataset in use: roberta_stage1/${DATASET_VERSION} (primary training)"
+echo "  Feedback data:  roberta_stage1/${FEEDBACK_DATASET_VERSION} (staged to roberta_stage1_feedback/)"
 echo ""
 echo "  Note: When Aneesh's pipeline produces a new dataset_versions row,"
 echo "  retrain.py will automatically pick up the latest version."
