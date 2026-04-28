@@ -856,8 +856,8 @@ echo ""
 if is_truthy "${START_MLFLOW_SERVICES}"; then
     echo "  Registered models:"
     echo "    @production -> distilroberta full finetune (test_pk=0.286)"
-    echo "    @fallback   -> Optuna best (test_pk=0.213)"
-    echo "    @backup     -> roberta-base frozen backbone (test_pk=0.253, peak_vram=1.28GB)"
+    echo "    @fallback   -> roberta-base frozen backbone (test_pk=0.253)"
+    echo "    @backup     -> Optuna best (test_pk=0.213)"
     echo ""
 fi
 if is_truthy "${START_DATA_SERVICES}"; then
