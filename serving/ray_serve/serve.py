@@ -318,7 +318,7 @@ class PostgresRecapStore:
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BOUNDARY_THRESHOLD    = float(os.getenv("BOUNDARY_THRESHOLD", "0.5"))
+BOUNDARY_THRESHOLD    = float(os.getenv("BOUNDARY_THRESHOLD", "0.35"))
 MODEL_PATH            = os.getenv("MODEL_PATH", "roberta-base")
 LLM_MODEL_PATH        = os.getenv("LLM_MODEL_PATH", "")
 MAX_SEGMENT_UTTERANCES = int(os.getenv("MAX_SEGMENT_UTTERANCES", "200"))
@@ -478,6 +478,42 @@ class MetricsDeployment:
         )
         self._db_poll_thread.start()
 
+        # Retraining metrics — polled from retrain_log + audit_log every 60s
+        self.retrain_triggered_total = Gauge(
+            'jitsi_retrain_triggered_total', 'Total retrain trigger events in audit_log',
+            registry=self.registry
+        )
+        self.retrain_completed_total = Gauge(
+            'jitsi_retrain_completed_total', 'Total retrain completed runs in audit_log',
+            registry=self.registry
+        )
+        self.retrain_passed_total = Gauge(
+            'jitsi_retrain_passed_total', 'Retrain runs that passed quality gates',
+            registry=self.registry
+        )
+        self.retrain_failed_total = Gauge(
+            'jitsi_retrain_failed_total', 'Retrain runs that failed quality gates',
+            registry=self.registry
+        )
+        self.feedback_pending = Gauge(
+            'jitsi_feedback_pending', 'Feedback events above last retrain watermark',
+            registry=self.registry
+        )
+        self.retrain_last_f1 = Gauge(
+            'jitsi_retrain_last_f1', 'F1 score of last completed retrain',
+            registry=self.registry
+        )
+        self.retrain_last_pk = Gauge(
+            'jitsi_retrain_last_pk', 'Pk score of last completed retrain',
+            registry=self.registry
+        )
+        self._retrain_poll_thread = threading.Thread(
+            target=self._poll_retrain_db, daemon=True
+        )
+        self._retrain_poll_thread.start()
+
+
+
     def _poll_feedback_db(self):
         import psycopg2
         db_url = os.getenv("DATABASE_URL", "")
@@ -493,6 +529,51 @@ class MetricsDeployment:
                         self.feedback_total_gauge.set(total)
             except Exception as e:
                 print(f"[metrics] DB poll error: {e}")
+            time.sleep(poll_interval)
+
+    def _poll_retrain_db(self):
+        import psycopg2
+        db_url = os.getenv("DATABASE_URL", "")
+        if not db_url:
+            return
+        poll_interval = 60
+        while True:
+            try:
+                with psycopg2.connect(db_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM audit_log WHERE event_type = 'retrain_triggered'")
+                        self.retrain_triggered_total.set(cur.fetchone()[0])
+
+                        cur.execute("SELECT COUNT(*) FROM audit_log WHERE event_type = 'retrain_completed'")
+                        self.retrain_completed_total.set(cur.fetchone()[0])
+
+                        cur.execute("SELECT COUNT(*) FROM retrain_log WHERE passed_gates = TRUE")
+                        self.retrain_passed_total.set(cur.fetchone()[0])
+
+                        cur.execute("SELECT COUNT(*) FROM retrain_log WHERE passed_gates = FALSE")
+                        self.retrain_failed_total.set(cur.fetchone()[0])
+
+                        cur.execute("""
+                            SELECT COUNT(*) FROM feedback_events
+                            WHERE event_type IN ('merge_segments', 'split_segment')
+                            AND feedback_event_id > (
+                                SELECT COALESCE(MAX(high_watermark_event_id), 0) FROM retrain_log
+                            )
+                        """)
+                        self.feedback_pending.set(cur.fetchone()[0])
+
+                        cur.execute("""
+                            SELECT (details->>'test_f1')::float, (details->>'test_pk')::float
+                            FROM audit_log WHERE event_type = 'retrain_completed'
+                            ORDER BY created_at DESC LIMIT 1
+                        """)
+                        row = cur.fetchone()
+                        if row and row[0] is not None:
+                            self.retrain_last_f1.set(row[0])
+                        if row and row[1] is not None:
+                            self.retrain_last_pk.set(row[1])
+            except Exception as e:
+                print(f"[metrics] Retrain DB poll error: {e}")
             time.sleep(poll_interval)
 
     def _update_system(self):
@@ -1611,22 +1692,21 @@ class RollbackDeployment:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RETRAIN WEBHOOK
-# Receives Alertmanager POST (action=retrain) when feedback threshold is crossed.
-# Calls the training pipeline trigger endpoint (RETRAIN_TRIGGER_URL env var).
-# Falls back to logging the event if the training pipeline is unreachable.
+# Receives Alertmanager POST (action=retrain) when RetrainingThresholdReached fires
+# Logs the alert event with correct pending feedback count (matching retrain_watcher.py
+# watermark logic). Actual retraining is handled by retrain_watcher.py polling loop
 # ═══════════════════════════════════════════════════════════════════════════════
 
-#RETRAIN_TRIGGER_URL = os.getenv("RETRAIN_TRIGGER_URL", "")
 
-#@serve.deployment(name="retrain", num_replicas=1)
-#class RetrainDeployment:
-#    def __init__(self):
+@serve.deployment(name="retrain", num_replicas=1)
+class RetrainDeployment:
+    def __init__(self):
         self._lock = threading.Lock()
         self._last_trigger_ts = 0.0
-        self._cooldown_s = 3600  # trigger at most once per hour
-        print(f"[retrain] Ready at /retrain  (trigger_url={RETRAIN_TRIGGER_URL or 'not set'})")
+        self._cooldown_s = 3600  # log at most once per hour
+        print("[retrain] Ready at /retrain")
 
-#    async def __call__(self, request: Request) -> JSONResponse:
+    async def __call__(self, request: Request) -> JSONResponse:
         if request.method != "POST":
             return JSONResponse({"error": "POST only"}, status_code=405)
 
@@ -1646,62 +1726,34 @@ class RollbackDeployment:
             ]
         except Exception:
             alert_names = ["unknown"]
-        print(f"[retrain] Triggered by: {alert_names}")
+        print(f"[retrain] Alert received: {alert_names}")
 
-        # Get current feedback count from DB for context
-        feedback_count = 0
-        if DATABASE_URL:
+        # Query pending feedback count using same watermark logic as retrain_watcher.py
+        pending_count = 0
+        db_url = os.getenv("DATABASE_URL", "")
+        if db_url:
             try:
                 import psycopg2
-                conn = psycopg2.connect(DATABASE_URL)
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM feedback_events WHERE used_in_retrain_version IS NULL")
-                feedback_count = cur.fetchone()[0]
-                conn.close()
+                with psycopg2.connect(db_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT COUNT(*) FROM feedback_events
+                            WHERE event_type IN ('merge_segments', 'split_segment')
+                            AND feedback_event_id > (
+                                SELECT COALESCE(MAX(high_watermark_event_id), 0) FROM retrain_log
+                            )
+                        """)
+                        pending_count = cur.fetchone()[0]
             except Exception as e:
-                print(f"[retrain] Could not query feedback count: {e}")
+                print(f"[retrain] Could not query pending feedback: {e}")
 
-        # Call training pipeline if URL is configured
-        if RETRAIN_TRIGGER_URL:
-            try:
-                import urllib.request
-                payload = json.dumps({
-                    "trigger": "feedback_threshold",
-                    "alert": alert_names,
-                    "pending_feedback_count": feedback_count,
-                    "feedback_endpoint": "/api/feedback/all",
-                }).encode()
-                req = urllib.request.Request(
-                    RETRAIN_TRIGGER_URL,
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    status = resp.status
-                print(f"[retrain] Training pipeline triggered: HTTP {status}")
-                return JSONResponse({
-                    "status": "triggered",
-                    "training_pipeline_http": status,
-                    "pending_feedback": feedback_count,
-                    "triggered_by": alert_names,
-                })
-            except Exception as e:
-                print(f"[retrain] Training pipeline call failed: {e}")
-                return JSONResponse({
-                    "status": "logged_only",
-                    "reason": str(e),
-                    "pending_feedback": feedback_count,
-                    "note": "Feedback data available at /api/feedback/all for manual retrain",
-                })
-        else:
-            print(f"[retrain] RETRAIN_TRIGGER_URL not set — logged only. pending_feedback={feedback_count}")
-            return JSONResponse({
-                "status": "logged_only",
-                "reason": "RETRAIN_TRIGGER_URL not configured",
-                "pending_feedback": feedback_count,
-                "note": "Feedback data available at /api/feedback/all for manual retrain",
-            })
+        print(f"[retrain] pending_feedback={pending_count} — retrain_watcher handles actual trigger")
+        return JSONResponse({
+            "status": "logged",
+            "pending_feedback": pending_count,
+            "triggered_by": alert_names,
+            "note": "retrain_watcher.py polls DB every 300s and triggers retraining",
+        })
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BIND & RUN
@@ -1720,7 +1772,7 @@ recap      = RecapPipelineDeployment.bind()
 recap_api  = RecapAPIDeployment.bind()
 recap_ui   = RecapUIDeployment.bind()
 rollback   = RollbackDeployment.bind()
-#retrain    = RetrainDeployment.bind()
+retrain    = RetrainDeployment.bind()
 
 #serve.start(http_options={"host": "0.0.0.0", "port": 8000})
 # HTML recap UI will run in the browser and make API calls to your server (e.g. fetch('http://192.5.87.115:8000/recap'))
@@ -1750,7 +1802,7 @@ serve.run(recap,      name="recap",      route_prefix="/recap")
 serve.run(recap_api,  name="recap_api",  route_prefix="/api")
 serve.run(recap_ui,   name="recap_ui",   route_prefix="/ui")
 serve.run(rollback,   name="rollback",   route_prefix="/rollback")
-#serve.run(retrain,    name="retrain",    route_prefix="/retrain")
+serve.run(retrain,    name="retrain",    route_prefix="/retrain")
 
 print("=" * 60)
 print("Ray Serve running at http://0.0.0.0:8000")

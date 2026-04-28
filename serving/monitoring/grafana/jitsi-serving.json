@@ -229,8 +229,8 @@
           "legendFormat": "Summarize"
         },
         {
-          "expr": "rate(jitsi_requests_total{endpoint='summarize', status='success'}[1m]) * 60",
-          "legendFormat": "Summaries / min"
+          "expr": "rate(jitsi_requests_total{endpoint='recap', status='success'}[1m])",
+          "legendFormat": "Recap"
         }
       ],
       "fieldConfig": {
@@ -316,51 +316,51 @@
     },
 
     {
-      "title": "── Pipeline Output ──",
+      "title": "── Recap Pipeline ──",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
       "collapsed": false
     },
     {
-      "title": "Boundaries Detected / Hour",
+      "title": "Recap Duration (seconds)",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "increase(jitsi_segments_detected_total[1h])",
-          "legendFormat": "Boundaries / hr"
+          "expr": "histogram_quantile(0.50, rate(jitsi_recap_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(jitsi_recap_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "fillOpacity": 40 },
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "orange", "value": 50 }
+              { "color": "red", "value": 300 }
             ]
           }
         }
       }
     },
     {
-      "title": "Summaries Generated / Min",
+      "title": "Segments per Meeting",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "rate(jitsi_requests_total{endpoint='summarize', status='success'}[1m]) * 60",
-          "legendFormat": "Summaries / min"
+          "expr": "rate(jitsi_recap_segments_per_meeting_sum[5m]) / rate(jitsi_recap_segments_per_meeting_count[5m])",
+          "legendFormat": "Avg Segments"
         }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "drawStyle": "line", "fillOpacity": 20 }
-        }
-      }
+      ]
     },
 
     {
@@ -448,7 +448,7 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum(increase(jitsi_feedback_corrections_total[1h])) / (increase(jitsi_segments_detected_total[1h]) > 0) * 100",
+          "expr": "sum(increase(jitsi_feedback_corrections_total[1h])) / (sum(increase(jitsi_recap_segments_per_meeting_count[1h])) > 0) * 100",
           "legendFormat": "Correction %"
         }
       ],
@@ -468,18 +468,23 @@
       }
     },
     {
-      "title": "Feedback Events (total in DB)",
-      "type": "stat",
+      "title": "Feedback Events Over Time",
+      "type": "timeseries",
       "gridPos": { "h": 7, "w": 6, "x": 18, "y": 47 },
       "datasource": "Prometheus",
       "targets": [
         {
           "expr": "jitsi_feedback_events_total",
-          "legendFormat": "Total Events"
+          "legendFormat": "Total in DB"
+        },
+        {
+          "expr": "jitsi_feedback_pending",
+          "legendFormat": "Pending Retrain"
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
           "thresholds": {
             "steps": [
               { "color": "green", "value": null },
@@ -514,17 +519,243 @@
             {
               "type": "value",
               "options": {
-                "1": { "text": "LOADED ✓", "color": "green" }
+                "1": { "text": "LOADED", "color": "green" }
               }
             },
             {
               "type": "value",
               "options": {
-                "0": { "text": "NOT LOADED ✗", "color": "red" }
+                "0": { "text": "NOT LOADED", "color": "red" }
               }
             }
           ]
         }
+      }
+      },
+
+    {
+      "title": "── Retraining ──",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+      "collapsed": false
+    },
+    {
+      "title": "Retrain Runs",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 61 },
+      "datasource": "Prometheus",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        { "expr": "jitsi_retrain_completed_total", "legendFormat": "Total" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Passed Gates",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 61 },
+      "datasource": "Prometheus",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        { "expr": "jitsi_retrain_passed_total", "legendFormat": "Passed" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Failed Gates",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 61 },
+      "datasource": "Prometheus",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        { "expr": "jitsi_retrain_failed_total", "legendFormat": "Failed" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Feedback Used in Retraining",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 61 },
+      "datasource": "Prometheus",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "jitsi_feedback_events_total - jitsi_feedback_pending",
+          "legendFormat": "Used"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Feedback Pending Retrain",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 61 },
+      "datasource": "Prometheus",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        { "expr": "jitsi_feedback_pending", "legendFormat": "Pending" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 20 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Last Retrain Quality",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 61 },
+      "datasource": "Prometheus",
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        { "expr": "jitsi_retrain_last_f1", "legendFormat": "F1" },
+        { "expr": "jitsi_retrain_last_pk", "legendFormat": "Pk" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "mode": "absolute",
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.15 },
+              { "color": "green", "value": 0.20 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Pk" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "orange", "value": 0.25 },
+                    { "color": "red", "value": 0.40 }
+                  ]
+                }
+              },
+              { "id": "displayName", "value": "Pk ↓" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Retrain Activity Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 65 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "jitsi_retrain_triggered_total", "legendFormat": "Triggered" },
+        { "expr": "jitsi_retrain_completed_total", "legendFormat": "Completed" },
+        { "expr": "jitsi_retrain_passed_total", "legendFormat": "Passed Gates" },
+        { "expr": "jitsi_retrain_failed_total", "legendFormat": "Failed Gates" },
+        { "expr": "jitsi_feedback_pending", "legendFormat": "Feedback Pending" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 8,
+            "lineWidth": 2
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Feedback Pending" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failed Gates" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Passed Gates" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }
+            ]
+          }
+        ]
       }
     }
   ],
@@ -535,5 +766,5 @@
   "time": { "from": "now-30m", "to": "now" },
   "title": "Jitsi ML Serving — Ray Serve + RTX 6000",
   "uid": "jitsi-ray-serve-main",
-  "version": 2
+  "version": 3
 }
